@@ -1,0 +1,9 @@
+// expect: run 15
+// expect: diagnostics 0
+// `v[i]` is `element(v, i)`; both read an immutable vector's element as
+// `<object>`, and `size` counts its elements.
+
+define function main() => <integer>
+  let v = #[10, 20, 2];
+  size(v) + as(<integer>, v[0]) + as(<integer>, element(v, 2))
+end;

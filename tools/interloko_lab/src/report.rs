@@ -1807,6 +1807,9 @@ fn method_origin_label(origin: MethodOrigin) -> String {
         MethodOrigin::Numeric { operator } => {
             format!("built-in numeric method for `{}`", operator.name())
         }
+        MethodOrigin::Collection { function } => {
+            format!("kernel collection method for `{}`", function.name())
+        }
     }
 }
 

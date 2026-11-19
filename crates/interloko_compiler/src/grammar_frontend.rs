@@ -3271,12 +3271,17 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "postfix-expression",
-            "primary-expression (`.` member-name)*",
+            "primary-expression (`.` member-name | index-access)*",
             "syntax.rs:Parser::parse_postfix",
         ),
         (
             "member-name",
             "name",
+            "base_loko_primary::BaseLokoCstBuilder::build_postfix",
+        ),
+        (
+            "index-access",
+            "`[` expression `]`",
             "base_loko_primary::BaseLokoCstBuilder::build_postfix",
         ),
         (
@@ -3922,7 +3927,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::CallName => Some("call-name"),
         CstKind::CallExpr | CstKind::ArgList => Some("argument-list"),
         CstKind::MemberName => Some("member-name"),
-        CstKind::SlotExpr => Some("postfix-expression"),
+        CstKind::SlotExpr | CstKind::IndexExpr => Some("postfix-expression"),
         CstKind::SlotAssignExpr => Some("assignment-expression"),
         CstKind::KeywordArg => Some("keyword-argument"),
         CstKind::ArgumentKeyword => Some("argument-keyword"),
@@ -4390,7 +4395,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 71);
+        assert_eq!(grammar.effective_rules.len(), 72);
 
         assert!(
             !records

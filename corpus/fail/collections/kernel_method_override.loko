@@ -1,0 +1,13 @@
+// expect: diagnostic code sem.collection-method-overrides-kernel
+// expect: diagnostics 1
+// expect: diagnostic contains already has the kernel's method for <vector>
+// The kernel's `size` method for `<vector>` is fixed: typed code runs it
+// inline, so a program's method for `<vector>` would be ignored there.
+
+define method size (v :: <vector>) => <integer>
+  0
+end;
+
+define function main() => <integer>
+  size(#[1])
+end;

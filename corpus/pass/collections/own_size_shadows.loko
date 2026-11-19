@@ -1,0 +1,12 @@
+// expect: run 9
+// expect: diagnostics 0
+// A program's own `size` shadows the built-in collection function, as any
+// definition shadows a built-in.
+
+define function size(n :: <integer>) => <integer>
+  n * n
+end;
+
+define function main() => <integer>
+  size(3)
+end;

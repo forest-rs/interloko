@@ -12,6 +12,9 @@ use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
 use crate::syntax::{self, Span};
 
+mod collection;
+pub use collection::{BUILTIN_METHODS, BuiltinMethod, CollectionFunction};
+
 use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
 use interloko_model::sealing::Sealing;
 pub use interloko_model::type_object::TypeObject;
@@ -331,6 +334,7 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         | Intrinsic::SubclassTypeClass
         | Intrinsic::TypeName => 1,
         Intrinsic::VectorRef | Intrinsic::Concatenate | Intrinsic::InstanceOfType => 2,
+        Intrinsic::VectorElementOr => 3,
         Intrinsic::FloatToString | Intrinsic::IntegerToString => 1,
     }
 }
@@ -358,8 +362,11 @@ fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
             "<generic-function>"
         }
         (Intrinsic::MethodGenericFunction | Intrinsic::MethodSpecializers, 0) => "<method>",
-        (Intrinsic::VectorSize | Intrinsic::VectorRef, 0) => "<vector>",
-        (Intrinsic::VectorRef, 1) | (Intrinsic::IntegerToString, 0) => "<integer>",
+        (Intrinsic::VectorSize | Intrinsic::VectorRef | Intrinsic::VectorElementOr, 0) => {
+            "<vector>"
+        }
+        (Intrinsic::VectorRef | Intrinsic::VectorElementOr, 1)
+        | (Intrinsic::IntegerToString, 0) => "<integer>",
         (Intrinsic::FloatToString, 0) => "<float>",
         (Intrinsic::Concatenate, _) => "<string>",
         (Intrinsic::InstanceOfType, 1) | (Intrinsic::TypeName, 0) => "<type>",
@@ -635,6 +642,14 @@ pub enum GenericFunctionOrigin {
         /// Operator the generic implements.
         operator: promotion::NumericOperator,
     },
+    /// Built-in open collection generic, `size`, `element` or
+    /// `element-setter`, with the kernel's methods from
+    /// [`BUILTIN_METHODS`]. It is sealed only over the kernel classes those
+    /// methods specialize on.
+    Collection {
+        /// The generic.
+        function: CollectionFunction,
+    },
 }
 
 impl GenericFunctionOrigin {
@@ -654,6 +669,20 @@ impl GenericFunctionOrigin {
                 };
                 !specializers.iter().all(|specializer| {
                     specializer.is_some_and(|class| module.is_same_or_subclass(class, real))
+                })
+            }
+            Self::Collection { function } => {
+                // A method on a kernel class the generic has a method for,
+                // or on a subclass, would override the kernel's.
+                let collection = specializers
+                    .get(function.collection_index())
+                    .copied()
+                    .flatten();
+                !collection::builtin_methods(function).any(|method| {
+                    module
+                        .builtin_value_class(method.collection)
+                        .zip(collection)
+                        .is_some_and(|(kernel, class)| module.is_same_or_subclass(class, kernel))
                 })
             }
         }
@@ -1449,6 +1478,40 @@ impl TypeNames for Module {
             None => write!(out, ".s{}", slot.0),
         }
     }
+}
+
+/// Reports each method a program adds to a built-in collection generic that
+/// would override a kernel method ([`GenericFunctionOrigin::admits_method`]).
+fn check_collection_method_overrides(module: &mut Module) {
+    let mut diagnostics = Vec::new();
+    for method in &module.methods {
+        let Some(generic) = module.generics.get(method.generic.0 as usize) else {
+            continue;
+        };
+        let GenericFunctionOrigin::Collection { function } = generic.origin else {
+            continue;
+        };
+        if method.origin == (MethodOrigin::Collection { function })
+            || generic.origin.admits_method(module, &method.specializers)
+        {
+            continue;
+        }
+        let mut class = String::new();
+        if let Some(specializer) = method
+            .specializers
+            .get(function.collection_index())
+            .copied()
+            .flatten()
+        {
+            let _ = module.write_class(&mut class, specializer);
+        }
+        diagnostics.push(
+            Diagnostic::error(method.span, DiagnosticCode::CollectionMethodOverridesKernel)
+                .with_arg(DiagnosticArg::text("function", function.name()))
+                .with_arg(DiagnosticArg::text("class", class)),
+        );
+    }
+    module.diagnostics.extend(diagnostics);
 }
 
 /// Numbers the check sites of every tree root in `module`; see [`SiteId`].
@@ -2511,6 +2574,13 @@ pub enum MethodOrigin {
         /// Operator the method implements.
         operator: promotion::NumericOperator,
     },
+    /// Kernel method of a built-in collection generic, from
+    /// [`BUILTIN_METHODS`]. Its body is the row's operation on its
+    /// parameters.
+    Collection {
+        /// The generic.
+        function: CollectionFunction,
+    },
     /// Method inserted into the running session by an EOP mutation, identified
     /// by a per-session monotonic mutation sequence number. The sequence is
     /// stable for the lifetime of the session and lets workbench records
@@ -3362,6 +3432,10 @@ pub enum Intrinsic {
     VectorSize,
     /// Returns one immutable vector element as `<object>`.
     VectorRef,
+    /// Returns one immutable vector element as `<object>`, or the third
+    /// argument when the index is outside the vector: `element(v, i,
+    /// default: d)`. It has no name of its own.
+    VectorElementOr,
     /// Renders a float as its shortest round-trip literal text, such as
     /// `1.0`, `2.5e-7`, `inf`, or `nan`; a `<single-float>` carries its
     /// `f32` suffix, as in `0.1f32`.
@@ -4814,6 +4888,11 @@ struct Lowering {
     /// persists across lowering passes; its methods are regenerated with
     /// every pass.
     numeric_generics: Vec<(promotion::NumericOperator, GenericFunctionId)>,
+    /// Built-in collection generics created so far, in creation order. A
+    /// generic is created the first time a call or a method names it, and
+    /// persists across lowering passes; its kernel methods are regenerated
+    /// with every pass.
+    collection_generics: Vec<(CollectionFunction, GenericFunctionId)>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -4833,6 +4912,7 @@ impl Lowering {
             generic_symbols: Vec::new(),
             dispatch_specializers: Vec::new(),
             numeric_generics: Vec::new(),
+            collection_generics: Vec::new(),
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
@@ -6105,6 +6185,15 @@ impl Lowering {
                 .collect::<Vec<_>>();
             for (left_index, left) in methods.iter().enumerate() {
                 for right in methods.iter().skip(left_index + 1) {
+                    // A method only a kernel collection method could be
+                    // ambiguous with overrides it, which
+                    // `check_collection_method_overrides` reports instead.
+                    if [left, right]
+                        .iter()
+                        .any(|method| matches!(method.origin, MethodOrigin::Collection { .. }))
+                    {
+                        continue;
+                    }
                     let Some(actuals) = self.intersection_actuals(left, right) else {
                         continue;
                     };
@@ -6450,6 +6539,7 @@ impl Lowering {
         }
         self.collect_slot_setter_methods();
         self.collect_numeric_methods();
+        self.collect_collection_methods();
         self.refresh_inferred_generic_results();
         self.check_ambiguous_generic_methods();
 
@@ -6476,6 +6566,7 @@ impl Lowering {
             host_functions: self.host_functions.clone(),
             diagnostics: self.diagnostics.clone(),
         };
+        check_collection_method_overrides(&mut lowered);
         // Numbered once the bodies are final, so the result-inference
         // fixpoint above cannot shift them.
         assign_check_sites(&mut lowered);
@@ -6508,6 +6599,7 @@ impl Lowering {
             }
             self.collect_slot_setter_methods();
             self.collect_numeric_methods();
+            self.collect_collection_methods();
             self.refresh_inferred_generic_results();
             for (index, function) in module.functions.iter().enumerate() {
                 let _ = self.lower_function(
@@ -6633,6 +6725,8 @@ impl Lowering {
 
     fn lower_method(&mut self, id: MethodId, method: &ast::Method) -> Method {
         let mut ctx = FunctionContext::new();
+        // A method may be the first to name a built-in collection generic.
+        let _ = self.collection_generic_named(&method.name);
         let generic_symbol = self.resolve_generic(&method.name).cloned();
         let generic = generic_symbol
             .as_ref()
@@ -7427,7 +7521,12 @@ impl Lowering {
                         callable_signature: ctx.capture_callable_signature(capture),
                         span: *span,
                     },
-                    None => self.lower_known_name(ctx, name, *span),
+                    None => {
+                        // A name may be the first mention of a built-in
+                        // collection generic, used as a value.
+                        let _ = self.collection_generic_named(name);
+                        self.lower_known_name(ctx, name, *span)
+                    }
                 },
             },
             ast::Expr::ClassName {
@@ -7462,8 +7561,22 @@ impl Lowering {
                 ..
             } => self.lower_cast(ctx, value, target, *span),
             ast::Expr::Call {
-                callee, args, span, ..
+                callee,
+                args,
+                keywords,
+                span,
+                ..
             } => {
+                if let Some(function) = CollectionFunction::from_name(callee)
+                    .filter(|_| !self.defines_callable(ctx, callee))
+                {
+                    return self.lower_collection_call(ctx, function, args, keywords, *span);
+                }
+                // No other call takes keyword arguments.
+                for keyword in keywords {
+                    ctx.diagnostics
+                        .push(Self::unexpected_keyword(callee, keyword));
+                }
                 if callee == "apply" {
                     return self.lower_apply(ctx, args, expected_results, *span);
                 }
@@ -7669,47 +7782,8 @@ impl Lowering {
                     );
                     return Expr::Error { span: *span };
                 }
-                if let Some(symbol) = self.resolve_generic(callee) {
-                    if symbol.arity() == args.len() {
-                        adapt_literal_args(
-                            &mut lowered_args,
-                            symbol.param_kinds.iter().map(Option::as_ref),
-                        );
-                        for (index, (arg, declared)) in
-                            lowered_args.iter().zip(&symbol.param_kinds).enumerate()
-                        {
-                            ctx.diagnostics.extend(
-                                self.generic_argument_diagnostic(arg, symbol.id, index, *declared),
-                            );
-                        }
-                        // Every send checks its arguments for limited
-                        // parameters, so methods may assume the ranges.
-                        let kinds = symbol
-                            .param_kinds
-                            .iter()
-                            .map(|kind| kind.unwrap_or(ValueKind::Any))
-                            .collect::<Vec<_>>();
-                        let args = self.limit_args(lowered_args, &kinds, &symbol.param_ranges);
-                        return Expr::GenericCall {
-                            site: SiteId::PENDING,
-                            generic: symbol.id,
-                            args,
-                            span: *span,
-                        };
-                    }
-                    ctx.diagnostics.push(
-                        Diagnostic::error(*span, DiagnosticCode::FunctionArityMismatch)
-                            .with_arg(DiagnosticArg::text("callee", callee.clone()))
-                            .with_arg(DiagnosticArg::unsigned(
-                                "expected_count",
-                                u64::try_from(symbol.arity()).unwrap_or(u64::MAX),
-                            ))
-                            .with_arg(DiagnosticArg::unsigned(
-                                "actual_count",
-                                u64::try_from(args.len()).unwrap_or(u64::MAX),
-                            )),
-                    );
-                    return Expr::Error { span: *span };
+                if let Some(symbol) = self.resolve_generic(callee).cloned() {
+                    return self.lower_generic_send(ctx, &symbol, lowered_args, callee, *span);
                 }
                 if self.has_accessor(callee) {
                     if args.len() == 1 {
@@ -8265,6 +8339,46 @@ impl Lowering {
         }
     }
 
+    /// Lowers a send of the generic `symbol` names to `args`, checking them
+    /// against its parameters.
+    fn lower_generic_send(
+        &self,
+        ctx: &mut FunctionContext,
+        symbol: &GenericSymbol,
+        mut args: Vec<Expr>,
+        callee: &str,
+        span: Span,
+    ) -> Expr {
+        if symbol.arity() != args.len() {
+            ctx.diagnostics.push(Self::arity_mismatch(
+                callee,
+                symbol.arity(),
+                args.len(),
+                span,
+            ));
+            return Expr::Error { span };
+        }
+        adapt_literal_args(&mut args, symbol.param_kinds.iter().map(Option::as_ref));
+        for (index, (arg, declared)) in args.iter().zip(&symbol.param_kinds).enumerate() {
+            ctx.diagnostics
+                .extend(self.generic_argument_diagnostic(arg, symbol.id, index, *declared));
+        }
+        // Every send checks its arguments for limited parameters, so methods
+        // may assume the ranges.
+        let kinds = symbol
+            .param_kinds
+            .iter()
+            .map(|kind| kind.unwrap_or(ValueKind::Any))
+            .collect::<Vec<_>>();
+        let args = self.limit_args(args, &kinds, &symbol.param_ranges);
+        Expr::GenericCall {
+            site: SiteId::PENDING,
+            generic: symbol.id,
+            args,
+            span,
+        }
+    }
+
     fn lower_intrinsic_call(
         &self,
         ctx: &mut FunctionContext,
@@ -8275,23 +8389,351 @@ impl Lowering {
         let intrinsic = intrinsic_for_name(callee)?;
         let expected = intrinsic_arity(intrinsic);
         if args.len() != expected {
-            ctx.diagnostics.push(
-                Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
-                    .with_arg(DiagnosticArg::text("callee", callee.to_string()))
-                    .with_arg(DiagnosticArg::unsigned(
-                        "expected_count",
-                        u64::try_from(expected).unwrap_or(u64::MAX),
-                    ))
-                    .with_arg(DiagnosticArg::unsigned(
-                        "actual_count",
-                        u64::try_from(args.len()).unwrap_or(u64::MAX),
-                    )),
-            );
+            ctx.diagnostics
+                .push(Self::arity_mismatch(callee, expected, args.len(), span));
             return Some(Expr::Error { span });
         }
+        Some(self.checked_intrinsic_call(ctx, intrinsic, callee, args.to_vec(), span))
+    }
+
+    /// Whether the program names `name` as something a call can call: a
+    /// callable local or capture, a function, a host function, or a generic
+    /// other than a built-in collection generic. Such a definition shadows
+    /// a built-in collection generic of the same name.
+    fn defines_callable(&self, ctx: &FunctionContext, name: &str) -> bool {
+        ctx.find_local(name)
+            .is_some_and(|local| ctx.local_kind(local) == ValueKind::Callable)
+            || ctx.capture_source_is_callable(name)
+            || self.shadows_collection_generic(name)
+    }
+
+    /// Whether a module-level definition of `name` (a function, a host
+    /// function, or a generic of its own) replaces the built-in collection
+    /// generic of that name.
+    fn shadows_collection_generic(&self, name: &str) -> bool {
+        self.resolve_function(name).is_some()
+            || self.resolve_host_function(name).is_some()
+            || self.resolve_generic(name).is_some_and(|symbol| {
+                !self
+                    .collection_generics
+                    .iter()
+                    .any(|(_, generic)| *generic == symbol.id)
+            })
+    }
+
+    /// Returns the built-in collection generic named `name`, creating it on
+    /// first use, unless the module defines `name` itself.
+    fn collection_generic_named(&mut self, name: &str) -> Option<GenericFunctionId> {
+        let function = CollectionFunction::from_name(name)?;
+        if self.shadows_collection_generic(name) {
+            return None;
+        }
+        Some(self.collection_generic(function))
+    }
+
+    /// Returns the built-in generic for `function`, creating it on first
+    /// use. It persists across lowering passes; its kernel methods are
+    /// regenerated with every pass ([`Self::collect_collection_methods`]).
+    fn collection_generic(&mut self, function: CollectionFunction) -> GenericFunctionId {
+        if let Some((_, id)) = self
+            .collection_generics
+            .iter()
+            .find(|(existing, _)| *existing == function)
+        {
+            return *id;
+        }
+        let id = GenericFunctionId(u32::try_from(self.generics.len()).unwrap_or(u32::MAX));
+        let name = function.name();
+        let arity = function.arity();
+        let result_kinds = vec![match function {
+            CollectionFunction::Size => ValueKind::I64,
+            CollectionFunction::Element | CollectionFunction::ElementSetter => ValueKind::Any,
+        }];
+        self.generic_symbols.push(GenericSymbol {
+            name: name.into(),
+            id,
+            param_kinds: vec![None; arity],
+            param_ranges: vec![None; arity],
+            return_kinds: result_kinds.clone(),
+            return_callable_sigs: vec![None],
+            return_ranges: vec![None],
+            return_annotation: Some(result_kinds.clone()),
+            dispatch_param: function.collection_index(),
+            span: Span::default(),
+        });
+        self.generics.push(GenericFunction {
+            id,
+            definition: DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Generic,
+                name,
+                "collection",
+            ),
+            name: name.into(),
+            params: function
+                .params()
+                .iter()
+                .map(|name| (*name).into())
+                .collect(),
+            param_kinds: vec![None; arity],
+            param_ranges: vec![None; arity],
+            arity,
+            dispatch_param: function.collection_index(),
+            dispatch_params: (0..arity).collect(),
+            result_kinds: result_kinds.clone(),
+            result_callable_sigs: vec![None],
+            result_ranges: vec![None],
+            return_annotation: Some(result_kinds),
+            span: Span::default(),
+            origin: GenericFunctionOrigin::Collection { function },
+            sealing: Sealing::Open,
+            strict: false,
+        });
+        self.collection_generics.push((function, id));
+        id
+    }
+
+    /// Generates the kernel methods of every collection generic created so
+    /// far, from [`BUILTIN_METHODS`]: each runs its row's operation on its
+    /// parameters.
+    fn collect_collection_methods(&mut self) {
+        for (function, generic) in self.collection_generics.clone() {
+            for builtin in collection::builtin_methods(function) {
+                let classes = function
+                    .params()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        if index == function.collection_index() {
+                            self.builtin_value_class(builtin.collection)
+                        } else if index == function.collection_index() + 1 {
+                            builtin.key.and_then(|key| self.builtin_value_class(key))
+                        } else {
+                            Some(OBJECT_CLASS_ID)
+                        }
+                    })
+                    .collect::<Option<Vec<_>>>();
+                let Some(classes) = classes else {
+                    continue;
+                };
+                let collection = self.builtin_value_class(builtin.collection);
+                let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+                let definition = DefinitionId::new(
+                    self.source_file,
+                    DefinitionKind::Method,
+                    function.name(),
+                    &format!("collection:{}", builtin.collection.name()),
+                );
+                let mut ctx = FunctionContext::new();
+                let mut params = Vec::new();
+                let mut args = Vec::new();
+                for (name, class) in function.params().iter().zip(&classes) {
+                    let kind = self
+                        .kind_for_builtin_class(*class)
+                        .unwrap_or(ValueKind::Any);
+                    let local = ctx.add_local(
+                        self.local_definition(definition, name),
+                        (*name).into(),
+                        kind,
+                        None,
+                        Span::default(),
+                    );
+                    params.push(local);
+                    args.push(Expr::Local {
+                        local,
+                        result_kind: kind,
+                        callable_signature: None,
+                        span: Span::default(),
+                    });
+                }
+                let result = Expr::IntrinsicCall {
+                    intrinsic: builtin.operation,
+                    args,
+                    result_kind: self.intrinsic_result_kind(builtin.operation),
+                    span: Span::default(),
+                };
+                let result_kinds = vec![self.expr_kind(&result)];
+                self.methods.push(Method {
+                    id,
+                    definition,
+                    generic,
+                    specializer: collection.unwrap_or(OBJECT_CLASS_ID),
+                    specializers: classes.into_iter().map(Some).collect(),
+                    param: params
+                        .get(function.collection_index())
+                        .copied()
+                        .unwrap_or(LocalId(u32::MAX)),
+                    params,
+                    locals: ctx.locals,
+                    body: Block {
+                        statements: Vec::new(),
+                        result,
+                        span: Span::default(),
+                    },
+                    result_ranges: vec![None; result_kinds.len()],
+                    result_kinds: result_kinds.clone(),
+                    return_annotation: Some(result_kinds),
+                    span: Span::default(),
+                    origin: MethodOrigin::Collection { function },
+                    strict: false,
+                });
+            }
+        }
+    }
+
+    /// Whether the class of a value of kind `kind` has a slot getter named
+    /// `name`, itself or through a superclass.
+    fn class_has_accessor(&self, kind: ValueKind, name: &str) -> bool {
+        let ValueKind::Object(mut class) = kind else {
+            return false;
+        };
+        loop {
+            let Some(info) = self.classes.get(class.0 as usize) else {
+                return false;
+            };
+            if info
+                .direct_slots
+                .iter()
+                .any(|slot| slot.accessor.name == name)
+            {
+                return true;
+            }
+            let Some(superclass) = info.superclass else {
+                return false;
+            };
+            class = superclass;
+        }
+    }
+
+    /// Lowers a call of a built-in collection generic: a send, or a kernel
+    /// method's defaulting operation for a call passing `default:`.
+    fn lower_collection_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        function: CollectionFunction,
+        args: &[ast::Expr],
+        keywords: &[ast::KeywordArg],
+        span: Span,
+    ) -> Expr {
+        let name = function.name();
         let args = args
             .iter()
-            .cloned()
+            .map(|arg| self.lower_expr(ctx, arg))
+            .collect::<Vec<_>>();
+        let mut valid = true;
+        let mut default = None;
+        for keyword in keywords {
+            if !function.keywords().contains(&keyword.name.as_str()) {
+                ctx.diagnostics
+                    .push(Self::unexpected_keyword(name, keyword));
+                valid = false;
+            } else if default.is_some() {
+                ctx.diagnostics.push(
+                    Diagnostic::error(keyword.span, DiagnosticCode::DuplicateKeywordArgument)
+                        .with_arg(DiagnosticArg::text("keyword", keyword.name.clone())),
+                );
+                valid = false;
+            } else {
+                default = Some(self.lower_expr(ctx, &keyword.value));
+            }
+        }
+        if !valid {
+            return Expr::Error { span };
+        }
+        // A slot getter of the same name serves its own class.
+        if let [receiver] = args.as_slice()
+            && default.is_none()
+            && self.class_has_accessor(self.expr_kind(receiver), name)
+        {
+            let receiver = args.into_iter().next().expect("one argument was matched");
+            return self.lower_accessor_call(ctx, receiver, name, span);
+        }
+        if args.len() != function.arity() {
+            ctx.diagnostics.push(Self::arity_mismatch(
+                name,
+                function.arity(),
+                args.len(),
+                span,
+            ));
+            return Expr::Error { span };
+        }
+        let Some(default) = default else {
+            let generic = self.collection_generic(function);
+            let Some(symbol) = self
+                .generic_symbols
+                .iter()
+                .find(|symbol| symbol.id == generic)
+                .cloned()
+            else {
+                return Expr::Error { span };
+            };
+            return self.lower_generic_send(ctx, &symbol, args, name, span);
+        };
+        // Methods cannot take keyword parameters yet, so `default:` runs the
+        // kernel method's defaulting operation, for a receiver whose class
+        // typing knows has one.
+        let collection = self.expr_kind(&args[function.collection_index()]);
+        if collection == ValueKind::Error {
+            return Expr::Error { span };
+        }
+        let operation = self.value_kind_class(collection).and_then(|class| {
+            collection::builtin_methods(function)
+                .filter(|method| self.builtin_value_class(method.collection) == Some(class))
+                .find_map(|method| method.with_default)
+        });
+        let Some(operation) = operation else {
+            let classes = collection::builtin_methods(function)
+                .filter(|method| method.with_default.is_some())
+                .map(|method| method.collection.name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::CollectionDefaultUnsupported)
+                    .with_arg(DiagnosticArg::text("function", name))
+                    .with_arg(DiagnosticArg::text("actual", self.kind_name(collection)))
+                    .with_arg(DiagnosticArg::text("expected", classes)),
+            );
+            return Expr::Error { span };
+        };
+        let mut args = args;
+        args.push(default);
+        self.checked_intrinsic_call(ctx, operation, name, args, span)
+    }
+
+    /// The diagnostic for a keyword argument `callee` does not take.
+    fn unexpected_keyword(callee: &str, keyword: &ast::KeywordArg) -> Diagnostic {
+        Diagnostic::error(keyword.span, DiagnosticCode::UnexpectedKeywordArgument)
+            .with_arg(DiagnosticArg::text("callee", callee.to_string()))
+            .with_arg(DiagnosticArg::text("keyword", keyword.name.clone()))
+    }
+
+    /// The diagnostic for a call of `callee` with `actual` arguments where
+    /// it takes `expected`.
+    fn arity_mismatch(callee: &str, expected: usize, actual: usize, span: Span) -> Diagnostic {
+        Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
+            .with_arg(DiagnosticArg::text("callee", callee.to_string()))
+            .with_arg(DiagnosticArg::unsigned(
+                "expected_count",
+                u64::try_from(expected).unwrap_or(u64::MAX),
+            ))
+            .with_arg(DiagnosticArg::unsigned(
+                "actual_count",
+                u64::try_from(actual).unwrap_or(u64::MAX),
+            ))
+    }
+
+    /// Checks `args` against what `intrinsic` takes, reporting mismatches as
+    /// arguments of `callee`, and builds the call.
+    fn checked_intrinsic_call(
+        &self,
+        ctx: &mut FunctionContext,
+        intrinsic: Intrinsic,
+        callee: &str,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Expr {
+        let args = args
+            .into_iter()
             .enumerate()
             .map(|(index, arg)| self.lower_intrinsic_arg(intrinsic, index, arg))
             .collect::<Vec<_>>();
@@ -8313,12 +8755,12 @@ impl Lowering {
                 );
             }
         }
-        Some(Expr::IntrinsicCall {
+        Expr::IntrinsicCall {
             intrinsic,
             args,
             result_kind: self.intrinsic_result_kind(intrinsic),
             span,
-        })
+        }
     }
 
     fn lower_float_call(
@@ -8444,6 +8886,7 @@ impl Lowering {
             | Intrinsic::SlotSetter
             | Intrinsic::MethodGenericFunction
             | Intrinsic::VectorRef
+            | Intrinsic::VectorElementOr
             | Intrinsic::LimitedIntegerMin
             | Intrinsic::LimitedIntegerMax => ValueKind::Any,
         }
@@ -8526,10 +8969,13 @@ impl Lowering {
                 matches!(actual, ValueKind::MethodObject(_) | ValueKind::Any)
                     || self.is_builtin_instance(actual, BuiltinValueClass::Method)
             }
-            (Intrinsic::VectorSize | Intrinsic::VectorRef, 0) => {
+            (Intrinsic::VectorSize | Intrinsic::VectorRef | Intrinsic::VectorElementOr, 0) => {
                 matches!(actual, ValueKind::Vector(_) | ValueKind::Any)
             }
-            (Intrinsic::VectorRef, 1) | (Intrinsic::IntegerToString, 0) => {
+            // Any value boxes to the `<object>` a default must be.
+            (Intrinsic::VectorElementOr, 2) => true,
+            (Intrinsic::VectorRef | Intrinsic::VectorElementOr, 1)
+            | (Intrinsic::IntegerToString, 0) => {
                 matches!(actual, ValueKind::I64 | ValueKind::I32 | ValueKind::U32)
             }
             (Intrinsic::FloatToString, 0) => matches!(actual, ValueKind::F64 | ValueKind::F32),
@@ -9609,6 +10055,7 @@ impl Lowering {
                     id: matcher.id,
                     callee: callee.clone(),
                     args: vec![matcher.target.clone(), key.clone()],
+                    keywords: Vec::new(),
                     span: key.span(),
                 },
             };

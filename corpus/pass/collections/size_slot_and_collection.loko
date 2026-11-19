@@ -1,0 +1,13 @@
+// expect: run 3
+// expect: diagnostics 0
+// A slot named `size` and the collection function share the name, as both
+// are methods of one generic in Dylan: the slot's getter serves its class,
+// and the collection function serves vectors.
+
+define class <box> (<object>)
+  slot size :: <integer>;
+end;
+
+define function main() => <integer>
+  size(make(<box>, size: 1)) + size(#[1, 2])
+end;

@@ -152,7 +152,9 @@ pub const MOP_SUBCLASS_TYPE_CLASS: &str = "interloko.mop.subclass_type_class";
 pub const MOP_TYPE_NAME: &str = "interloko.mop.type_name";
 /// Host-call symbol for immutable vector length.
 pub const VECTOR_SIZE: &str = "interloko.vector_size";
-/// Host-call symbol for immutable vector indexing.
+/// Host-call symbol for immutable vector indexing. With
+/// [`vector_ref_signature`], an index outside the vector fails; with
+/// [`vector_element_or_signature`], it returns the default argument.
 pub const VECTOR_REF: &str = "interloko.vector_ref";
 /// Host-call symbol for rendering a float as its shortest round-trip literal.
 pub const FLOAT_TO_STRING: &str = "interloko.float_to_string";
@@ -2529,12 +2531,23 @@ impl Host for InterlokoHost {
                 Ok(0)
             }
             VECTOR_REF => {
-                let [arg, ValueRef::I64(index)] = args else {
-                    return Err(HostError::Failed);
+                let (arg, index, default) = match args {
+                    [arg, ValueRef::I64(index)] => (arg, index, None),
+                    [arg, ValueRef::I64(index), default @ ValueRef::Obj(_)] => {
+                        (arg, index, Some(default))
+                    }
+                    _ => return Err(HostError::Failed),
                 };
                 let elements = self.vector_elements_from_any(*arg)?;
-                let index = usize::try_from(*index).map_err(|_| HostError::Failed)?;
-                rets[0] = elements.get(index).cloned().ok_or(HostError::Failed)?;
+                let element = usize::try_from(*index)
+                    .ok()
+                    .and_then(|index| elements.get(index))
+                    .cloned();
+                rets[0] = match (element, default) {
+                    (Some(element), _) => element,
+                    (None, Some(default)) => default.to_value(),
+                    (None, None) => return Err(HostError::Failed),
+                };
                 Ok(0)
             }
             MAKE_OBJECT => {
@@ -3319,6 +3332,16 @@ pub fn vector_size_signature() -> HostSig {
 pub fn vector_ref_signature() -> HostSig {
     HostSig {
         args: vec![any_type(), ValueType::I64],
+        rets: vec![any_type()],
+    }
+}
+
+/// Host signature for immutable vector indexing with a default, returned
+/// when the index is outside the vector.
+#[must_use]
+pub fn vector_element_or_signature() -> HostSig {
+    HostSig {
+        args: vec![any_type(), ValueType::I64, any_type()],
         rets: vec![any_type()],
     }
 }

@@ -1,0 +1,9 @@
+// expect: runtime code dispatch.no-applicable-method
+// expect: diagnostic code typing.dispatch-no-applicable-method
+// expect: diagnostics 1
+// A vector's kernel `element` method takes `<integer>` keys; a send with a
+// string key finds no method.
+
+define function main() => <object>
+  #[1, 2]["one"]
+end;

@@ -283,6 +283,26 @@ The current slices include:
   restates or widens its generic's range: unlike Dylan's DRM, methods do
   not dispatch on ranges, so a send's range check is the only one;
 - simple strings, symbols, keywords, and immutable vectors;
+- Dylan's collection generics `size(collection)`, `element(collection,
+  key, #key default)` and `element-setter(value, collection, key)`, and its
+  element syntax: `c[k]` is `element(c, k)` and `c[k] := v` is
+  `element-setter(v, c, k)`, so they nest and chain with slot reads
+  (`lexer.text[lexer.pos]`). They are open built-in generics, as the
+  numeric operators are built-in generics: the kernel's methods come from
+  `BUILTIN_METHODS` in `sem/collection.rs` (so far the immutable
+  `<vector>`'s `size` and `element`), a program adds methods for its own
+  classes with `define method`, a send typing resolves to a kernel method
+  runs it inline, an `<object>` receiver dispatches, and a send no method
+  accepts signals `<no-applicable-method>`. Each generic is sealed over the
+  kernel classes it has methods for, so a program's method for `<vector>`
+  is refused. A program's own function or generic of one of these names
+  replaces the built-in generic, and a slot named `size` keeps its getter
+  for its own class. Methods cannot take keyword parameters yet, so
+  `element(c, k, default: d)`, which returns `d` for a key outside the
+  collection, needs a receiver typing knows has a kernel method (a vector
+  index outside it otherwise traps). Keyword arguments are passed by name,
+  and a call to something that does not take one is an error rather than
+  a silent drop;
 - recoverable condition/restart forms, with `<condition>`, `<error>`,
   `<type-error>`, `<no-applicable-method>` and `<select-error>` defined by
   the kernel: a
