@@ -26557,21 +26557,49 @@ end;
 
     #[test]
     fn a_retry_passes_the_arguments_an_assigned_parameter_was_called_with() {
-        // `scale` assigns its parameter before pausing, in a register of its
-        // own or, when a closure shares it, in a cell. The retry runs the new
-        // body on the argument as passed, 4, not on the assigned 40.
-        for shared in ["", "\n  let read = method () => <integer> n end;"] {
+        // `scale` assigns a parameter before pausing: in a register of its
+        // own or, when a closure shares it, in a cell; a method's or a
+        // keyword's too. The retry runs the new body on the arguments as
+        // passed, so `n` is 4 and `by` 10 again, not 40.
+        const PAUSE: &str = "define class <oops> (<object>)\nend;\n\
+             define function pause() => <integer>\n  signal(make(<oops>))\nend;\n";
+        let shared = "\n  let read = method () => <integer> n end;";
+        let cases = [
+            (
+                "define function scale(n :: <integer>) => <integer>\n  \
+                 n := n * 10;\n  pause() + n\nend;"
+                    .into(),
+                "scale",
+            ),
+            (
+                alloc::format!(
+                    "define function scale(n :: <integer>) => <integer>{shared}\n  \
+                     n := n * 10;\n  pause() + n\nend;"
+                ),
+                "scale",
+            ),
+            (
+                "define generic scale(n :: <integer>) => <integer>;\n\
+                 define method scale(n :: <integer>) => <integer>\n  \
+                 n := n * 10;\n  pause() + n\nend;"
+                    .into(),
+                "scale#method0",
+            ),
+            (
+                "define function scale(n :: <integer>, #key by :: <integer> = 10) => <integer>\n  \
+                 by := by * n;\n  pause() + by\nend;"
+                    .into(),
+                "scale",
+            ),
+        ];
+        for (scale, frame) in cases {
             let old = alloc::format!(
-                "define class <oops> (<object>)\nend;\n\
-                 define function pause() => <integer>\n  signal(make(<oops>))\nend;\n\
-                 define function scale(n :: <integer>) => <integer>{shared}\n  \
-                 n := n * 10;\n  pause() + n\nend;\n\
-                 define function main() => <integer>\n  scale(4)\nend;"
+                "{PAUSE}{scale}\ndefine function main() => <integer>\n  scale(4)\nend;"
             );
-            let new = old.replace("pause() + n", "pause() + n + 1000");
-            let seen = run_across_an_edit(&old, &new, Then::Retry("scale"));
-            assert_eq!((seen.refused, seen.retry_refused), (None, None));
-            assert_eq!(seen.value, Some(FunctionValue::Integer(1040)), "{shared:?}");
+            let new = old.replace("  pause() + ", "  1000 + pause() + ");
+            let seen = run_across_an_edit(&old, &new, Then::Retry(frame));
+            assert_eq!((seen.refused, seen.retry_refused), (None, None), "{scale}");
+            assert_eq!(seen.value, Some(FunctionValue::Integer(1040)), "{scale}");
         }
     }
 

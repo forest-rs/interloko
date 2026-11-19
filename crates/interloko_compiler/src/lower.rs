@@ -6078,6 +6078,12 @@ impl<'module> BodyLowering<'module> {
             };
             let homed = self.home(param, value, span);
             self.set_local(param, homed)?;
+            // The frame's local now lives where it was homed, as a `let`'s
+            // does; the input register keeps the argument for a retry.
+            if let Some(local) = self.locals.iter_mut().find(|local| local.source == param) {
+                local.kind = homed.kind;
+                local.reg = homed.reg;
+            }
         }
         Ok(())
     }
