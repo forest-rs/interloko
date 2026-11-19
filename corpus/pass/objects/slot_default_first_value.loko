@@ -1,0 +1,15 @@
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump lowered contains <cell>.width#default
+
+// A slot default that calls a function returning several values keeps the
+// first, as any single-value position does; it runs in a frame of its own,
+// which holds the values it drops.
+
+define class <cell> (<object>)
+  slot width :: <integer>, init-value: truncate/(7, 2);
+end;
+
+define function main() => <integer>
+  make(<cell>).width
+end;

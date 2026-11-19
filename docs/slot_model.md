@@ -44,6 +44,15 @@ define function main()
 end;
 ```
 
+A default is evaluated afresh at each `make` that takes it, in slot order, so
+each instance gets its own value. It may be any expression, a `begin … end`
+body with `let`s, loops and closures included. A default that is more than a
+literal compiles to code of its own, with its own frame, which each such `make`
+calls; it is typed as a definition of its own, held to the session's strict
+policy, and checked against the slot's type and range there. A literal default
+(a number, boolean, symbol, metaobject, known function or constant, and any
+range check on it) is computed in place instead.
+
 `constant slot` records mutability metadata. In this slice it means
 construction-time assignment only; slot reads behave the same as ordinary
 mutable slots because slot writes do not exist yet.

@@ -2592,9 +2592,10 @@ impl SessionArtifacts {
         builder.finish()
     }
 
-    /// Returns the claim report of the function, method, or constant `id`
-    /// names: its `claims:<definition>` object, its `function:fN`,
-    /// `method:mN`, or `constant:kN` object, or its `def…` id.
+    /// Returns the claim report of the function, method, constant, or slot
+    /// default `id` names: its `claims:<definition>` object, its
+    /// `function:fN`, `method:mN`, `constant:kN`, or `slot:cN.sM` object, or
+    /// its `def…` id. Only a slot whose default runs code has a report.
     ///
     /// The report aggregates the recorded typing decisions, what lowering
     /// did with each check, and the contracts and closed worlds they rely
@@ -2644,9 +2645,21 @@ impl SessionArtifacts {
         self.definition_object(id)
     }
 
-    /// The definition of the function, method, or constant object `id`.
+    /// The definition of the function, method, constant, or slot object
+    /// `id`. A slot names its default, and only when the default runs code.
     fn definition_object(&self, id: &str) -> Option<DefinitionId> {
         let module = &self.sem;
+        if id.starts_with("slot:")
+            && let Some((class, slot)) = slot_object_indices(id)
+        {
+            let definition = module
+                .classes
+                .get(class)?
+                .effective_slots
+                .get(slot)?
+                .definition;
+            return module.slot_initializer(definition).map(|_| definition);
+        }
         if let Some(index) = object_index(id, "function:f") {
             return module.functions.get(index).map(|item| item.definition);
         }
@@ -5041,6 +5054,8 @@ pub enum DispatchSiteOwnerKind {
     Method,
     /// The dispatch site is inside a constant's initializer.
     Constant,
+    /// The dispatch site is inside a slot's default.
+    Slot,
 }
 
 impl DispatchSiteOwnerKind {
@@ -5051,6 +5066,7 @@ impl DispatchSiteOwnerKind {
             Self::Function => "function",
             Self::Method => "method",
             Self::Constant => "constant",
+            Self::Slot => "slot",
         }
     }
 }
@@ -5760,8 +5776,8 @@ fn collect_dispatch_sites(artifacts: &SessionArtifacts) -> Vec<DispatchSiteRecor
         };
         collect_dispatch_sites_in_block(artifacts, &owner, &method.body, &mut sites);
     }
-    // A constant's initializer is inlined wherever it is referenced, but its
-    // calls are written, and numbered, in the constant.
+    // A constant's initializer and a slot's default run as code of their
+    // own, whose calls are numbered in the constant or the slot.
     for constant in &artifacts.sem.constants {
         let owner = DispatchSiteOwner {
             kind: DispatchSiteOwnerKind::Constant,
@@ -5769,6 +5785,19 @@ fn collect_dispatch_sites(artifacts: &SessionArtifacts) -> Vec<DispatchSiteRecor
             name: constant.name.clone(),
         };
         collect_dispatch_sites_in_expr(artifacts, &owner, &constant.value, &mut sites);
+    }
+    for class in &artifacts.sem.classes {
+        for slot in &class.direct_slots {
+            let Some(initializer) = &slot.initializer else {
+                continue;
+            };
+            let owner = DispatchSiteOwner {
+                kind: DispatchSiteOwnerKind::Slot,
+                definition: slot.definition,
+                name: format!("{}.{}", class.name, slot.name),
+            };
+            collect_dispatch_sites_in_expr(artifacts, &owner, &initializer.value, &mut sites);
+        }
     }
     sites
 }
@@ -5943,6 +5972,7 @@ fn collect_dispatch_sites_in_expr(
         | sem::Expr::Local { .. }
         | sem::Expr::Capture { .. }
         | sem::Expr::ConstantRef { .. }
+        | sem::Expr::SlotDefault { .. }
         | sem::Expr::ClassObject { .. }
         | sem::Expr::TypeObject { .. }
         | sem::Expr::KnownCallable { .. }
@@ -8411,6 +8441,11 @@ fn dump_sem(module: &sem::Module) -> String {
                 sem_slot_mutability_label(slot.mutability),
                 sem_runtime_repr(slot.kind)
             );
+            if let Some(initializer) = &slot.initializer {
+                let _ = writeln!(out, "    default code");
+                dump_sem_locals(module, &mut out, &initializer.locals, 6);
+                dump_sem_expr(&mut out, &initializer.value, 6);
+            }
         }
         for slot in &class.effective_slots {
             let source = if slot.source_class == class.id {
@@ -10882,6 +10917,9 @@ fn lowered_function_kind_label(kind: lower::FunctionKind) -> String {
         lower::FunctionKind::BoxedEntry { typed } => format!("boxed-entry l{}", typed.0),
         lower::FunctionKind::CallableParts => String::from("callable-parts"),
         lower::FunctionKind::ConstantInitializer(id) => format!("constant-initializer:k{}", id.0),
+        lower::FunctionKind::SlotDefault { class, slot } => {
+            format!("slot-default c{}.s{}", class.0, slot.0)
+        }
         lower::FunctionKind::Adapter { signature } => format!("adapter sig{}", signature.0),
     }
 }
@@ -12978,6 +13016,14 @@ fn project_claims(artifacts: &SessionArtifacts, sink: &mut dyn EnvironmentObject
                 .constants
                 .iter()
                 .map(|constant| (constant.definition, constant.span)),
+        )
+        .chain(
+            module
+                .classes
+                .iter()
+                .flat_map(|class| &class.direct_slots)
+                .filter(|slot| slot.initializer.is_some())
+                .map(|slot| (slot.definition, slot.span)),
         );
     let sites = artifacts.annotation_sites();
     let inputs = artifacts.claim_inputs(&sites);
@@ -14172,6 +14218,20 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
                 sem_kind_label_for_expr(*result_kind)
             );
         }
+        sem::Expr::SlotDefault {
+            class,
+            slot,
+            result_kind,
+            ..
+        } => {
+            let _ = writeln!(
+                out,
+                "slot-default c{}.s{} as {}",
+                class.0,
+                slot.0,
+                sem_kind_label_for_expr(*result_kind)
+            );
+        }
         sem::Expr::ClassObject { class, .. } => {
             let _ = writeln!(out, "class-object c{}", class.0);
         }
@@ -15234,13 +15294,22 @@ fn definition_sem_fingerprint(module: &sem::Module, definition: DefinitionId) ->
     {
         return function_definition_fingerprint(module, function);
     }
-    module
+    if let Some(constant) = module
         .constants
         .iter()
         .find(|constant| constant.definition == definition)
+    {
+        return constant_definition_fingerprint(module, constant);
+    }
+    // A slot's default, typed as the slot.
+    module
+        .classes
+        .iter()
+        .flat_map(|class| &class.direct_slots)
+        .find(|slot| slot.definition == definition)
         .map_or_else(
             || "missing-definition".into(),
-            |constant| constant_definition_fingerprint(module, constant),
+            |slot| format!("slot-default:{}", slot_init_fingerprint(module, slot)),
         )
 }
 
@@ -15445,20 +15514,35 @@ fn class_cone_fingerprint(module: &sem::Module, class: DefinitionId) -> String {
 }
 
 fn slot_init_fingerprint(module: &sem::Module, slot: &sem::Slot) -> String {
-    let Some(init_value) = &slot.init_value else {
-        return "none".into();
-    };
-    let mut out = String::new();
-    fingerprint_sem_expr(module, init_value, &mut out);
-    out
+    default_fingerprint(module, slot.init_value.as_ref(), slot.initializer.as_ref())
 }
 
+/// An inherited slot's default is its declaring slot's, code included.
 fn effective_slot_init_fingerprint(module: &sem::Module, slot: &sem::EffectiveSlot) -> String {
-    let Some(init_value) = &slot.init_value else {
+    let initializer = module
+        .classes
+        .get(slot.source_class.0 as usize)
+        .and_then(|class| class.direct_slots.get(slot.source_slot.0 as usize))
+        .and_then(|declared| declared.initializer.as_ref());
+    default_fingerprint(module, slot.init_value.as_ref(), initializer)
+}
+
+/// Fingerprints a slot default: what `make` evaluates, and the code of its
+/// own it runs, when it has some.
+fn default_fingerprint(
+    module: &sem::Module,
+    init_value: Option<&sem::Expr>,
+    initializer: Option<&sem::SlotInitializer>,
+) -> String {
+    let Some(init_value) = init_value else {
         return "none".into();
     };
     let mut out = String::new();
     fingerprint_sem_expr(module, init_value, &mut out);
+    if let Some(initializer) = initializer {
+        let _ = write!(out, "|code({} locals)=", initializer.locals.len());
+        fingerprint_sem_expr(module, &initializer.value, &mut out);
+    }
     out
 }
 
@@ -15570,6 +15654,20 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .get(constant.0 as usize)
                 .map_or(0, |constant| constant.definition.raw());
             let _ = write!(out, "constant({definition}:{result})");
+        }
+        sem::Expr::SlotDefault {
+            class,
+            slot,
+            result_kind,
+            ..
+        } => {
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let definition = module
+                .classes
+                .get(class.0 as usize)
+                .and_then(|class| class.direct_slots.get(slot.0 as usize))
+                .map_or(0, |slot| slot.definition.raw());
+            let _ = write!(out, "slot-default({definition}:{result})");
         }
         sem::Expr::ClassObject { class, .. } => {
             let definition = module
@@ -18926,9 +19024,8 @@ mod tests {
 
     #[test]
     fn typing_decisions_link_dispatch_sites_by_owner_and_site() {
-        // Both `make`s copy the slot's default, so `main` holds two calls of
-        // `area` with the same span; a constant's call belongs to the
-        // constant.
+        // Each `make` runs the slot's default, whose call belongs to the
+        // slot, as a constant's call belongs to the constant.
         let source = "define class <shape> (<object>)\nend;\n\
             define class <circle> (<shape>)\nend;\n\
             define generic area(x);\n\
@@ -18963,36 +19060,26 @@ mod tests {
             [
                 (
                     "dispatch:d0",
-                    DispatchSiteOwnerKind::Function,
-                    "main",
-                    sem::SiteId(0)
-                ),
-                (
-                    "dispatch:d1",
-                    DispatchSiteOwnerKind::Function,
-                    "main",
-                    sem::SiteId(1)
-                ),
-                (
-                    "dispatch:d2",
                     DispatchSiteOwnerKind::Constant,
                     "$seven",
                     sem::SiteId(0)
                 ),
+                (
+                    "dispatch:d1",
+                    DispatchSiteOwnerKind::Slot,
+                    "<holder>.size",
+                    sem::SiteId(0)
+                ),
             ]
         );
-        assert_eq!(sites[0].span, sites[1].span);
 
         let decisions = artifacts
             .typing
             .decisions()
             .filter(|decision| decision.check == typing::TypingCheck::Dispatch)
             .collect::<Vec<_>>();
-        assert_eq!(decisions.len(), 3);
-        for (decision, site) in decisions
-            .iter()
-            .zip(["dispatch:d0", "dispatch:d1", "dispatch:d2"])
-        {
+        assert_eq!(decisions.len(), 2);
+        for (decision, site) in decisions.iter().zip(["dispatch:d0", "dispatch:d1"]) {
             let id = typing_decision_object_id(decision);
             assert_eq!(id, format!("typing:{}:{}", decision.owner, decision.site),);
             let explanation = artifacts.explain_typing(&id).expect("decision");
@@ -19003,9 +19090,30 @@ mod tests {
         }
         assert!(
             explain_dispatch_site(&artifacts, &sites[1]).contains(&format!(
-                "definition={} site=s1\n",
+                "definition={} site=s0\n",
                 sites[1].owner.definition
             ))
+        );
+
+        // The slot object names its default's claims, labeled as the slot.
+        let holder = artifacts
+            .sem
+            .classes
+            .iter()
+            .position(|class| class.name == "<holder>")
+            .expect("holder");
+        let report = artifacts
+            .claim_report(
+                &format!("slot:c{holder}.s0"),
+                crate::claims::ClaimDetail::Summary,
+            )
+            .expect("slot default claims");
+        assert_eq!(report.definition, sites[1].owner.definition);
+        assert_eq!(report.label, "slot default <holder>.size");
+        assert_eq!(report.tally.sites, 1);
+        assert!(
+            dump_sem(&artifacts.sem).contains("    default code\n"),
+            "the sem dump shows the default's code"
         );
     }
 
@@ -21042,6 +21150,69 @@ mod tests {
         assert!(affected(QueryArtifact::DefinitionTyping(main)));
         assert!(!affected(QueryArtifact::DefinitionTyping(quiet)));
         assert!(!affected(QueryArtifact::Bind));
+    }
+
+    #[test]
+    fn slot_default_body_edit_retypes_the_slot_and_lowers_again() {
+        // The default's code is typed as the slot, so editing it changes the
+        // slot's sem output, retypes the slot and lowers again.
+        let source = "define class <box> (<object>)\n  \
+                      slot n :: <integer>, init-value: begin\n    \
+                      let u = 0;\n    while (u < 3) u := u + 1 end;\n    u\n  end;\n\
+                      end;\n\
+                      define function main() => <integer>\n  make(<box>).n\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let id = session.add_source("box.loko", source);
+        let _ = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+        let update = session
+            .edit_and_compile(
+                id,
+                &source.replace("u < 3", "u < 4"),
+                RuntimeMode::CompileOnly,
+            )
+            .expect("source exists");
+        let slot = update.artifacts.sem.classes[1].direct_slots[0].definition;
+        let main = function_definition(&update.artifacts, "main");
+        for artifact in [
+            QueryArtifact::DefinitionSem(slot),
+            QueryArtifact::DefinitionTyping(slot),
+            QueryArtifact::LoweredModule,
+        ] {
+            assert_eq!(
+                cache_action(&update, artifact),
+                Some(CacheAction::Recomputed),
+                "{artifact:?}"
+            );
+        }
+        assert!(update.artifacts.typing.definition(main).is_some());
+        assert_eq!(
+            update
+                .artifacts
+                .typing
+                .definition(slot)
+                .map(|typed| typed.kind),
+            Some(DefinitionKind::Slot)
+        );
+    }
+
+    #[test]
+    fn installed_code_runs_its_own_slot_defaults() {
+        // The retried `remake` makes a box under the new code, whose default
+        // is the edited one.
+        let old = "define class <box> (<object>)\n  \
+                   slot n :: <integer>, init-value: begin let k = 1; k end;\nend;\n\
+                   define class <oops> (<error>)\nend;\n\
+                   define function remake() => <integer>\n  \
+                   let b = make(<box>);\n  signal(make(<oops>));\n  b.n\nend;\n\
+                   define function main() => <integer>\n  remake()\nend;";
+        let new = old
+            .replace("let k = 1; k", "let k = 7; k")
+            .replace("\n  signal(make(<oops>));", "");
+        let seen = run_across_an_edit(old, &new, Then::Retry("remake"));
+        assert_eq!((seen.refused, seen.retry_refused), (None, None));
+        assert_eq!(seen.value, Some(FunctionValue::Integer(7)));
     }
 
     #[test]

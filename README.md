@@ -232,7 +232,10 @@ The current slices include:
 - `begin body end`, a body as an expression, whose `let`s are its own and
   whose last expression is its value;
 - nominal classes with typed slots, init keywords, inherited slots, and slot
-  assignment through setter generics;
+  assignment through setter generics. A slot's `init-value:` default may be
+  any expression, a `begin … end` body with its own `let`s, loops and
+  closures included; it runs afresh at each `make` that takes it (a
+  literal default is computed in place);
 - generic functions and multi-argument method dispatch over nominal classes;
 - Dylan's keyword parameters: `define function scale (x, #key by :: <integer>
   = 2, plus = 0)`, called as `scale(3)`, `scale(3, by: 10)` or `scale(3,

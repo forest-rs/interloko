@@ -105,7 +105,6 @@
 "sem.collection-method-overrides-kernel" = "[ps] { $function } kernel method for { $class } cannot be overridden"
 "sem.for-clause-type-mismatch" = "[ps] for { $word } got { $actual }, need { $expected }"
 "sem.slot-default-type-mismatch" = "[ps] slot { $slot } default got { $actual }, need { $expected }"
-"sem.slot-default-binds-locals" = "[ps] slot { $slot } default binds local { $local }"
 "sem.constant-initializer-cycle" = "[ps] constant { $constant } initializer cycle: { $cycle }"
 "sem.missing-required-init-keyword" = "[ps] slot { $slot } needs init keyword { $keyword }"
 "sem.missing-slot-initializer" = "[ps] slot { $slot } needs initializer"
