@@ -1,0 +1,8 @@
+// expect: diagnostic code sem.unexpected-keyword-argument
+// expect: diagnostics 1
+// expect: diagnostic contains `element` takes no `start:` argument
+// `element` takes only `default:`.
+
+define function main() => <object>
+  element(#[1], 0, start: 1)
+end;

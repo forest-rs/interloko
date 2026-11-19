@@ -451,6 +451,9 @@ pub enum RuntimeOp {
     VectorSize,
     /// Returns a vector element as `<object>`.
     VectorRef,
+    /// Returns a vector element as `<object>`, or a default when the index
+    /// is outside the vector.
+    VectorElementOr,
     /// Renders a float as literal text.
     FloatToString,
     /// Renders a `<single-float>` as suffixed literal text.
@@ -5609,6 +5612,12 @@ impl<'module> BodyLowering<'module> {
                     let kind = self.value_kind(generic_info.result_kinds[0])?;
                     return self.coerce_value(result, kind, *span);
                 }
+                if let Some(result) =
+                    self.lower_kernel_collection_send(generic_info, args, *site, *span)?
+                {
+                    let kind = self.value_kind(generic_info.result_kinds[0])?;
+                    return self.coerce_value(result, kind, *span);
+                }
                 let args = self.lower_generic_args(args, generic_info)?;
                 if generic_info.result_kinds.len() != 1 {
                     return Err(invalid_semantic(
@@ -7815,6 +7824,73 @@ impl<'module> BodyLowering<'module> {
             .then_some(method)
     }
 
+    /// Lowers a send of a built-in collection generic to its kernel
+    /// method's operation, run inline, when typing proved the send selects
+    /// that method and every argument already has its parameter's kind;
+    /// otherwise returns `None`, having emitted nothing.
+    ///
+    /// The generic is sealed over the classes its kernel methods specialize
+    /// on ([`sem::GenericFunctionOrigin::admits_method`]), so no method a
+    /// program or a later install adds can be more specific for these
+    /// arguments, and inlining runs what dispatch would.
+    fn lower_kernel_collection_send(
+        &mut self,
+        generic: &sem::GenericFunction,
+        args: &[sem::Expr],
+        site: sem::SiteId,
+        span: Span,
+    ) -> Result<Option<Value>, LowerError> {
+        if !matches!(
+            generic.origin,
+            sem::GenericFunctionOrigin::Collection { .. }
+        ) {
+            return Ok(None);
+        }
+        let Some(decision) = self.fact(site) else {
+            return Ok(None);
+        };
+        if decision.verdict != typing::TypingVerdict::Proved
+            || decision.rule != typing::TypingRule::DispatchCovered
+        {
+            return Ok(None);
+        }
+        let Some(method) = decision
+            .selected_method
+            .and_then(|method| self.module.methods.get(method.0 as usize))
+        else {
+            return Ok(None);
+        };
+        let sem::Expr::IntrinsicCall {
+            intrinsic,
+            result_kind,
+            ..
+        } = &method.body.result
+        else {
+            return Ok(None);
+        };
+        if method.generic != generic.id
+            || !matches!(method.origin, sem::MethodOrigin::Collection { .. })
+            || method.params.len() != args.len()
+        {
+            return Ok(None);
+        }
+        for (param, arg) in method.params.iter().zip(args) {
+            let Some(local) = method.locals.get(param.0 as usize) else {
+                return Ok(None);
+            };
+            let actual = self.module.expr_kind(arg);
+            let fits = actual == local.kind
+                || (local.kind == sem::ValueKind::I64
+                    && matches!(actual, sem::ValueKind::I32 | sem::ValueKind::U32));
+            if !fits {
+                return Ok(None);
+            }
+        }
+        let result = self.lower_intrinsic_call(*intrinsic, args, *result_kind, span)?;
+        self.record(site, CheckCodegen::Inlined);
+        Ok(Some(result))
+    }
+
     /// Lowers `expr` if it is a send typing proved runs a built-in numeric
     /// method (see [`Self::inline_numeric_method`]), and `None`, having
     /// emitted nothing, otherwise.
@@ -9463,6 +9539,7 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> RuntimeOp {
         sem::Intrinsic::MethodSpecializers => RuntimeOp::MethodSpecializers,
         sem::Intrinsic::VectorSize => RuntimeOp::VectorSize,
         sem::Intrinsic::VectorRef => RuntimeOp::VectorRef,
+        sem::Intrinsic::VectorElementOr => RuntimeOp::VectorElementOr,
         sem::Intrinsic::FloatToString => RuntimeOp::FloatToString,
         sem::Intrinsic::IntegerToString => RuntimeOp::IntegerToString,
         sem::Intrinsic::Concatenate => RuntimeOp::Concatenate,
@@ -9499,6 +9576,7 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         | RuntimeOp::SubclassTypeClass
         | RuntimeOp::TypeName => index == 0,
         RuntimeOp::VectorRef => index == 0,
+        RuntimeOp::VectorElementOr => index != 1,
         RuntimeOp::InstanceOfType => true,
         RuntimeOp::LimitedIntegerType => false,
         RuntimeOp::ClassMetaObject
@@ -10278,6 +10356,7 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::MethodSpecializers => "method-specializers",
         RuntimeOp::VectorSize => "vector-size",
         RuntimeOp::VectorRef => "vector-ref",
+        RuntimeOp::VectorElementOr => "vector-element-or",
         RuntimeOp::FloatToString | RuntimeOp::SingleFloatToString => "float-to-string",
         RuntimeOp::IntegerToString => "integer-to-string",
         RuntimeOp::Concatenate => "concatenate",

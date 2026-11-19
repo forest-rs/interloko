@@ -1,0 +1,9 @@
+// expect: run 2
+// expect: diagnostics 0
+// The collection generics are values like any generic, even where a name
+// is their first mention.
+
+define function main() => <integer>
+  let f = size;
+  as(<integer>, apply(f, #[1, 2]))
+end;

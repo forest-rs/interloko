@@ -1,0 +1,11 @@
+// expect: runtime code dispatch.no-applicable-method
+// expect: run reports no method of size applies to (<string>)
+// expect: diagnostic code typing.dispatch-no-applicable-method
+// expect: diagnostics 1
+// `size` is a generic, and `<string>` has no method for it yet: soft typing
+// warns that the send cannot find one, and at run time it signals
+// `<no-applicable-method>`, as any generic's send does.
+
+define function main() => <integer>
+  size("abc")
+end;

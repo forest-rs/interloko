@@ -238,6 +238,16 @@ pub enum DiagnosticCode {
     AssignmentTargetNotAssignable,
     /// A closure captures a local that `:=` assigns.
     AssignedLocalCaptured,
+    /// A call passes a keyword argument its callee does not take.
+    UnexpectedKeywordArgument,
+    /// A call passes the same keyword argument twice.
+    DuplicateKeywordArgument,
+    /// A call passes `default:` to `element` on a collection whose class is
+    /// not statically one with a kernel method that takes it.
+    CollectionDefaultUnsupported,
+    /// A method of a built-in collection generic specializes on a kernel
+    /// class the generic already has a kernel method for.
+    CollectionMethodOverridesKernel,
     /// A slot default `init-value:` has the wrong type.
     SlotDefaultTypeMismatch,
     /// A required init keyword is missing.
@@ -437,6 +447,10 @@ impl DiagnosticCode {
         Self::LocalAssignmentTypeMismatch,
         Self::AssignmentTargetNotAssignable,
         Self::AssignedLocalCaptured,
+        Self::UnexpectedKeywordArgument,
+        Self::DuplicateKeywordArgument,
+        Self::CollectionDefaultUnsupported,
+        Self::CollectionMethodOverridesKernel,
         Self::SlotDefaultTypeMismatch,
         Self::MissingRequiredInitKeyword,
         Self::MissingSlotInitializer,
@@ -582,6 +596,10 @@ impl DiagnosticCode {
             Self::LocalAssignmentTypeMismatch => "sem.local-assignment-type-mismatch",
             Self::AssignmentTargetNotAssignable => "sem.assignment-target-not-assignable",
             Self::AssignedLocalCaptured => "sem.assigned-local-captured",
+            Self::UnexpectedKeywordArgument => "sem.unexpected-keyword-argument",
+            Self::DuplicateKeywordArgument => "sem.duplicate-keyword-argument",
+            Self::CollectionDefaultUnsupported => "sem.collection-default-unsupported",
+            Self::CollectionMethodOverridesKernel => "sem.collection-method-overrides-kernel",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
             Self::MissingRequiredInitKeyword => "sem.missing-required-init-keyword",
             Self::MissingSlotInitializer => "sem.missing-slot-initializer",
@@ -728,6 +746,10 @@ impl DiagnosticCode {
             "sem.local-assignment-type-mismatch" => Self::LocalAssignmentTypeMismatch,
             "sem.assignment-target-not-assignable" => Self::AssignmentTargetNotAssignable,
             "sem.assigned-local-captured" => Self::AssignedLocalCaptured,
+            "sem.unexpected-keyword-argument" => Self::UnexpectedKeywordArgument,
+            "sem.duplicate-keyword-argument" => Self::DuplicateKeywordArgument,
+            "sem.collection-default-unsupported" => Self::CollectionDefaultUnsupported,
+            "sem.collection-method-overrides-kernel" => Self::CollectionMethodOverridesKernel,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,
             "sem.missing-required-init-keyword" => Self::MissingRequiredInitKeyword,
             "sem.missing-slot-initializer" => Self::MissingSlotInitializer,

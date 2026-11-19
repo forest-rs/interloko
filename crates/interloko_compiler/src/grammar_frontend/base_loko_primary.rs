@@ -880,11 +880,43 @@ impl BaseLokoCstProjector<'_> {
             return self.error_node(node.span);
         };
         let mut folded = self.build_expr(primary);
-        for name_node in node
-            .children
-            .iter()
-            .filter(|child| child.is_rule("member-name"))
-        {
+        // Accesses fold left in source order: `a.b[i].c` reads `b` of `a`,
+        // indexes it, then reads `c` of the element.
+        for access in &node.children {
+            if access.is_rule("index-access") {
+                let Some(key) = access
+                    .children
+                    .iter()
+                    .find(|child| child.is_rule("expression"))
+                else {
+                    return self.error_node(node.span);
+                };
+                let key = self.build_expr(key);
+                let open = self.first_token_index(
+                    Span::new(folded.span.end, key.span.start),
+                    TokenKind::LBracket,
+                );
+                let close = self.first_token_index(
+                    Span::new(key.span.end, Span::from(access.span).end),
+                    TokenKind::RBracket,
+                );
+                let span = folded.span.cover(self.tokens[close].span);
+                folded = self.node(
+                    CstKind::IndexExpr,
+                    vec![
+                        CstElement::Node(folded),
+                        CstElement::Token(open),
+                        CstElement::Node(key),
+                        CstElement::Token(close),
+                    ],
+                    span,
+                );
+                continue;
+            }
+            if !access.is_rule("member-name") {
+                continue;
+            }
+            let name_node = access;
             let dot = self.first_token_index(
                 Span::new(folded.span.end, name_node.span.start),
                 TokenKind::Dot,

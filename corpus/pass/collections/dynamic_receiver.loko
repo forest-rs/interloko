@@ -1,0 +1,26 @@
+// expect: run 13
+// expect: diagnostics 0
+// expect: dump lowered contains vector-ref
+// A receiver typing knows is a `<vector>` runs the kernel method inline;
+// an `<object>` receiver dispatches, reaching a program's method or the
+// kernel's alike.
+
+define class <bag> (<object>)
+end;
+
+define method size (b :: <bag>) => <integer>
+  3
+end;
+
+define function measure(c :: <object>) => <integer>
+  size(c)
+end;
+
+define function second(c :: <object>) => <object>
+  c[1]
+end;
+
+define function main() => <integer>
+  measure(make(<bag>)) + measure(#[7, 8]) + as(<integer>, #[0][0])
+    + as(<integer>, second(#[7, 8]))
+end;

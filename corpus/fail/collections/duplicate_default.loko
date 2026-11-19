@@ -1,0 +1,7 @@
+// expect: diagnostic code sem.duplicate-keyword-argument
+// expect: diagnostics 1
+// expect: diagnostic contains `default:` is given more than once
+
+define function main() => <object>
+  element(#[1], 0, default: 1, default: 2)
+end;

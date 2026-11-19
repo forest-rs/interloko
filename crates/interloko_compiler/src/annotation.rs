@@ -546,9 +546,12 @@ fn collect_expr(expr: &ast::Expr, binders: &mut Vec<Binder>) {
             collect_block(body, binders);
         }
         Expr::InstanceOf { value, .. } | Expr::Cast { value, .. } => collect_expr(value, binders),
-        Expr::Call { args, .. } => {
+        Expr::Call { args, keywords, .. } => {
             for arg in args {
                 collect_expr(arg, binders);
+            }
+            for keyword in keywords {
+                collect_expr(&keyword.value, binders);
             }
         }
         Expr::Signal { condition, .. } => collect_expr(condition, binders),

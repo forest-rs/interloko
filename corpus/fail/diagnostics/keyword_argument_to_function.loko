@@ -1,0 +1,13 @@
+// expect: diagnostic code sem.unexpected-keyword-argument
+// expect: diagnostics 1
+// expect: diagnostic contains `twice` takes no `by:` argument
+// A function takes no keyword arguments, and one passed to it is an error
+// rather than dropped.
+
+define function twice(n :: <integer>) => <integer>
+  n * 2
+end;
+
+define function main() => <integer>
+  twice(4, by: 3)
+end;

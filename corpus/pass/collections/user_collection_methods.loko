@@ -1,0 +1,29 @@
+// expect: run 3042
+// expect: diagnostics 0
+// `size`, `element` and `element-setter` are open generics: a program's
+// own collection class joins them with methods, and `c[k]` and
+// `c[k] := v` then work on it as on the kernel's collections.
+
+define class <pair> (<object>)
+  slot left :: <integer>, init-value: 0;
+  slot right :: <integer>, init-value: 0;
+end;
+
+define method size (p :: <pair>) => <integer>
+  2
+end;
+
+define method element (p :: <pair>, k :: <integer>) => <object>
+  if (k = 0) p.left else p.right end
+end;
+
+define method element-setter (v :: <integer>, p :: <pair>, k :: <integer>) => <object>
+  if (k = 0) p.left := v else p.right := v end
+end;
+
+define function main() => <integer>
+  let p = make(<pair>);
+  p[0] := 40;
+  p[1] := 2;
+  size(p) * 1000 + size(#[1]) * 1000 + as(<integer>, p[0]) + as(<integer>, element(p, 1))
+end;

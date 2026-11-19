@@ -1,0 +1,13 @@
+// expect: run 107
+// expect: diagnostics 0
+// `element` returns its `default:` for an index outside the collection, on
+// either side, and the element itself for one inside.
+
+define function at(v :: <vector>, i :: <integer>) => <integer>
+  as(<integer>, element(v, i, default: 50))
+end;
+
+define function main() => <integer>
+  let v = #[7];
+  at(v, 0) + at(v, 1) + at(v, -1)
+end;

@@ -666,14 +666,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Direct call syntax.
+    /// Direct call syntax, also written by element access: `x[i]` is
+    /// `element(x, i)` and `x[i] := v` is `element-setter(v, x, i)`.
     Call {
         /// Stable-ish AST node identity.
         id: AstNodeId,
         /// Callee name.
         callee: String,
-        /// Argument expressions.
+        /// Positional argument expressions.
         args: Vec<Expr>,
+        /// Keyword arguments, such as `default: 0`, in source order.
+        keywords: Vec<KeywordArg>,
         /// Source span.
         span: Span,
     },
@@ -924,8 +927,11 @@ impl Expr {
             Self::Loop { test, body, .. } => test.assigns(name) || body.assigns(name),
             Self::Vector {
                 elements: exprs, ..
+            } => exprs.iter().any(|expr| expr.assigns(name)),
+            Self::Call { args, keywords, .. } => {
+                args.iter().any(|expr| expr.assigns(name))
+                    || keywords.iter().any(|keyword| keyword.value.assigns(name))
             }
-            | Self::Call { args: exprs, .. } => exprs.iter().any(|expr| expr.assigns(name)),
             Self::InstanceOf { value: inner, .. }
             | Self::Cast { value: inner, .. }
             | Self::Signal {
@@ -1964,6 +1970,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::TypeExpr => self.lower_class_name(node),
             CstKind::CallExpr => self.lower_call(node),
             CstKind::SlotExpr => self.lower_slot_read(node),
+            CstKind::IndexExpr => self.lower_index(node),
             CstKind::SlotAssignExpr => self.lower_slot_assign(node),
             CstKind::UnaryExpr => self.lower_unary(node),
             CstKind::BinaryExpr => self.lower_binary(node),
@@ -2346,6 +2353,9 @@ impl<'tree> Lowering<'tree> {
         if text == "make" {
             return self.lower_make_object(node);
         }
+        if matches!(text, "signal" | "instance?" | "as") {
+            self.reject_keyword_args(node, text);
+        }
         if text == "signal" {
             return self.lower_signal(node);
         }
@@ -2359,13 +2369,15 @@ impl<'tree> Lowering<'tree> {
             return self.lower_type_literal(node);
         }
         let mut args = Vec::new();
+        let mut keywords = Vec::new();
         for arg_list in node.child_nodes(CstKind::ArgList) {
             for child in &arg_list.children {
                 if let CstElement::Node(expr) = child {
                     if matches!(expr.kind, CstKind::KeywordArg) {
-                        continue;
+                        keywords.push(self.lower_keyword_arg(expr));
+                    } else {
+                        args.push(self.lower_expr(expr));
                     }
-                    args.push(self.lower_expr(expr));
                 }
             }
         }
@@ -2373,7 +2385,29 @@ impl<'tree> Lowering<'tree> {
             id: self.ast_id(node),
             callee: text.to_string(),
             args,
+            keywords,
             span: node.span.cover(name_span),
+        }
+    }
+
+    /// Lowers `collection[key]` to Dylan's `element(collection, key)`.
+    fn lower_index(&mut self, node: &CstNode) -> Expr {
+        let mut operands = node.children.iter().filter_map(|child| match child {
+            CstElement::Node(expr) if !expr.kind.is_role() => Some(expr),
+            _ => None,
+        });
+        let (Some(collection), Some(key)) = (operands.next(), operands.next()) else {
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        Expr::Call {
+            id: self.ast_id(node),
+            callee: String::from("element"),
+            args: vec![self.lower_expr(collection), self.lower_expr(key)],
+            keywords: Vec::new(),
+            span: node.span,
         }
     }
 
@@ -2389,6 +2423,7 @@ impl<'tree> Lowering<'tree> {
                 id: self.ast_id(node),
                 callee: "instance?".into(),
                 args,
+                keywords: Vec::new(),
                 span: node.span,
             };
         }
@@ -2427,6 +2462,23 @@ impl<'tree> Lowering<'tree> {
                     span: node.span,
                 }
             }
+        }
+    }
+
+    /// Reports each keyword argument of `node`, a call of `callee`, which
+    /// takes none.
+    fn reject_keyword_args(&mut self, node: &CstNode, callee: &str) {
+        let keywords = node
+            .child_nodes(CstKind::ArgList)
+            .flat_map(|list| list.child_nodes(CstKind::KeywordArg))
+            .collect::<Vec<_>>();
+        for keyword in keywords {
+            let keyword = self.lower_keyword_arg(keyword);
+            self.diagnostics.push(
+                Diagnostic::error(keyword.span, DiagnosticCode::UnexpectedKeywordArgument)
+                    .with_arg(DiagnosticArg::text("callee", callee.to_string()))
+                    .with_arg(DiagnosticArg::text("keyword", keyword.name)),
+            );
         }
     }
 
@@ -2700,6 +2752,31 @@ impl<'tree> Lowering<'tree> {
                 name,
                 name_span,
                 value: Box::new(value),
+                span: node.span,
+            };
+        }
+        // `collection[key] := value` is Dylan's
+        // `element-setter(value, collection, key)`.
+        if let Expr::Call {
+            callee,
+            args,
+            keywords,
+            ..
+        } = &target
+            && callee == "element"
+            && keywords.is_empty()
+            && matches!(
+                node.children.first(),
+                Some(CstElement::Node(target)) if target.kind == CstKind::IndexExpr
+            )
+        {
+            let mut args = args.clone();
+            args.insert(0, value);
+            return Expr::Call {
+                id: self.ast_id(node),
+                callee: String::from("element-setter"),
+                args,
+                keywords: Vec::new(),
                 span: node.span,
             };
         }
@@ -3691,6 +3768,7 @@ impl FrontendFormLowering {
                     .iter()
                     .map(|arg| self.lower_frontend_expression(arg))
                     .collect(),
+                keywords: Vec::new(),
                 span: *source_span,
             },
             FrontendExpression::Binary {

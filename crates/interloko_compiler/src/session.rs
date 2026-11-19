@@ -8010,11 +8010,20 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             dump_ast_expr(out, value, indent + 2);
         }
         ast::Expr::Call {
-            id, callee, args, ..
+            id,
+            callee,
+            args,
+            keywords,
+            ..
         } => {
             let _ = writeln!(out, "{id} call {callee}");
             for arg in args {
                 dump_ast_expr(out, arg, indent + 2);
+            }
+            for keyword in keywords {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "keyword {} {}", keyword.id, keyword.name);
+                dump_ast_expr(out, &keyword.value, indent + 4);
             }
         }
         ast::Expr::Signal { id, condition, .. } => {
@@ -13733,6 +13742,7 @@ fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
         sem::Intrinsic::MethodSpecializers => "method-specializers",
         sem::Intrinsic::VectorSize => "vector-size",
         sem::Intrinsic::VectorRef => "vector-ref",
+        sem::Intrinsic::VectorElementOr => "element",
         sem::Intrinsic::FloatToString => "float-to-string",
         sem::Intrinsic::IntegerToString => "integer-to-string",
         sem::Intrinsic::Concatenate => "concatenate",
@@ -14395,6 +14405,9 @@ fn sem_generic_origin_label(origin: sem::GenericFunctionOrigin) -> String {
         sem::GenericFunctionOrigin::Numeric { operator } => {
             format!("numeric({}) sealed=<real>", operator.name())
         }
+        sem::GenericFunctionOrigin::Collection { function } => {
+            format!("collection({})", function.name())
+        }
     }
 }
 
@@ -14406,6 +14419,7 @@ fn sem_method_origin_label(origin: sem::MethodOrigin) -> String {
         }
         sem::MethodOrigin::Session { sequence } => format!("session(#{sequence})"),
         sem::MethodOrigin::Numeric { operator } => format!("numeric({})", operator.name()),
+        sem::MethodOrigin::Collection { function } => format!("collection({})", function.name()),
     }
 }
 

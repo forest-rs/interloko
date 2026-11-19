@@ -1,0 +1,8 @@
+// expect: diagnostic code sem.unexpected-keyword-argument
+// expect: diagnostics 1
+// expect: diagnostic contains `as` takes no `by:` argument
+// `as` takes a type and a value, and no keyword arguments.
+
+define function main() => <integer>
+  as(<integer>, 3, by: 2)
+end;

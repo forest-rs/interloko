@@ -1222,6 +1222,11 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::VECTOR_REF,
             runtime::vector_ref_signature(),
         ),
+        (
+            RuntimeOp::VectorElementOr,
+            runtime::VECTOR_REF,
+            runtime::vector_element_or_signature(),
+        ),
     ]
     .into_iter()
     .map(|(op, symbol, sig)| (op, builder.host_sig_for(symbol, sig)))

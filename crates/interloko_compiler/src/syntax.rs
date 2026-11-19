@@ -354,7 +354,11 @@ pub enum CstKind {
     SlotExpr,
     /// Member name used after `.` in a slot read.
     MemberName,
-    /// Assignment expression: `object.slot := value` or `local := value`.
+    /// Element access expression `collection[key]`, Dylan's sugar for
+    /// `element(collection, key)`.
+    IndexExpr,
+    /// Assignment expression: `object.slot := value`, `collection[key] :=
+    /// value` or `local := value`.
     SlotAssignExpr,
     /// Call argument list.
     ArgList,
@@ -744,6 +748,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::SelectExpr => 60,
         CstKind::SelectTest => 61,
         CstKind::SelectClause => 62,
+        CstKind::IndexExpr => 63,
     }
 }
 

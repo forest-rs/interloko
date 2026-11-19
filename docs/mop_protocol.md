@@ -84,6 +84,12 @@ vector-size(vector)                 => <integer>
 vector-ref(vector, index)           => <object>
 ```
 
+The collection generics `size(vector)` and `element(vector, index,
+default: d)`, written `vector[index]` without a default, serve vectors too;
+their kernel methods are `collection(size)` and `collection(element)`
+methods in the MOP, and `generic-function-methods` lists them with a
+program's own.
+
 ## Direct Versus Effective
 
 Direct class facts are source facts. `class-direct-slots(<circle>)` returns the
