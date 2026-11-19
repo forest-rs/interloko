@@ -275,6 +275,9 @@ pub enum DiagnosticCode {
     /// built-in function with several overloads is, specializes on a
     /// kernel class the generic already has a kernel method for.
     CollectionMethodOverridesKernel,
+    /// A method of a slot's getter generic specializes on a class declaring
+    /// the slot, or a subclass, so it would override the slot's getter.
+    MethodOverridesSlotGetter,
     /// A numeric `for` clause's start, bound or step is not an `<integer>`.
     ForClauseTypeMismatch,
     /// A slot default `init-value:` has the wrong type.
@@ -495,6 +498,7 @@ impl DiagnosticCode {
         Self::MethodKeywordDefault,
         Self::MethodKeywordTypeMismatch,
         Self::CollectionMethodOverridesKernel,
+        Self::MethodOverridesSlotGetter,
         Self::ForClauseTypeMismatch,
         Self::SlotDefaultTypeMismatch,
         Self::ConstantInitializerCycle,
@@ -656,6 +660,7 @@ impl DiagnosticCode {
             Self::MethodKeywordDefault => "sem.method-keyword-default",
             Self::MethodKeywordTypeMismatch => "sem.method-keyword-type-mismatch",
             Self::CollectionMethodOverridesKernel => "sem.collection-method-overrides-kernel",
+            Self::MethodOverridesSlotGetter => "sem.method-overrides-slot-getter",
             Self::ForClauseTypeMismatch => "sem.for-clause-type-mismatch",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
             Self::ConstantInitializerCycle => "sem.constant-initializer-cycle",
@@ -818,6 +823,7 @@ impl DiagnosticCode {
             "sem.method-keyword-default" => Self::MethodKeywordDefault,
             "sem.method-keyword-type-mismatch" => Self::MethodKeywordTypeMismatch,
             "sem.collection-method-overrides-kernel" => Self::CollectionMethodOverridesKernel,
+            "sem.method-overrides-slot-getter" => Self::MethodOverridesSlotGetter,
             "sem.for-clause-type-mismatch" => Self::ForClauseTypeMismatch,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,
             "sem.constant-initializer-cycle" => Self::ConstantInitializerCycle,

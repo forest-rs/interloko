@@ -217,17 +217,8 @@ pub struct HostFunctionId(
 pub enum KnownCallable {
     /// A direct source function.
     DirectFunction(FunctionId),
-    /// A generic function dispatcher.
+    /// A generic function dispatcher, a slot's getter among them.
     GenericFunction(GenericFunctionId),
-    /// A getter accessor introduced by a slot declaration.
-    SlotAccessor {
-        /// Stable accessor identity.
-        accessor: DefinitionId,
-        /// Owning class.
-        class: ClassId,
-        /// Slot read by this accessor.
-        slot: SlotId,
-    },
 }
 
 /// Semantic value category for this slice.
@@ -856,6 +847,14 @@ pub enum GenericFunctionOrigin {
         /// Operator the generic implements.
         operator: promotion::NumericOperator,
     },
+    /// Generic a slot's getter is, as in Dylan, whose methods read the slots
+    /// of that name of the classes declaring one. It is sealed over those
+    /// classes: a method for one of them or a subclass would override a
+    /// slot's getter, which reads of a receiver of known class skip.
+    SlotGetter {
+        /// The generic, whose getter methods fix what it is sealed over.
+        generic: GenericFunctionId,
+    },
     /// Built-in generic a built-in function with several overloads is as
     /// a value, such as `sqrt` or `as-uppercase` (see the `built_in`
     /// module): one kernel method per overload, each the built-in's call of
@@ -887,6 +886,9 @@ impl GenericFunctionOrigin {
         match self {
             Self::Source => true,
             Self::SlotSetter { .. } => false,
+            Self::SlotGetter { generic } => module
+                .slot_getter_overridden(generic, specializers)
+                .is_none(),
             Self::BuiltIn { generic } => {
                 // A method whose specializers may all meet a kernel
                 // method's would override it for those arguments.
@@ -984,6 +986,27 @@ pub enum MethodSelection {
 }
 
 impl Module {
+    /// The class whose slot's getter a method of `generic` specialized on
+    /// `specializers` would override, when there is one: a class with a
+    /// getter method of `generic` that the method's first specializer is,
+    /// or is a subclass of.
+    #[must_use]
+    pub fn slot_getter_overridden(
+        &self,
+        generic: GenericFunctionId,
+        specializers: &[MethodSpecializer],
+    ) -> Option<ClassId> {
+        let class = specializers.first().copied().flatten()?;
+        self.methods.iter().find_map(|method| match method.origin {
+            MethodOrigin::SlotGetter { class: owner, .. }
+                if method.generic == generic && self.is_same_or_subclass(class, owner) =>
+            {
+                Some(owner)
+            }
+            _ => None,
+        })
+    }
+
     /// Returns the classes whose direct superclass is `class`, in class id
     /// order.
     #[must_use]
@@ -1537,22 +1560,6 @@ impl Module {
                 .generics
                 .get(generic.0 as usize)
                 .map(|generic| self.generic_signature(generic, outer)),
-            KnownCallable::SlotAccessor { class, slot, .. } => {
-                let slot = self
-                    .classes
-                    .get(class.0 as usize)?
-                    .effective_slots
-                    .get(slot.0 as usize)?;
-                Some(Contract {
-                    params: vec![self.kind_type(ValueKind::Object(class)).into()],
-                    results: vec![self.value_contract(
-                        slot.kind,
-                        slot.callable_signature.as_ref(),
-                        slot.range,
-                        outer,
-                    )],
-                })
-            }
         }
     }
 
@@ -1877,6 +1884,33 @@ fn check_collection_method_overrides(module: &mut Module) {
             Diagnostic::error(method.span, DiagnosticCode::CollectionMethodOverridesKernel)
                 .with_arg(DiagnosticArg::text("function", generic.name.clone()))
                 .with_arg(DiagnosticArg::text("class", class)),
+        );
+    }
+    module.diagnostics.extend(diagnostics);
+}
+
+/// Reports each method of a slot's getter generic that would override a
+/// slot's getter: one specialized on a class declaring the slot, or on a
+/// subclass. Getters are sealed over their slots' classes, so a read of a
+/// receiver of known class reads the slot directly
+/// ([`GenericFunctionOrigin::SlotGetter`]).
+fn check_slot_getter_overrides(module: &mut Module) {
+    let mut diagnostics = Vec::new();
+    for method in &module.methods {
+        if matches!(method.origin, MethodOrigin::SlotGetter { .. }) {
+            continue;
+        }
+        let Some(class) = module.slot_getter_overridden(method.generic, &method.specializers)
+        else {
+            continue;
+        };
+        let (mut generic, mut owner) = (String::new(), String::new());
+        let _ = module.write_generic(&mut generic, method.generic);
+        let _ = module.write_class(&mut owner, class);
+        diagnostics.push(
+            Diagnostic::error(method.span, DiagnosticCode::MethodOverridesSlotGetter)
+                .with_arg(DiagnosticArg::text("generic", generic))
+                .with_arg(DiagnosticArg::text("class", owner)),
         );
     }
     module.diagnostics.extend(diagnostics);
@@ -3145,6 +3179,13 @@ pub enum MethodOrigin {
     /// Kernel method of a built-in generic a built-in function with
     /// several overloads is: one overload's call of its parameters.
     BuiltIn,
+    /// Compiler-synthesized getter method of a slot: a read of the slot.
+    SlotGetter {
+        /// Class that declared the slot.
+        class: ClassId,
+        /// Effective slot the method reads.
+        slot: SlotId,
+    },
     /// Kernel method of a built-in collection generic, from
     /// [`BUILTIN_METHODS`]. Its body is the row's operation on its
     /// parameters.
@@ -5693,13 +5734,6 @@ struct ActiveRestart {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum AccessorResolution {
-    None,
-    One(KnownCallable),
-    Ambiguous,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum FinalizeState {
     Unvisited,
     Visiting,
@@ -5991,6 +6025,9 @@ struct Lowering {
     /// typing cannot resolve names one. Each persists across lowering
     /// passes; its kernel methods are regenerated with every pass.
     built_in_generics: Vec<(String, GenericFunctionId)>,
+    /// The generics slots' getters are methods of, by getter name: each
+    /// created for its name, or the program's own generic of the name.
+    slot_getters: Vec<(String, GenericFunctionId)>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -6021,6 +6058,7 @@ impl Lowering {
             program_functions: module.functions.len(),
             built_in_functions: Vec::new(),
             built_in_generics: Vec::new(),
+            slot_getters: Vec::new(),
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
@@ -6032,6 +6070,7 @@ impl Lowering {
         lowering.mark_slot_defaults(module);
         lowering.finalize_classes();
         lowering.collect_slot_setter_generics();
+        lowering.collect_slot_getter_generics();
         lowering.check_host_function_conflicts();
         lowering
     }
@@ -6978,6 +7017,296 @@ impl Lowering {
         }
     }
 
+    /// The classes' slots whose getters are methods of a getter generic:
+    /// each class's own direct slots, as the class and its effective slot.
+    /// A subclass reaches its superclass's slot through dispatch.
+    fn getter_slots(&self) -> Vec<(ClassId, EffectiveSlot)> {
+        self.classes
+            .iter()
+            .flat_map(|class| {
+                class
+                    .effective_slots
+                    .iter()
+                    .filter(move |slot| slot.source_class == class.id)
+                    .map(move |slot| (class.id, slot.clone()))
+            })
+            .collect()
+    }
+
+    /// Joins each slot's getter to the program's own generic of its name,
+    /// as in Dylan, so the generic reads the slot of each class declaring
+    /// one. Any other getter's generic is made the first time something
+    /// needs it ([`Self::slot_getter_named`]).
+    fn collect_slot_getter_generics(&mut self) {
+        let mut names = Vec::<String>::new();
+        for (_, slot) in self.getter_slots() {
+            if !names.contains(&slot.accessor.name) {
+                names.push(slot.accessor.name);
+            }
+        }
+        for name in names {
+            // A slot named `size` joins the kernel's `size`, as a method of
+            // a collection class of the program's does, when it holds an
+            // `<integer>` as `size` answers.
+            if CollectionFunction::from_name(&name) == Some(CollectionFunction::Size) {
+                if !self.shadows_collection_generic(&name)
+                    && self
+                        .getter_slots()
+                        .iter()
+                        .any(|(_, slot)| slot.accessor.name == name && slot.kind == ValueKind::I64)
+                {
+                    let id = self.collection_generic(CollectionFunction::Size);
+                    self.slot_getters.push((name, id));
+                }
+                continue;
+            }
+            let Some(symbol) = self
+                .resolve_generic(&name)
+                .filter(|_| CollectionFunction::from_name(&name).is_none())
+                .cloned()
+            else {
+                continue;
+            };
+            // A getter takes the one receiver, so a generic of other
+            // parameters cannot take it as a method.
+            if symbol.arity() != 1 {
+                for (_, slot) in self.getter_slots() {
+                    if slot.accessor.name == name {
+                        self.diagnostics.push(Self::getter_arity_mismatch(
+                            &name,
+                            symbol.arity(),
+                            slot.span,
+                        ));
+                    }
+                }
+                continue;
+            }
+            self.slot_getters.push((name, symbol.id));
+        }
+    }
+
+    /// The arity error of a slot whose getter's name a generic of
+    /// `arity` parameters takes.
+    fn getter_arity_mismatch(name: &str, arity: usize, span: Span) -> Diagnostic {
+        Diagnostic::error(span, DiagnosticCode::GenericMethodArityMismatch)
+            .with_arg(DiagnosticArg::text("method", name))
+            .with_arg(DiagnosticArg::unsigned(
+                "expected_count",
+                u64::try_from(arity).unwrap_or(u64::MAX),
+            ))
+            .with_arg(DiagnosticArg::unsigned("actual_count", 1))
+    }
+
+    /// The generic the slot getter `name` is, made on first use, as in
+    /// Dylan: its methods read the slots of that name of the classes
+    /// declaring one, and it dispatches on any other receiver's class. A
+    /// name a function, constant or host function of the program takes
+    /// keeps its getter for receivers of the slots' classes only, and so
+    /// does a built-in collection generic's name, whose kernel generic
+    /// serves every other receiver, except that an `<integer>` slot named
+    /// `size` joins the kernel's `size` ([`Self::collect_slot_getter_generics`]).
+    /// `None` when no slot has the getter.
+    fn slot_getter_named(&mut self, name: &str) -> Option<GenericFunctionId> {
+        if let Some(generic) = self.slot_getter(name) {
+            return Some(generic);
+        }
+        if !self.has_accessor(name)
+            || CollectionFunction::from_name(name).is_some()
+            || self.resolve_function(name).is_some()
+            || self.resolve_host_function(name).is_some()
+            || self.resolve_constant(name).is_some()
+            || self.resolve_generic(name).is_some()
+        {
+            return None;
+        }
+        let slots = self
+            .getter_slots()
+            .into_iter()
+            .filter(|(_, slot)| slot.accessor.name == name)
+            .map(|(_, slot)| slot)
+            .collect::<Vec<_>>();
+        // A callable result keeps the signature the slots agree on.
+        let signature = slots
+            .first()
+            .and_then(|first| first.callable_signature.clone())
+            .filter(|signature| {
+                slots
+                    .iter()
+                    .all(|slot| slot.callable_signature.as_ref() == Some(signature))
+            });
+        let shared = slots
+            .iter()
+            .map(|slot| (slot.kind, slot.range, slot.span))
+            .collect::<Vec<_>>();
+        let (first, _, span) = *shared.first()?;
+        // The result is the slots' kind where they agree, and an
+        // `<object>` where they do not, in the hull of their ranges.
+        let kind = if shared.iter().all(|(kind, _, _)| *kind == first) {
+            first
+        } else {
+            ValueKind::Any
+        };
+        let hull = shared
+            .iter()
+            .map(|(_, range, _)| *range)
+            .reduce(|left, right| left.zip(right).map(|(left, right)| left.hull(right)))
+            .flatten()
+            .filter(|_| kind == ValueKind::I64);
+        let id = GenericFunctionId(u32::try_from(self.generics.len()).unwrap_or(u32::MAX));
+        let definition = DefinitionId::new(
+            self.source_file,
+            DefinitionKind::Generic,
+            name,
+            "slot-getter",
+        );
+        self.generic_symbols.push(GenericSymbol {
+            name: name.into(),
+            id,
+            param_kinds: vec![None],
+            param_ranges: vec![None],
+            return_kinds: vec![kind],
+            return_callable_sigs: vec![signature.clone()],
+            return_ranges: vec![hull],
+            return_annotation: Some(vec![kind]),
+            dispatch_param: 0,
+            span,
+        });
+        self.generics.push(GenericFunction {
+            id,
+            definition,
+            name: name.into(),
+            params: vec!["object".into()],
+            param_kinds: vec![None],
+            param_ranges: vec![None],
+            arity: 1,
+            dispatch_param: 0,
+            dispatch_params: vec![0],
+            result_kinds: vec![kind],
+            result_callable_sigs: vec![signature],
+            result_ranges: vec![hull],
+            return_annotation: Some(vec![kind]),
+            span,
+            origin: GenericFunctionOrigin::SlotGetter { generic: id },
+            sealing: Sealing::Open,
+            strict: false,
+            keywords: Vec::new(),
+        });
+        self.slot_getters.push((name.into(), id));
+        Some(id)
+    }
+
+    /// Whether values of `kind` are of a class with a slot whose getter is
+    /// `name`, declared or inherited.
+    fn declares_slot(&self, kind: ValueKind, name: &str) -> bool {
+        self.value_kind_class(kind).is_some_and(|class| {
+            self.classes.get(class.0 as usize).is_some_and(|class| {
+                class
+                    .effective_slots
+                    .iter()
+                    .any(|slot| slot.accessor.name == name)
+            })
+        })
+    }
+
+    /// The getter generic named `name`, if slots' getters are its methods.
+    fn slot_getter(&self, name: &str) -> Option<GenericFunctionId> {
+        self.slot_getters
+            .iter()
+            .find(|(getter, _)| getter == name)
+            .map(|(_, id)| *id)
+    }
+
+    /// Generates each slot's getter method on its getter generic: a read of
+    /// the slot of a receiver of its class.
+    fn collect_slot_getter_methods(&mut self) {
+        for (class, slot) in self.getter_slots() {
+            let Some(generic) = self.slot_getter(&slot.accessor.name) else {
+                continue;
+            };
+            // A kernel collection generic takes only a getter of its result
+            // type.
+            if self
+                .collection_generics
+                .iter()
+                .any(|(_, id)| *id == generic)
+                && slot.kind != ValueKind::I64
+            {
+                continue;
+            }
+            // A program's generic declares what its methods return, the
+            // getter's included.
+            if let Some(expected) = self
+                .generic_symbols
+                .get(generic.0 as usize)
+                .and_then(|symbol| symbol.return_annotation.clone())
+                && !self.result_kinds_match(&expected, &[slot.kind])
+            {
+                self.diagnostics.push(
+                    Diagnostic::error(slot.span, DiagnosticCode::GenericMethodResultTypeMismatch)
+                        .with_arg(DiagnosticArg::text("method", slot.accessor.name.clone()))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(slot.kind)))
+                        .with_arg(DiagnosticArg::text(
+                            "expected",
+                            self.result_kinds_name(&expected),
+                        )),
+                );
+                continue;
+            }
+            let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+            let definition = DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Method,
+                &slot.accessor.name,
+                &format!("slot-getter:{}", slot.definition.raw()),
+            );
+            let mut ctx = FunctionContext::new();
+            let object = ctx.add_local(
+                self.local_definition(definition, "object"),
+                "object".into(),
+                ValueKind::Object(class),
+                None,
+                slot.span,
+            );
+            let body = Block {
+                statements: Vec::new(),
+                result: Expr::AccessorCall {
+                    accessor: slot.accessor.definition,
+                    receiver: Box::new(Expr::Local {
+                        local: object,
+                        result_kind: ValueKind::Object(class),
+                        callable_signature: None,
+                        span: slot.span,
+                    }),
+                    class,
+                    slot: slot.id,
+                    result_kind: slot.accessor.result_kind,
+                    span: slot.span,
+                },
+                span: slot.span,
+            };
+            self.methods.push(Method {
+                id,
+                definition,
+                generic,
+                specializer: class,
+                specializers: vec![Some(class)],
+                param: object,
+                params: vec![object],
+                locals: ctx.locals,
+                body,
+                result_kinds: vec![slot.kind],
+                result_ranges: vec![slot.range],
+                return_annotation: Some(vec![slot.kind]),
+                span: slot.span,
+                origin: MethodOrigin::SlotGetter {
+                    class,
+                    slot: slot.id,
+                },
+                strict: false,
+            });
+        }
+    }
+
     fn collect_slot_setter_generics(&mut self) {
         let slots = self
             .classes
@@ -7041,7 +7370,18 @@ impl Lowering {
                 &setter_name,
                 &format!("slot-setter:{}", slot_definition.raw()),
             );
-            let param_kinds = vec![Some(slot_kind), Some(ValueKind::Any)];
+            // The new value is the slots' kind where they agree, and an
+            // `<object>` each method checks for its own where they do not.
+            let value_kind = if slots
+                .iter()
+                .filter(|other| other.3 == *slot_name)
+                .all(|other| other.4.0 == slot_kind)
+            {
+                slot_kind
+            } else {
+                ValueKind::Any
+            };
+            let param_kinds = vec![Some(value_kind), Some(ValueKind::Any)];
             let origin = GenericFunctionOrigin::SlotSetter { class, slot };
             let param_ranges = vec![shared, None];
             self.generic_symbols.push(GenericSymbol {
@@ -7049,10 +7389,10 @@ impl Lowering {
                 id,
                 param_kinds: param_kinds.clone(),
                 param_ranges: param_ranges.clone(),
-                return_kinds: vec![slot_kind],
+                return_kinds: vec![value_kind],
                 return_callable_sigs: vec![None],
                 return_ranges: vec![hull],
-                return_annotation: Some(vec![slot_kind]),
+                return_annotation: Some(vec![value_kind]),
                 dispatch_param: 1,
                 span: slot_span,
             });
@@ -7066,10 +7406,10 @@ impl Lowering {
                 arity: 2,
                 dispatch_param: 1,
                 dispatch_params: vec![0, 1],
-                result_kinds: vec![slot_kind],
+                result_kinds: vec![value_kind],
                 result_callable_sigs: vec![None],
                 result_ranges: vec![hull],
-                return_annotation: Some(vec![slot_kind]),
+                return_annotation: Some(vec![value_kind]),
                 span: slot_span,
                 origin,
                 sealing: Sealing::Open,
@@ -7879,6 +8219,7 @@ impl Lowering {
             self.methods.push(method);
         }
         self.collect_slot_setter_methods();
+        self.collect_slot_getter_methods();
         self.collect_numeric_methods();
         self.collect_collection_methods();
         self.collect_built_in_methods();
@@ -7921,6 +8262,7 @@ impl Lowering {
             diagnostics: self.diagnostics.clone(),
         };
         check_collection_method_overrides(&mut lowered);
+        check_slot_getter_overrides(&mut lowered);
         // A keyword's default function restates its owner's parameter types,
         // so a problem with one is found once per default: report it once.
         let mut seen = Vec::with_capacity(lowered.diagnostics.len());
@@ -8100,6 +8442,7 @@ impl Lowering {
         // or the generic a built-in function with several overloads is.
         let _ = self.collection_generic_named(&method.name);
         let _ = self.built_in_generic_named(&method.name);
+        let _ = self.slot_getter_named(&method.name);
         let generic_symbol = self.resolve_generic(&method.name).cloned();
         let generic = generic_symbol
             .as_ref()
@@ -9636,10 +9979,16 @@ impl Lowering {
             ));
             return Expr::Error { span };
         }
+        // A slot's getter reads a receiver of the slot's class directly.
+        if self.slot_getter_named(callee).is_some() && lowered_args.len() == 1 {
+            let receiver = lowered_args.into_iter().next().expect("one argument");
+            return self.lower_accessor_call(ctx, receiver, callee, span);
+        }
         if let Some(symbol) = self.resolve_generic(callee).cloned() {
             return self.lower_generic_send(ctx, &symbol, lowered_args, callee, span);
         }
-        // A slot getter, the one definition left.
+        // A slot getter whose name a definition of the program takes too,
+        // the one definition left.
         if lowered_args.len() != 1 {
             ctx.diagnostics
                 .push(Self::arity_mismatch(callee, 1, args.len(), span));
@@ -10018,36 +10367,30 @@ impl Lowering {
                 span,
             };
         }
-        match self.resolve_accessor_callable(name) {
-            AccessorResolution::One(callable) => Expr::KnownCallable { callable, span },
-            AccessorResolution::Ambiguous => {
-                ctx.diagnostics.push(
-                    Diagnostic::error(span, DiagnosticCode::AmbiguousCallable)
-                        .with_arg(DiagnosticArg::text("accessor", name)),
-                );
-                Expr::Error { span }
-            }
-            AccessorResolution::None => {
-                if let Some(callable) = self.built_in_value(name) {
-                    return Expr::KnownCallable { callable, span };
-                }
-                let diagnostic = match self.spaced_hyphen_suggestion(ctx, name) {
-                    _ if built_in::FORMS.contains(&name) => {
-                        Diagnostic::error(span, DiagnosticCode::BuiltInFormValue)
-                            .with_arg(DiagnosticArg::text("function", name))
-                    }
-                    Some(spaced) => {
-                        Diagnostic::error(span, DiagnosticCode::UnresolvedHyphenatedLocal)
-                            .with_arg(DiagnosticArg::text("local", name))
-                            .with_arg(DiagnosticArg::text("spaced", spaced))
-                    }
-                    None => Diagnostic::error(span, DiagnosticCode::UnresolvedLocal)
-                        .with_arg(DiagnosticArg::text("local", name)),
-                };
-                ctx.diagnostics.push(diagnostic);
-                Expr::Error { span }
-            }
+        // A slot's getter is a generic, made the first time a value names
+        // it.
+        if let Some(generic) = self.slot_getter_named(name) {
+            return Expr::KnownCallable {
+                callable: KnownCallable::GenericFunction(generic),
+                span,
+            };
         }
+        if let Some(callable) = self.built_in_value(name) {
+            return Expr::KnownCallable { callable, span };
+        }
+        let diagnostic = match self.spaced_hyphen_suggestion(ctx, name) {
+            _ if built_in::FORMS.contains(&name) => {
+                Diagnostic::error(span, DiagnosticCode::BuiltInFormValue)
+                    .with_arg(DiagnosticArg::text("function", name))
+            }
+            Some(spaced) => Diagnostic::error(span, DiagnosticCode::UnresolvedHyphenatedLocal)
+                .with_arg(DiagnosticArg::text("local", name))
+                .with_arg(DiagnosticArg::text("spaced", spaced)),
+            None => Diagnostic::error(span, DiagnosticCode::UnresolvedLocal)
+                .with_arg(DiagnosticArg::text("local", name)),
+        };
+        ctx.diagnostics.push(diagnostic);
+        Expr::Error { span }
     }
 
     /// Suggests the spaced form of an unresolved hyphenated name.
@@ -10073,7 +10416,7 @@ impl Lowering {
             || self.resolve_constant(name).is_some()
             || self.resolve_function(name).is_some()
             || self.resolve_generic(name).is_some()
-            || self.resolve_accessor_callable(name) != AccessorResolution::None
+            || self.has_accessor(name)
     }
 
     /// Lowers the anonymous method `method (params) => return_type body
@@ -10347,9 +10690,6 @@ impl Lowering {
             ValueKind::KnownCallable(KnownCallable::GenericFunction(generic))
             | ValueKind::GenericFunctionObject(generic) => {
                 self.lower_applied_generic_callable_call(ctx, target, generic, lowered_args, span)
-            }
-            ValueKind::KnownCallable(KnownCallable::SlotAccessor { class, slot, .. }) => {
-                self.lower_applied_accessor_call(ctx, target, class, slot, lowered_args, span)
             }
             ValueKind::Callable => self.lower_applied_dynamic_callable_call(
                 ctx,
@@ -12558,67 +12898,6 @@ impl Lowering {
         }
     }
 
-    fn lower_applied_accessor_call(
-        &self,
-        ctx: &mut FunctionContext,
-        target: Expr,
-        class: ClassId,
-        slot: SlotId,
-        args: Vec<Expr>,
-        span: Span,
-    ) -> Expr {
-        let Some(class_info) = self.classes.get(class.0 as usize) else {
-            return Expr::Error { span };
-        };
-        let Some(slot_info) = class_info.effective_slots.get(slot.0 as usize) else {
-            return Expr::Error { span };
-        };
-        let expected_arity = 1;
-        if args.len() != expected_arity {
-            ctx.diagnostics.push(
-                Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
-                    .with_arg(DiagnosticArg::text(
-                        "callee",
-                        slot_info.accessor.name.clone(),
-                    ))
-                    .with_arg(DiagnosticArg::unsigned(
-                        "expected_count",
-                        u64::try_from(expected_arity).unwrap_or(u64::MAX),
-                    ))
-                    .with_arg(DiagnosticArg::unsigned(
-                        "actual_count",
-                        u64::try_from(args.len()).unwrap_or(u64::MAX),
-                    )),
-            );
-            return Expr::Error { span };
-        }
-        let expected = ValueKind::Object(class);
-        let mut args = args;
-        self.narrow_args(&mut args, &[expected], &[]);
-        let actual = self.expr_kind(&args[0]);
-        if !self.kinds_match(expected, actual) {
-            ctx.diagnostics.push(
-                Diagnostic::error(args[0].span(), DiagnosticCode::FunctionArgumentTypeMismatch)
-                    .with_arg(DiagnosticArg::text(
-                        "function",
-                        slot_info.accessor.name.clone(),
-                    ))
-                    .with_arg(DiagnosticArg::unsigned("argument_index", 1))
-                    .with_arg(DiagnosticArg::text("expected", self.kind_name(expected)))
-                    .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
-            );
-        }
-        Expr::CallableCall {
-            callable: Box::new(target),
-            args,
-            arg_kinds: vec![ValueKind::Object(class)],
-            keywords: Vec::new(),
-            result_kinds: vec![slot_info.kind],
-            result_callable_sigs: vec![None],
-            span,
-        }
-    }
-
     fn lower_applied_generic_callable_call(
         &self,
         ctx: &mut FunctionContext,
@@ -12686,7 +12965,6 @@ impl Lowering {
             KnownCallable::GenericFunction(generic) => {
                 self.generic_symbols.get(generic.0 as usize)?.name.clone()
             }
-            KnownCallable::SlotAccessor { .. } => return None,
         };
         // A built-in's value calls the built-in, inline where a call of its
         // name would be.
@@ -12697,10 +12975,18 @@ impl Lowering {
             KnownCallable::GenericFunction(generic) => {
                 self.built_in_generics.iter().any(|(_, id)| *id == generic)
             }
-            KnownCallable::SlotAccessor { .. } => false,
         };
         if built_in {
             return Some(self.lower_built_in_call(ctx, id, &name, args, keywords, None, span));
+        }
+        // A slot's getter reads a receiver of the slot's class directly.
+        if let KnownCallable::GenericFunction(generic) = callable
+            && self.slot_getter(&name) == Some(generic)
+            && let [receiver] = args
+            && keywords.is_empty()
+        {
+            let receiver = self.lower_expr(ctx, receiver);
+            return Some(self.lower_accessor_call(ctx, receiver, &name, span));
         }
         if let Some(function) = self
             .collection_generics
@@ -12735,7 +13021,6 @@ impl Lowering {
                 let symbol = self.generic_symbols.get(generic.0 as usize)?.clone();
                 self.lower_generic_send(ctx, &symbol, lowered, &name, span)
             }
-            KnownCallable::SlotAccessor { .. } => return None,
         })
     }
 
@@ -16375,6 +16660,22 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let receiver = self.lower_expr(ctx, receiver);
+        // A receiver of a class without the slot sends to the setter
+        // generic, which dispatches on its class, as a getter's read does.
+        let setter_name = slot_setter_name(slot_name);
+        if !self.declares_slot(self.expr_kind(&receiver), slot_name)
+            && self.slot_getter_named(slot_name).is_some()
+            && let Some(setter) = self.resolve_generic(&setter_name).cloned()
+        {
+            let value = self.lower_expr(ctx, value);
+            return self.lower_generic_send(
+                ctx,
+                &setter,
+                vec![value, receiver],
+                &setter_name,
+                span,
+            );
+        }
         let receiver = self.narrow_receiver(receiver, slot_name);
         let receiver_kind = self.expr_kind(&receiver);
         // A typed callable slot's signature is expected of the value.
@@ -16484,13 +16785,27 @@ impl Lowering {
         }
     }
 
+    /// Lowers a read of the slot getter `accessor_name` of `receiver`,
+    /// `receiver.name` or `name(receiver)`. A receiver of a class with the
+    /// slot reads it directly, since a getter is sealed over its slot's
+    /// classes; any other receiver sends to the getter generic, which
+    /// dispatches on its class (and caches the method it finds). A getter
+    /// whose name a definition of the program takes has no generic, so its
+    /// receiver must be of a class with the slot, or narrow to the one
+    /// class declaring it.
     fn lower_accessor_call(
-        &self,
+        &mut self,
         ctx: &mut FunctionContext,
         receiver: Expr,
         accessor_name: &str,
         span: Span,
     ) -> Expr {
+        if !self.declares_slot(self.expr_kind(&receiver), accessor_name)
+            && let Some(generic) = self.slot_getter_named(accessor_name)
+            && let Some(symbol) = self.generic_symbols.get(generic.0 as usize).cloned()
+        {
+            return self.lower_generic_send(ctx, &symbol, vec![receiver], accessor_name, span);
+        }
         let receiver = self.narrow_receiver(receiver, accessor_name);
         let Some(class_id) = self.value_kind_class(self.expr_kind(&receiver)) else {
             ctx.diagnostics.push(
@@ -16902,33 +17217,6 @@ impl Lowering {
                 .iter()
                 .any(|slot| slot.accessor.name == name)
         })
-    }
-
-    fn resolve_accessor_callable(&self, name: &str) -> AccessorResolution {
-        let mut found = None;
-        for class in &self.classes {
-            for slot in &class.direct_slots {
-                if slot.accessor.name != name {
-                    continue;
-                }
-                let effective_slot = class
-                    .effective_slots
-                    .iter()
-                    .find(|effective| {
-                        effective.source_class == class.id && effective.source_slot == slot.id
-                    })
-                    .map_or(slot.id, |effective| effective.id);
-                let callable = KnownCallable::SlotAccessor {
-                    accessor: slot.accessor.definition,
-                    class: class.id,
-                    slot: effective_slot,
-                };
-                if found.replace(callable).is_some() {
-                    return AccessorResolution::Ambiguous;
-                }
-            }
-        }
-        found.map_or(AccessorResolution::None, AccessorResolution::One)
     }
 
     fn resolve_function_type_detail(
@@ -17543,19 +17831,6 @@ impl Lowering {
                     )
                 })
             }
-            KnownCallable::SlotAccessor { class, slot, .. } => {
-                let class = self.classes.get(class.0 as usize)?;
-                let slot = class.effective_slots.get(slot.0 as usize)?;
-                Some(CallableSignature {
-                    params: vec![ValueKind::Object(class.id)],
-                    param_sigs: vec![None],
-                    param_ranges: vec![None],
-                    results: vec![slot.kind],
-                    result_sigs: vec![slot.callable_signature.clone()],
-                    result_ranges: vec![slot.range],
-                    keywords: Vec::new(),
-                })
-            }
         }
     }
 
@@ -17882,14 +18157,6 @@ impl Lowering {
                     |symbol| format!("generic `{}`", symbol.name),
                 )
             }
-            KnownCallable::SlotAccessor { class, slot, .. } => self
-                .classes
-                .get(class.0 as usize)
-                .and_then(|class| class.effective_slots.get(slot.0 as usize))
-                .map_or_else(
-                    || format!("accessor#{}.{}", class.0, slot.0),
-                    |slot| format!("accessor `{}`", slot.accessor.name),
-                ),
         }
     }
 
@@ -18813,58 +19080,66 @@ mod tests {
     }
 
     #[test]
-    fn resolves_slot_accessor_values_without_applying_them() {
+    fn slot_getters_are_generics_whose_methods_read_the_slots() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
-             define function main()\n  let getter = radius;\n  1\nend;",
-        );
-
-        assert_eq!(module.diagnostics, Vec::new());
-        let circle = class(&module, "<circle>");
-        assert_eq!(
-            module.functions[0].locals[0].kind,
-            ValueKind::KnownCallable(KnownCallable::SlotAccessor {
-                accessor: circle.direct_slots[0].accessor.definition,
-                class: circle.id,
-                slot: SlotId(0),
-            })
-        );
-    }
-
-    #[test]
-    fn resolves_slot_accessor_values_as_callable_apply_targets() {
-        let module = lower_source(
-            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define class <wheel> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define function main()\n  let getter = radius;\n  apply(getter, make(<circle>, radius: 3))\nend;",
         );
 
         assert_eq!(module.diagnostics, Vec::new());
-        let circle = class(&module, "<circle>");
-        let expected = KnownCallable::SlotAccessor {
-            accessor: circle.direct_slots[0].accessor.definition,
-            class: circle.id,
-            slot: SlotId(0),
-        };
+        let getter = module
+            .generics
+            .iter()
+            .find(|generic| generic.name == "radius")
+            .expect("the getter is a generic");
+        assert_eq!(
+            getter.origin,
+            GenericFunctionOrigin::SlotGetter { generic: getter.id }
+        );
+        assert_eq!(getter.result_kinds, [ValueKind::I64]);
+        let readers = module
+            .methods
+            .iter()
+            .filter(|method| method.generic == getter.id)
+            .map(|method| method.specializers.clone())
+            .collect::<Vec<_>>();
+        let (circle, wheel) = (class_id(&module, "<circle>"), class_id(&module, "<wheel>"));
+        assert_eq!(readers, [vec![Some(circle)], vec![Some(wheel)]]);
         assert_eq!(
             module.functions[0].locals[0].kind,
-            ValueKind::KnownCallable(expected)
+            ValueKind::KnownCallable(KnownCallable::GenericFunction(getter.id))
         );
-        let Expr::CallableCall {
-            callable,
-            result_kinds,
-            ..
-        } = &module.functions[0].body.result
-        else {
-            panic!("expected accessor apply to remain a callable call");
+        // Sealed over the slots' classes: a method for one would override a
+        // getter, while one for another class may join.
+        assert_eq!(
+            module.slot_getter_overridden(getter.id, &[Some(circle)]),
+            Some(circle)
+        );
+        assert_eq!(
+            module.slot_getter_overridden(getter.id, &[Some(OBJECT_CLASS_ID)]),
+            None
+        );
+    }
+
+    #[test]
+    fn slot_reads_of_a_known_class_skip_the_getter_generic() {
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define class <wheel> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function known(c :: <circle>) => <integer>\n  c.radius + radius(c)\nend;\n\
+             define function any(o :: <object>) => <integer>\n  o.radius\nend;",
+        );
+
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::Binary { lhs, rhs, .. } = &module.functions[0].body.result else {
+            panic!("expected the sum of two reads");
         };
-        assert_eq!(result_kinds, &[ValueKind::I64]);
+        assert!(matches!(lhs.as_ref(), Expr::AccessorCall { .. }));
+        assert!(matches!(rhs.as_ref(), Expr::AccessorCall { .. }));
         assert!(matches!(
-            callable.as_ref(),
-            Expr::Local {
-                local: LocalId(0),
-                result_kind: ValueKind::KnownCallable(callable),
-                ..
-            } if *callable == expected
+            &module.functions[1].body.result,
+            Expr::GenericCall { generic, .. } if module.generics[generic.0 as usize].name == "radius"
         ));
     }
 

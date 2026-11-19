@@ -967,7 +967,7 @@ returns it, as an indirect entry checks an argument: a class or class
 object signals `type-error.entry` and a `limited(<integer>, ...)` range
 `type-error.range`, at the dispatcher's site
 (`check:<generic>@<start>..<end>`), until a replacement passes. A result
-sem knows to be one particular function, generic or accessor (an open
+sem knows to be one particular function or generic (an open
 generic whose methods all return it) has that callable as its only value,
 which no check of a closure could establish, so `use-value` supplies
 nothing for it and the dispatcher returns the callable. Code after the

@@ -1,7 +1,10 @@
 // expect: run 1
 // expect: diagnostics 0
-// expect: dump sem contains known-callable accessor c1.s0
-// expect: dump sem contains known-callable(accessor <circle>.radius)
+// expect: dump sem contains origin=slot-getter sealing=open
+// expect: dump sem contains known-callable(generic radius)
+
+// A slot's getter is a generic function, as in Dylan, so naming it as a
+// value names the generic.
 
 define class <circle> (<object>)
   slot radius :: <integer>;

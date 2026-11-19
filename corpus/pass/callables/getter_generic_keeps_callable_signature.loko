@@ -1,0 +1,16 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// A getter generic whose slots all hold one callable type answers that type,
+// so a call of the value an `<object>` receiver's getter answers is typed.
+
+define class <prefix> (<object>)
+  constant slot apply :: callable(<integer>) => <integer>, required-init-keyword: apply:;
+end;
+define class <postfix> (<object>)
+  constant slot apply :: callable(<integer>) => <integer>, required-init-keyword: apply:;
+end;
+define function main() => <integer>
+  let o :: <object> = make(<postfix>, apply: method (x :: <integer>) => <integer> x + 1 end);
+  o.apply(41)
+end;

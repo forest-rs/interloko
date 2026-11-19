@@ -462,15 +462,6 @@ pub enum FunctionKind {
     Method(sem::MethodId),
     /// A generated runtime dispatcher for a generic function.
     Dispatcher(sem::GenericFunctionId),
-    /// A generated callable getter for a slot accessor.
-    SlotAccessor {
-        /// Stable accessor identity.
-        accessor: DefinitionId,
-        /// Receiver class accepted by this accessor function.
-        class: sem::ClassId,
-        /// Effective slot read by this accessor function.
-        slot: sem::SlotId,
-    },
     /// A generated closure body that adapts a known callable to the closure ABI.
     CallableThunk {
         /// Known callable wrapped by this thunk.
@@ -2360,7 +2351,6 @@ struct LowerIds {
     generics: Vec<FunctionId>,
     generic_sigs: Vec<CallableSigId>,
     generic_closure_thunks: Vec<Option<FunctionId>>,
-    accessors: Vec<AccessorFunction>,
     closures: Vec<FunctionId>,
     closure_sigs: Vec<CallableSigId>,
     exit_thunks: Vec<ExitThunk>,
@@ -2408,25 +2398,7 @@ struct ExitThunk {
     boxed: FunctionId,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct AccessorFunction {
-    accessor: DefinitionId,
-    class: sem::ClassId,
-    slot: sem::SlotId,
-    function: FunctionId,
-    closure_thunk: FunctionId,
-    boxed_thunk: FunctionId,
-    sig: CallableSigId,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct AccessorTarget {
-    accessor: DefinitionId,
-    class: sem::ClassId,
-    slot: sem::SlotId,
-}
-
-/// What a callable value of a function, generic or slot accessor calls,
+/// What a callable value of a function or generic calls,
 /// for its typed and boxed entries.
 struct KnownCallableThunk {
     id: FunctionId,
@@ -2465,7 +2437,6 @@ struct KnownKeyword {
 struct CallableUses<'module> {
     functions: Vec<sem::FunctionId>,
     generics: Vec<sem::GenericFunctionId>,
-    accessors: Vec<AccessorTarget>,
     exits: Vec<Vec<sem::ValueKind>>,
     restarts: Vec<RestartDescriptor>,
     /// Classes and locals of the module and of the body being walked, for
@@ -2516,20 +2487,6 @@ impl<'module> Lowering<'module> {
             ids.generic_sigs.push(sig);
             next = next.saturating_add(1);
         }
-        for callable in callable_uses.accessors {
-            let signature = accessor_callable_signature(module, callable)?;
-            let sig = intern_callable_signature(&mut ids.call_sigs, signature);
-            ids.accessors.push(AccessorFunction {
-                accessor: callable.accessor,
-                class: callable.class,
-                slot: callable.slot,
-                function: FunctionId(next),
-                closure_thunk: FunctionId(u32::MAX),
-                boxed_thunk: FunctionId(u32::MAX),
-                sig,
-            });
-            next = next.saturating_add(1);
-        }
         // Thunks are emitted in function and generic id order, so their ids
         // are assigned in that order too, not in order of first use.
         let mut used_functions = callable_uses.functions;
@@ -2559,10 +2516,6 @@ impl<'module> Lowering<'module> {
                 *slot = Some(FunctionId(next));
                 next = next.saturating_add(1);
             }
-        }
-        for accessor in &mut ids.accessors {
-            accessor.closure_thunk = FunctionId(next);
-            next = next.saturating_add(1);
         }
         for closure in &module.closures {
             ids.closures.push(FunctionId(next));
@@ -2608,9 +2561,6 @@ impl<'module> Lowering<'module> {
             .iter()
             .map(|thunk| thunk.map(|_| take()))
             .collect();
-        for accessor in &mut ids.accessors {
-            accessor.boxed_thunk = take();
-        }
         ids.closure_boxed = module
             .closures
             .iter()
@@ -2728,7 +2678,6 @@ impl<'module> Lowering<'module> {
             self.module.functions.len()
                 + self.module.methods.len()
                 + self.module.generics.len()
-                + self.ids.accessors.len()
                 + self
                     .ids
                     .function_closure_thunks
@@ -2741,7 +2690,6 @@ impl<'module> Lowering<'module> {
                     .iter()
                     .filter(|id| id.is_some())
                     .count()
-                + self.ids.accessors.len()
                 + self.module.closures.len(),
         );
         let mut main = None;
@@ -2768,9 +2716,6 @@ impl<'module> Lowering<'module> {
                     .map_err(|error| error.within(generic.span))?,
             );
         }
-        for accessor in &self.ids.accessors {
-            functions.push(self.lower_accessor(*accessor)?);
-        }
         for function in &self.module.functions {
             if self
                 .ids
@@ -2793,9 +2738,6 @@ impl<'module> Lowering<'module> {
                 functions.push(self.lower_generic_closure_thunk(generic)?);
             }
         }
-        for accessor in &self.ids.accessors {
-            functions.push(self.lower_accessor_closure_thunk(*accessor)?);
-        }
         for closure in &self.module.closures {
             functions.push(
                 self.lower_closure(closure, &mut checks)
@@ -2814,9 +2756,6 @@ impl<'module> Lowering<'module> {
             if let Some(Some(boxed)) = self.ids.generic_boxed_thunks.get(generic.id.0 as usize) {
                 functions.push(self.lower_generic_boxed_thunk(generic, *boxed)?);
             }
-        }
-        for accessor in &self.ids.accessors {
-            functions.push(self.lower_accessor_boxed_thunk(*accessor)?);
         }
         for closure in &self.module.closures {
             if let Some(Some(boxed)) = self.ids.closure_boxed.get(closure.id.0 as usize) {
@@ -3284,56 +3223,6 @@ impl<'module> Lowering<'module> {
             span: generic.span,
         })
     }
-
-    fn lower_accessor(&self, accessor: AccessorFunction) -> Result<Function, LowerError> {
-        let class = self
-            .module
-            .classes
-            .get(accessor.class.0 as usize)
-            .ok_or_else(|| invalid_semantic("accessor class id is out of range"))?;
-        let slot = class
-            .effective_slots
-            .get(accessor.slot.0 as usize)
-            .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
-        let receiver = register_at(0);
-        let result = register_at(1);
-        let ret = self.value_kind(slot.kind)?;
-        Ok(Function {
-            id: accessor.function,
-            name: format!("{}#accessor{}", slot.accessor.name, accessor.function.0),
-            kind: FunctionKind::SlotAccessor {
-                accessor: accessor.accessor,
-                class: accessor.class,
-                slot: accessor.slot,
-            },
-            register_kinds: vec![ValueKind::Object(Some(accessor.class)), ret],
-            params: vec![Param {
-                source: None,
-                name: "receiver".into(),
-                kind: ValueKind::Object(Some(accessor.class)),
-                reg: receiver,
-            }],
-            ret,
-            rets: vec![ret],
-            locals: Vec::new(),
-            instructions: vec![
-                Instr::ReadSlot {
-                    dst: result,
-                    receiver,
-                    class: accessor.class,
-                    slot: accessor.slot,
-                    kind: ret,
-                    span: slot.span,
-                },
-                Instr::Return {
-                    values: vec![result],
-                    span: slot.span,
-                },
-            ],
-            span: slot.span,
-        })
-    }
-
     fn function_thunk(&self, function: &sem::Function) -> Result<KnownCallableThunk, LowerError> {
         let id = self
             .ids
@@ -3477,38 +3366,6 @@ impl<'module> Lowering<'module> {
             span: generic.span,
         })
     }
-
-    fn accessor_thunk(&self, accessor: AccessorFunction) -> Result<KnownCallableThunk, LowerError> {
-        let class = self
-            .module
-            .classes
-            .get(accessor.class.0 as usize)
-            .ok_or_else(|| invalid_semantic("accessor class id is out of range"))?;
-        let slot = class
-            .effective_slots
-            .get(accessor.slot.0 as usize)
-            .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
-        // An accessor has no body numbering sites, so its receiver check
-        // always stays.
-        Ok(KnownCallableThunk {
-            id: accessor.closure_thunk,
-            name: format!("{}#closure", slot.accessor.name),
-            callable: sem::KnownCallable::SlotAccessor {
-                accessor: accessor.accessor,
-                class: accessor.class,
-                slot: accessor.slot,
-            },
-            target: accessor.function,
-            sig: accessor.sig,
-            call_params: vec![ValueKind::Object(Some(accessor.class))],
-            param_ranges: vec![None],
-            entry_sites: None,
-            rets: vec![self.value_kind(slot.kind)?],
-            keywords: Vec::new(),
-            span: slot.span,
-        })
-    }
-
     fn lower_function_closure_thunk(
         &self,
         function: &sem::Function,
@@ -3539,25 +3396,6 @@ impl<'module> Lowering<'module> {
     ) -> Result<Function, LowerError> {
         self.lower_known_callable_boxed_thunk(&self.generic_thunk(generic)?, boxed, false)
     }
-
-    fn lower_accessor_closure_thunk(
-        &self,
-        accessor: AccessorFunction,
-    ) -> Result<Function, LowerError> {
-        self.lower_known_callable_thunk(&self.accessor_thunk(accessor)?, &mut Vec::new())
-    }
-
-    fn lower_accessor_boxed_thunk(
-        &self,
-        accessor: AccessorFunction,
-    ) -> Result<Function, LowerError> {
-        self.lower_known_callable_boxed_thunk(
-            &self.accessor_thunk(accessor)?,
-            accessor.boxed_thunk,
-            false,
-        )
-    }
-
     /// Lowers the typed entry of the callable values of a function, generic
     /// or slot accessor: it takes the arguments at the target's own kinds,
     /// checks the parameter types the target relies on that a typed
@@ -4503,18 +4341,6 @@ fn known_callable_sig(
             .get(generic.0 as usize)
             .copied()
             .ok_or_else(|| invalid_semantic("generic signature id is out of range")),
-        sem::KnownCallable::SlotAccessor {
-            accessor,
-            class,
-            slot,
-        } => ids
-            .accessors
-            .iter()
-            .find(|candidate| {
-                candidate.accessor == accessor && candidate.class == class && candidate.slot == slot
-            })
-            .map(|accessor| accessor.sig)
-            .ok_or_else(|| invalid_semantic("accessor function id is missing")),
     }
 }
 
@@ -4753,20 +4579,6 @@ fn push_known_callable_use(uses: &mut CallableUses, callable: sem::KnownCallable
         sem::KnownCallable::GenericFunction(generic) => {
             push_unique(&mut uses.generics, generic);
         }
-        sem::KnownCallable::SlotAccessor {
-            accessor,
-            class,
-            slot,
-        } => {
-            push_unique(
-                &mut uses.accessors,
-                AccessorTarget {
-                    accessor,
-                    class,
-                    slot,
-                },
-            );
-        }
     }
 }
 
@@ -4980,26 +4792,6 @@ fn intern_recorded_signatures(
     }
     Ok(())
 }
-
-fn accessor_callable_signature(
-    module: &sem::Module,
-    accessor: AccessorTarget,
-) -> Result<CallableSignature, LowerError> {
-    let class = module
-        .classes
-        .get(accessor.class.0 as usize)
-        .ok_or_else(|| invalid_semantic("accessor class id is out of range"))?;
-    let slot = class
-        .effective_slots
-        .get(accessor.slot.0 as usize)
-        .ok_or_else(|| invalid_semantic("accessor slot id is out of range"))?;
-    Ok(CallableSignature {
-        params: vec![ValueKind::Object(Some(accessor.class))],
-        rets: vec![value_kind(slot.kind)?],
-        keywords: Vec::new(),
-    })
-}
-
 fn generic_callable_signature(
     module: &sem::Module,
     generic: &sem::GenericFunction,
@@ -9083,14 +8875,6 @@ impl<'module> BodyLowering<'module> {
                     .unwrap_or(lowered);
                 (typed, boxed, sig)
             }
-            sem::KnownCallable::SlotAccessor {
-                accessor,
-                class,
-                slot,
-            } => {
-                let accessor = self.lower_accessor_function(accessor, class, slot)?;
-                (accessor.closure_thunk, accessor.boxed_thunk, accessor.sig)
-            }
         };
         self.emit_callable_new(function, BoxedEntry::Function(boxed), sig, &[], span)
     }
@@ -9271,23 +9055,6 @@ impl<'module> BodyLowering<'module> {
         };
         self.emit_callable_new(adapter, BoxedEntry::Shared(boxed.reg), sig, &captures, span)
     }
-
-    fn lower_accessor_function(
-        &self,
-        accessor: DefinitionId,
-        class: sem::ClassId,
-        slot: sem::SlotId,
-    ) -> Result<AccessorFunction, LowerError> {
-        self.ids
-            .accessors
-            .iter()
-            .find(|candidate| {
-                candidate.accessor == accessor && candidate.class == class && candidate.slot == slot
-            })
-            .copied()
-            .ok_or_else(|| invalid_semantic("accessor function id is missing"))
-    }
-
     /// Applies a callable sem knows to be `generic`, such as
     /// `apply(area, x)`: a send, as a call through the generic's value would
     /// make, but with the arguments as given, so a boxed `<object>` reaches
@@ -12896,8 +12663,7 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         sem::ValueKind::SlotDescriptorObject { .. } => Ok(ValueKind::SlotDescriptorObject),
         sem::ValueKind::Callable => Ok(ValueKind::Closure(None)),
         sem::ValueKind::KnownCallable(sem::KnownCallable::DirectFunction(_))
-        | sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(_))
-        | sem::ValueKind::KnownCallable(sem::KnownCallable::SlotAccessor { .. }) => {
+        | sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(_)) => {
             Ok(ValueKind::Closure(None))
         }
         sem::ValueKind::Error => Err(invalid_semantic("semantic value kind is invalid")),
@@ -14065,11 +13831,6 @@ impl Module {
             FunctionKind::Function(id) => writeln!(f, " ; source function {}", id.0),
             FunctionKind::Method(id) => writeln!(f, " ; method {}", id.0),
             FunctionKind::Dispatcher(id) => writeln!(f, " ; dispatcher for generic {}", id.0),
-            FunctionKind::SlotAccessor { class, slot, .. } => {
-                write!(f, " ; slot accessor ")?;
-                self.fmt_slot(f, class, slot)?;
-                writeln!(f)
-            }
             FunctionKind::CallableThunk { callable } => {
                 writeln!(f, " ; callable thunk {callable:?}")
             }
@@ -15321,19 +15082,21 @@ mod tests {
     }
 
     #[test]
-    fn lowers_slot_accessor_apply_to_indirect_call() {
+    fn lowers_slot_getter_apply_to_a_send() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define function main()\n  let getter = radius;\n  apply(getter, make(<circle>, radius: 3))\nend;",
         );
 
+        // The getter is a generic: its value is the generic's, applying it
+        // sends, and its method reads the slot.
         let dump = module.dump();
         assert!(dump.contains("fn l0 main"));
-        assert!(dump.contains("radius#accessor"));
-        assert!(dump.contains(" ; slot accessor <circle>.radius"));
+        assert!(dump.contains("radius#closure"));
         assert!(dump.contains("local l0 getter"));
         assert!(dump.contains("callable.new l"));
-        assert!(dump.contains("call.indirect"));
+        assert!(dump.contains("guarded-send g1"));
+        assert!(dump.contains("radius#method1(%r1 object: object(<circle>))"));
         assert!(dump.contains("slot.read %r1, <circle>.radius: i64"));
     }
 

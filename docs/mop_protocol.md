@@ -103,8 +103,9 @@ effective slot lists.
 - `slot-type` returns declared type text, not a first-class type object. Type
   objects cover classes, limited integer types and subclass types, but not
   `<boolean>` or callable types, which a slot may declare.
-- `slot-getter` returns the getter accessor name. Getter accessors are not
-  generic-function metaobjects yet.
+- `slot-getter` returns the getter's name. The getter is a generic function,
+  as in Dylan, whose methods read the slots of that name, but the protocol
+  does not answer its metaobject yet.
 - `slot-setter` returns the compiler-synthesized setter generic when a mutable
   native slot has one. Constant slots and read-only/host-backed slots return
   `#f`.

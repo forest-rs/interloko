@@ -1,0 +1,31 @@
+// expect: run 162
+// expect: diagnostics 0
+// expect: dump lowered contains guarded-send
+
+// Slot getters and setters are generic functions, as in Dylan. `power` is
+// a slot of two unrelated classes, so a read or a write of an `<object>`
+// receiver sends to the generic, whose guarded link caches the method the
+// receiver's class selects, while a receiver of a known class reads the
+// slot directly. The getter is a value like any generic.
+
+define class <infix> (<object>)
+  constant slot name :: <string>, required-init-keyword: name:;
+  slot power :: <integer>, required-init-keyword: power:;
+end;
+
+define class <prefix> (<object>)
+  slot power :: <integer>, required-init-keyword: power:;
+end;
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["+"] := make(<infix>, name: "+", power: 20);
+  t["-"] := make(<prefix>, power: 40);
+  let total = 0;
+  for (op in t) total := total + op.power end;
+  t["-"].power := 41;
+  let i :: <infix> = t["+"];
+  let getter = power;
+  let via :: <integer> = getter(t["-"]);
+  total + t["-"].power + i.power + via
+end;

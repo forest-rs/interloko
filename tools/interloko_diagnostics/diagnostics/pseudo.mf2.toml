@@ -105,6 +105,7 @@
 "sem.method-keyword-default" = "[ps] method #key { $keyword } has a default"
 "sem.method-keyword-type-mismatch" = "[ps] #key { $keyword } is { $expected }, not { $actual }"
 "sem.collection-method-overrides-kernel" = "[ps] { $function } kernel method for { $class } cannot be overridden"
+"sem.method-overrides-slot-getter" = "[ps] method overrides slot getter: { $generic } { $class }"
 "sem.for-clause-type-mismatch" = "[ps] for { $word } got { $actual }, need { $expected }"
 "sem.slot-default-type-mismatch" = "[ps] slot { $slot } default got { $actual }, need { $expected }"
 "sem.constant-initializer-cycle" = "[ps] constant { $constant } initializer cycle: { $cycle }"

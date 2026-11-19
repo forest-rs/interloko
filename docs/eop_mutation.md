@@ -846,8 +846,8 @@ every linked send with the function it calls now
 
 A callable value carries more than its type: code that applies it relies
 on a signature, either a declared `callable(<integer>) => <circle>` type
-or, for a value sem knows to be a particular function, generic or
-accessor, that definition's own signature. Only the known definition's
+or, for a value sem knows to be a particular function or generic (a slot
+getter among them), that definition's own signature. Only the known definition's
 signature is trusted outright. Nothing checks the callable a value of
 declared type holds against the declaration (it may have arrived through
 an untyped call), so a call through it relies only on the register kinds
