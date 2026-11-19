@@ -775,12 +775,19 @@ fn residual(
     if operands.is_empty() {
         operands = (0..decision.actual.len()).collect();
     }
+    // Joins that kept one side's fact explain the operand by that side:
+    // the others are cited for what they rely on, not for the type.
+    let principal = |index: &usize| {
+        decision
+            .because
+            .get(*index)
+            .map(|reason| typed.principal_reason(*reason))
+    };
     for index in &operands {
-        let (Some(actual), Some(reason)) =
-            (decision.actual.get(*index), decision.because.get(*index))
-        else {
+        let (Some(actual), Some(reason)) = (decision.actual.get(*index), principal(index)) else {
             continue;
         };
+        let reason = &reason;
         let chain = reason_chain(typed, *reason);
         if chain.iter().any(|kind| matches!(kind, ReasonKind::Widened)) {
             return with_fixes(
@@ -826,10 +833,10 @@ fn residual(
         );
     }
     for index in &operands {
-        let Some(reason) = decision.because.get(*index) else {
+        let Some(reason) = principal(index) else {
             continue;
         };
-        if let Some((input, target)) = unannotated_input(inputs, typed, *reason) {
+        if let Some((input, target)) = unannotated_input(inputs, typed, reason) {
             let mut residual = with_fixes(
                 ResidualCause::UnannotatedInput,
                 format!(
@@ -874,7 +881,8 @@ fn generic_definition(module: &sem::Module, generic: sem::GenericFunctionId) -> 
         .map_or(DefinitionId(0), |generic| generic.definition)
 }
 
-/// The kinds of every reason in the chain rooted at `id`.
+/// The kinds of the reasons the type of the fact `id` explains derives
+/// from: its whole chain, except the cited sides of kept joins.
 fn reason_chain(typed: &DefinitionTyping, id: ReasonId) -> Vec<&ReasonKind> {
     let mut out = Vec::new();
     let mut seen = vec![false; typed.reasons.len()];
@@ -890,7 +898,12 @@ fn reason_chain(typed: &DefinitionTyping, id: ReasonId) -> Vec<&ReasonKind> {
             continue;
         };
         out.push(&reason.kind);
-        queue.extend(reason.from.iter().copied());
+        // A kept join's type is its first side's; the others are cited for
+        // what they rely on, which says nothing about how the type arose.
+        match reason.kind {
+            ReasonKind::Kept => queue.extend(reason.from.first().copied()),
+            _ => queue.extend(reason.from.iter().copied()),
+        }
     }
     out
 }

@@ -327,6 +327,9 @@ pub(super) struct Analysis<'a> {
     /// The closed-world reasons each reason's chain cites, parallel to
     /// `reasons`.
     cited: Vec<Vec<ReasonId>>,
+    /// The definitions whose contracts each reason's chain cites, parallel
+    /// to `reasons`.
+    contracts: Vec<Vec<DefinitionId>>,
     constants: Vec<Option<Type>>,
     depth: usize,
     probe: Option<(ProbeTarget, Option<ProbeHit>)>,
@@ -350,6 +353,7 @@ impl<'a> Analysis<'a> {
             contexts: Vec::new(),
             assumptions: Vec::new(),
             cited: Vec::new(),
+            contracts: Vec::new(),
             constants: vec![None; module.constants.len()],
             depth: 0,
             probe: None,
@@ -597,6 +601,18 @@ impl<'a> Analysis<'a> {
             }
         }
         self.cited.push(cited);
+        let mut contracts = Vec::new();
+        if let ReasonKind::Contract { definition, .. } = kind {
+            contracts.push(definition);
+        }
+        for parent in &from {
+            for definition in self.contracts.get(parent.0 as usize).into_iter().flatten() {
+                if !contracts.contains(definition) {
+                    contracts.push(*definition);
+                }
+            }
+        }
+        self.contracts.push(contracts);
         self.reasons.push(Reason {
             kind,
             span,
@@ -818,6 +834,12 @@ impl<'a> Analysis<'a> {
                     .iter()
                     .map(|local| match back_env.dead {
                         None => back_env.get(Var::Local(*local)).cloned(),
+                        // No iteration comes back; the head relies on why,
+                        // unless an exit simply leaves.
+                        Some(dead) if !self.is_exit(dead) => Some(Fact {
+                            ty: Type::bottom(),
+                            reason: dead,
+                        }),
                         Some(_) => None,
                     })
                     .collect();
@@ -860,9 +882,10 @@ impl<'a> Analysis<'a> {
     /// `carried` have the types `head`, within their declared types.
     ///
     /// Each head fact derives from the entry's and, when `back` has it, the
-    /// back edge's fact, whose assumptions it relies on too. A head type
-    /// `back` says is exactly their join is [`ReasonKind::Joined`]; any
-    /// other is [`ReasonKind::Widened`], which may hold values no iteration
+    /// back edge's fact (or why the back edge is dead), whose assumptions it
+    /// relies on too. A head type `back` says is exactly their join is the
+    /// entry's ([`ReasonKind::Kept`]) or [`ReasonKind::Joined`]; any other
+    /// is [`ReasonKind::Widened`], which may hold values no iteration
     /// produces.
     fn loop_head(
         &mut self,
@@ -881,15 +904,17 @@ impl<'a> Analysis<'a> {
             };
             let (exact, back_reason) = back.get(index).copied().unwrap_or((false, None));
             // A head the back edge adds nothing to still relies on what the
-            // back edge's facts assumed, so it cites them.
+            // back edge's fact, or its deadness, assumed, so it cites it.
             if *ty == entry_fact.ty && back_reason.is_none_or(|back| back == entry_fact.reason) {
                 continue;
             }
             let ty = ty.meet(&self.declared_type(binding), self.module);
-            let kind = if exact {
-                ReasonKind::Joined
-            } else {
+            let kind = if !exact {
                 ReasonKind::Widened
+            } else if ty == entry_fact.ty {
+                ReasonKind::Kept
+            } else {
+                ReasonKind::Joined
             };
             let mut from = vec![entry_fact.reason];
             from.extend(back_reason);
@@ -947,9 +972,16 @@ impl<'a> Analysis<'a> {
 
     /// Evaluates `expr` under `env`, leaving `env` at the point after it.
     fn eval(&mut self, env: &mut Env, expr: &'a sem::Expr) -> Fact {
+        // Code no value reaches has no value: its fact is why it is dead,
+        // even where the code would itself transfer control.
+        let unreached = env.dead;
         let fact = self.transfer(env, expr);
-        let fact = match env.dead {
-            Some(dead) if !fact.ty.is_bottom() => Fact {
+        let fact = match (unreached, env.dead) {
+            (Some(dead), _) => Fact {
+                ty: Type::bottom(),
+                reason: dead,
+            },
+            (None, Some(dead)) if !fact.ty.is_bottom() => Fact {
                 ty: Type::bottom(),
                 reason: dead,
             },
@@ -1744,8 +1776,13 @@ impl<'a> Analysis<'a> {
                 rhs,
                 span,
             } if kind.is_integer() && test.assigned_locals().is_empty() => {
-                let lhs_hull = self.peek(when_true, lhs).as_ref().and_then(Interval::hull);
-                let rhs_hull = self.peek(when_true, rhs).as_ref().and_then(Interval::hull);
+                // Each side narrows the other by its hull, and relies on how
+                // that hull was derived.
+                let hull = |peeked: Option<(Type, Option<ReasonId>)>| {
+                    peeked.and_then(|(ty, reason)| Some((Interval::hull(&ty)?, reason)))
+                };
+                let lhs_hull = hull(self.peek(when_true, lhs));
+                let rhs_hull = hull(self.peek(when_true, rhs));
                 if let (Some(var), Some(other)) = (self.integer_var_of(lhs), rhs_hull) {
                     self.narrow_compare(when_true, when_false, var, *op, other, *span);
                 }
@@ -1800,11 +1837,11 @@ impl<'a> Analysis<'a> {
         span: Span,
     ) {
         let module = self.module;
-        self.refine(when_true, var, site, Branch::Then, span, |ty| {
+        self.refine(when_true, var, (site, None), Branch::Then, span, |ty| {
             (ty.meet(target, module), Vec::new())
         });
         // What a sealed cone loses to the test leaves its other pieces.
-        self.refine(when_false, var, site, Branch::Else, span, |ty| {
+        self.refine(when_false, var, (site, None), Branch::Else, span, |ty| {
             let difference = ty.difference(target, module);
             (difference.ty, difference.sealed)
         });
@@ -1817,7 +1854,7 @@ impl<'a> Analysis<'a> {
         when_false: &mut Env,
         var: Var,
         op: CompareOp,
-        other: Interval,
+        (other, other_reason): (Interval, Option<ReasonId>),
         span: Span,
     ) {
         let module = self.module;
@@ -1839,32 +1876,48 @@ impl<'a> Analysis<'a> {
             CompareOp::Eq => (other, Interval::UNBOUNDED),
         };
         let then_type = range_type(module, then_bound.range());
-        self.refine(when_true, var, None, Branch::Then, span, |ty| {
-            (ty.meet(&then_type, module), Vec::new())
-        });
+        self.refine(
+            when_true,
+            var,
+            (None, other_reason),
+            Branch::Then,
+            span,
+            |ty| (ty.meet(&then_type, module), Vec::new()),
+        );
         if op == CompareOp::Eq {
             if let Some(point) = other.point().and_then(|point| i64::try_from(point).ok()) {
                 let hole = range_type(module, IntRange::singleton(point));
-                self.refine(when_false, var, None, Branch::Else, span, |ty| {
-                    (ty.minus(&hole, module), Vec::new())
-                });
+                self.refine(
+                    when_false,
+                    var,
+                    (None, other_reason),
+                    Branch::Else,
+                    span,
+                    |ty| (ty.minus(&hole, module), Vec::new()),
+                );
             }
         } else {
             let else_type = range_type(module, else_bound.range());
-            self.refine(when_false, var, None, Branch::Else, span, |ty| {
-                (ty.meet(&else_type, module), Vec::new())
-            });
+            self.refine(
+                when_false,
+                var,
+                (None, other_reason),
+                Branch::Else,
+                span,
+                |ty| (ty.meet(&else_type, module), Vec::new()),
+            );
         }
     }
 
     /// Narrows `var` in `env` to what `narrow` returns for its current
     /// type, which also names the sealed classes the narrowing relied on;
-    /// the narrowed fact cites their assumptions after the fact it narrows.
+    /// the narrowed fact cites the fact it narrows, the fact `by` of what
+    /// it was compared against, if any, and those classes' assumptions.
     fn refine(
         &mut self,
         env: &mut Env,
         var: Var,
-        site: Option<SiteId>,
+        (site, by): (Option<SiteId>, Option<ReasonId>),
         branch: Branch,
         span: Span,
         narrow: impl FnOnce(&Type) -> (Type, Vec<ClassId>),
@@ -1877,6 +1930,7 @@ impl<'a> Analysis<'a> {
             return;
         }
         let mut from = vec![current.reason];
+        from.extend(by);
         from.extend(self.sealed_assumptions(&sealed));
         let reason = self.reason(ReasonKind::Narrowed { site, branch }, span, &ty, from);
         if ty.is_bottom() {
@@ -1916,43 +1970,65 @@ impl<'a> Analysis<'a> {
     /// The type of a comparison operand without evaluating it again: a
     /// local's or capture's fact, a literal's value, a proved conversion's
     /// operand, or sem's category.
-    fn peek(&self, env: &Env, expr: &sem::Expr) -> Option<Type> {
+    fn peek(&self, env: &Env, expr: &sem::Expr) -> Option<(Type, Option<ReasonId>)> {
         match expr {
-            sem::Expr::Local { .. } | sem::Expr::Capture { .. } => {
-                env.get(var_of(expr)?).map(|fact| fact.ty.clone())
-            }
+            sem::Expr::Local { .. } | sem::Expr::Capture { .. } => env
+                .get(var_of(expr)?)
+                .map(|fact| (fact.ty.clone(), Some(fact.reason))),
             sem::Expr::ConstI64 { value, .. } => {
-                Some(range_type(self.module, IntRange::singleton(*value)))
+                Some((range_type(self.module, IntRange::singleton(*value)), None))
             }
             sem::Expr::Const32 {
                 value: Number32::I32(value),
                 ..
-            } => Some(range_type(
-                self.module,
-                IntRange::singleton(i64::from(*value)),
+            } => Some((
+                range_type(self.module, IntRange::singleton(i64::from(*value))),
+                None,
             )),
             sem::Expr::Const32 {
                 value: Number32::U32(value),
                 ..
-            } => Some(range_type(
-                self.module,
-                IntRange::singleton(i64::from(*value)),
+            } => Some((
+                range_type(self.module, IntRange::singleton(i64::from(*value))),
+                None,
             )),
             sem::Expr::Convert { value, site, .. } | sem::Expr::CheckRange { value, site, .. }
                 if is_integer_expr(self.module, value) && self.proved_here(*site) =>
             {
                 self.peek(env, value)
             }
-            _ => Some(self.bound(expr)),
+            _ => Some((self.bound(expr), None)),
         }
     }
 
     fn join_facts(&mut self, left: Fact, right: Fact, span: Span) -> Fact {
-        if right.ty.is_bottom() {
-            return left;
+        if left.ty.is_bottom() && right.ty.is_bottom() {
+            let reason = self.join_dead(left.reason, right.reason, span);
+            return Fact {
+                ty: Type::bottom(),
+                reason,
+            };
         }
-        if left.ty.is_bottom() || left.reason == right.reason {
+        if right.ty.is_bottom() {
+            return self.only_live(left, right.reason, span);
+        }
+        if left.ty.is_bottom() {
+            return self.only_live(right, left.reason, span);
+        }
+        if left.reason == right.reason {
             return right;
+        }
+        // Both sides are one fact, one of them with more cited: the join is
+        // that fact, citing what either relies on.
+        if self.principal(left.reason) == self.principal(right.reason) {
+            if self.covers(right.reason, left.reason) {
+                return right;
+            }
+            if self.covers(left.reason, right.reason) {
+                return left;
+            }
+            let ty = left.ty;
+            return self.fact(ReasonKind::Kept, span, ty, vec![left.reason, right.reason]);
         }
         let ty = left.ty.join(&right.ty, self.module);
         self.fact(
@@ -1966,11 +2042,33 @@ impl<'a> Analysis<'a> {
     /// Joins the environments of two paths that meet. A binding missing on
     /// either path is out of scope after the join.
     fn join_env(&mut self, left: Env, right: Env, span: Span) -> Env {
-        if right.dead.is_some() {
-            return left;
-        }
-        if left.dead.is_some() {
-            return right;
+        match (left.dead, right.dead) {
+            (Some(left_dead), Some(right_dead)) => {
+                // A binding either dead path changed is marked as changed,
+                // so a join with a live path cites why both are dead.
+                let dead = self.join_dead(left_dead, right_dead, span);
+                let mark = |left: Vec<Option<Fact>>, right: Vec<Option<Fact>>| {
+                    left.into_iter()
+                        .zip(right)
+                        .map(|(left, right)| match (left, right) {
+                            (Some(left), Some(right)) if left.reason == right.reason => Some(left),
+                            (None, None) => None,
+                            _ => Some(Fact {
+                                ty: Type::bottom(),
+                                reason: dead,
+                            }),
+                        })
+                        .collect()
+                };
+                return Env {
+                    dead: Some(dead),
+                    locals: mark(left.locals, right.locals),
+                    captures: mark(left.captures, right.captures),
+                };
+            }
+            (None, Some(dead)) => return self.only_live_env(left, &right, dead, span),
+            (Some(dead), None) => return self.only_live_env(right, &left, dead, span),
+            (None, None) => {}
         }
         let Env {
             locals: left_locals,
@@ -1989,6 +2087,67 @@ impl<'a> Analysis<'a> {
         }
     }
 
+    /// Whether `dead`, why a path is dead, is an exit's transfer, which
+    /// relies on nothing.
+    fn is_exit(&self, dead: ReasonId) -> bool {
+        self.reasons
+            .get(dead.0 as usize)
+            .is_some_and(|reason| matches!(reason.kind, ReasonKind::Exit))
+    }
+
+    /// Why no value reaches where two dead paths meet: what either path's
+    /// reason relies on, an exit's relying on nothing.
+    fn join_dead(&mut self, left: ReasonId, right: ReasonId, span: Span) -> ReasonId {
+        if left == right || self.is_exit(right) || self.covers(left, right) {
+            return left;
+        }
+        if self.is_exit(left) || self.covers(right, left) {
+            return right;
+        }
+        self.reason(ReasonKind::Kept, span, &Type::bottom(), vec![left, right])
+    }
+
+    /// The fact `live` where it joins a path no value reaches because of
+    /// `dead`. Values arrive only by the live path, which the join relies
+    /// on as it relies on why the other path is dead, such as a sealing that
+    /// let a test rule it out. An exit's transfer relies on nothing.
+    fn only_live(&mut self, live: Fact, dead: ReasonId, span: Span) -> Fact {
+        if live.ty.is_bottom() || self.is_exit(dead) || self.covers(live.reason, dead) {
+            return live;
+        }
+        let ty = live.ty.clone();
+        self.fact(ReasonKind::Kept, span, ty, vec![live.reason, dead])
+    }
+
+    /// [`Self::only_live`] for the bindings of the environment `live` that
+    /// the dead path's environment `unreached` holds other facts for: a
+    /// binding the dead path left as it was would join to the same fact.
+    fn only_live_env(&mut self, mut live: Env, unreached: &Env, dead: ReasonId, span: Span) -> Env {
+        for (slots, other) in [
+            (&mut live.locals, &unreached.locals),
+            (&mut live.captures, &unreached.captures),
+        ] {
+            let taken = core::mem::take(slots);
+            *slots = taken
+                .into_iter()
+                .enumerate()
+                .map(|(index, fact)| {
+                    let fact = fact?;
+                    let untouched = other
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|other| other.reason == fact.reason);
+                    Some(if untouched {
+                        fact
+                    } else {
+                        self.only_live(fact, dead, span)
+                    })
+                })
+                .collect();
+        }
+        live
+    }
+
     fn join_slots(
         &mut self,
         left: Vec<Option<Fact>>,
@@ -2003,11 +2162,19 @@ impl<'a> Analysis<'a> {
                     return Some(left);
                 }
                 let ty = left.ty.join(&right.ty, self.module);
-                // A side whose type is the join explains it alone.
-                if ty == left.ty {
+                // A side whose type is the join explains it alone, when it
+                // relies on everything the other side does: values arrive
+                // by both paths, so the join relies on both derivations.
+                // When both sides have the type, the one citing more is
+                // kept, so a claim names that side's cause.
+                if ty == left.ty && self.covers(left.reason, right.reason) {
                     Some(left)
-                } else if ty == right.ty {
+                } else if ty == right.ty && self.covers(right.reason, left.reason) {
                     Some(right)
+                } else if ty == left.ty {
+                    Some(self.fact(ReasonKind::Kept, span, ty, vec![left.reason, right.reason]))
+                } else if ty == right.ty {
+                    Some(self.fact(ReasonKind::Kept, span, ty, vec![right.reason, left.reason]))
                 } else {
                     Some(self.fact(
                         ReasonKind::Joined,
@@ -2018,6 +2185,18 @@ impl<'a> Analysis<'a> {
                 }
             })
             .collect()
+    }
+
+    /// The reason that explains `reason`'s type, through kept joins; see
+    /// [`super::DefinitionTyping::principal_reason`].
+    fn principal(&self, reason: ReasonId) -> ReasonId {
+        super::principal_reason(&self.reasons, reason)
+    }
+
+    /// Whether the chain of `reason` cites every closed-world assumption
+    /// and contract the chain of `other` does.
+    fn covers(&self, reason: ReasonId, other: ReasonId) -> bool {
+        subset(&self.cited, other, reason) && subset(&self.contracts, other, reason)
     }
 
     #[expect(
@@ -2032,9 +2211,16 @@ impl<'a> Analysis<'a> {
         span: Span,
         expected: TypingExpectation,
         operands: &[Fact],
-        mut assumes: Vec<ReasonId>,
+        assumes: Vec<ReasonId>,
         selected_method: Option<sem::MethodId>,
     ) {
+        let mut unique = Vec::with_capacity(assumes.len());
+        for assumption in assumes {
+            if !unique.contains(&assumption) {
+                unique.push(assumption);
+            }
+        }
+        let mut assumes = unique;
         // A verdict relies on whatever its operands' facts relied on.
         for cited in self.cited_assumptions(operands) {
             if !assumes.contains(&cited) {
@@ -2941,6 +3127,17 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
         | E::GenericFunctionObject { .. }
         | E::Error { .. } => {}
     }
+}
+
+/// Whether `arena`'s entry for `inner` is a subset of its entry for
+/// `outer`.
+fn subset<T: PartialEq>(arena: &[Vec<T>], inner: ReasonId, outer: ReasonId) -> bool {
+    let outer = arena.get(outer.0 as usize).map_or(&[][..], Vec::as_slice);
+    arena
+        .get(inner.0 as usize)
+        .into_iter()
+        .flatten()
+        .all(|item| outer.contains(item))
 }
 
 const fn contract_source(declared: bool) -> ContractSource {

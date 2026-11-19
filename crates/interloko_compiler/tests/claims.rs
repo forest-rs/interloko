@@ -399,3 +399,39 @@ fn claims_are_environment_objects_of_every_source_definition() {
         .expect("digit");
     assert_eq!(digit.strict.source, Some(StrictSource::Policy));
 }
+
+#[test]
+fn a_join_that_only_adds_citations_keeps_the_cause_it_explains() {
+    // The `else` arm is dead only because `<shape>` is sealed, so the join
+    // after the `if` keeps `x`'s fact and cites the sealing too. The
+    // overflow on `y + 1` is still `x`'s missing annotation, not the join.
+    let artifacts = compile(
+        "define sealed abstract class <shape> (<object>)\nend;\n\
+         define sealed class <circle> (<shape>)\nend;\n\
+         define sealed class <square> (<shape>)\nend;\n\
+         define function pick(x, s :: <shape>) => <integer>\n  \
+         let y = if (instance?(s, <circle>)) x\n    \
+         elseif (instance?(s, <square>)) x else 0 end;\n  \
+         y + 1\nend;\n\
+         define function main() => <integer>\n  pick(1, make(<circle>))\nend;\n",
+    );
+    let pick = report(&artifacts, "pick", ClaimDetail::Summary);
+    assert_eq!(
+        cause(&pick, TypingCheck::Overflow),
+        ResidualCause::UnannotatedInput,
+        "{}",
+        pick.render()
+    );
+    let input = pick
+        .residual_sites()
+        .find_map(|site| site.residual.as_ref()?.input.clone())
+        .expect("the unannotated parameter's target");
+    assert_eq!(input.to_string(), format!("binding:{}:x", pick.definition));
+    // The sealing the dead arm relied on is still cited.
+    assert!(
+        pick.render()
+            .contains("sealed abstract class <shape> has exactly direct subclasses"),
+        "{}",
+        pick.render()
+    );
+}

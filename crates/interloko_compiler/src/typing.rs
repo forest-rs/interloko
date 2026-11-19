@@ -926,6 +926,12 @@ pub enum ReasonKind {
     },
     /// Branches or paths that each supply a value were joined.
     Joined,
+    /// Paths met where the first reason's fact already has the joined
+    /// type: the fact is that one's, and the others are cited for what
+    /// they rely on, because values may also arrive by them or because a
+    /// path is dead for a reason. Only the first reason explains the type
+    /// ([`DefinitionTyping::principal_reason`]).
+    Kept,
     /// A handler bound its condition local.
     HandlerCondition {
         /// Class of conditions the handler accepts.
@@ -965,6 +971,7 @@ impl ReasonKind {
             Self::Check { .. } => "check",
             Self::Dispatched { .. } => "dispatched",
             Self::Joined => "joined",
+            Self::Kept => "kept",
             Self::HandlerCondition { .. } => "handler-condition",
             Self::Interval => "interval",
             Self::Widened => "widened",
@@ -1162,9 +1169,23 @@ impl DefinitionTyping {
             .map(|reason| &reason.ty)
     }
 
+    /// Returns the reason that explains the type of the fact `reason`
+    /// explains: `reason`, or for a [`ReasonKind::Kept`] join, the kept
+    /// side's, as far as such joins go. The other sides of those joins are
+    /// cited for what they rely on, not for the type.
+    #[must_use]
+    pub fn principal_reason(&self, reason: ReasonId) -> ReasonId {
+        principal_reason(&self.reasons, reason)
+    }
+
     /// Returns what `decision`'s verdict depends on beyond this body: the
     /// contracts its operands' reason chains cite, in the order the chains
     /// reach them, then its closed-world assumptions.
+    ///
+    /// A fact's chain cites every derivation it rests on, including each
+    /// path a join merges, why a path the join drops is dead, and what a
+    /// comparison narrowed by, so this never under-reports; claim reports
+    /// rely on that.
     #[must_use]
     pub fn dependencies(&self, decision: &TypingDecision) -> Vec<TypingDependency> {
         let mut out = Vec::new();
@@ -1227,7 +1248,10 @@ impl DefinitionTyping {
     /// accessor, and constant whose contract it consults, and a
     /// [`ReasonKind::ClosedWorld`] for every assumption a verdict relies on,
     /// so the arena names every such input. The incremental graph turns them
-    /// into dependency edges.
+    /// into dependency edges. It reads the whole arena, not the decisions'
+    /// chains: trial passes over a loop leave reasons no final decision
+    /// cites, and invalidating on a superset is what keeps generated code
+    /// safe if a chain ever drops a derivation.
     #[must_use]
     pub fn inputs(&self) -> TypingInputs {
         let mut inputs = TypingInputs::default();
@@ -2001,7 +2025,11 @@ fn provenance_labels(
         let Some(reason) = typed.reason(id) else {
             continue;
         };
-        queue.extend(reason.from.iter().copied());
+        // A kept join's other sides supplied no value of the type.
+        match reason.kind {
+            ReasonKind::Kept => queue.extend(reason.from.first().copied()),
+            _ => queue.extend(reason.from.iter().copied()),
+        }
         let ty = type_name(module, &reason.ty);
         let message = match &reason.kind {
             ReasonKind::Declared => format!("declared as {ty} here"),
@@ -2018,7 +2046,7 @@ fn provenance_labels(
             ReasonKind::Widened => format!("widened to {ty}"),
             ReasonKind::Exit => "control leaves here".into(),
             ReasonKind::IndirectEntry => format!("passed indirectly as {ty}"),
-            ReasonKind::Joined | ReasonKind::ClosedWorld(_) => continue,
+            ReasonKind::Joined | ReasonKind::Kept | ReasonKind::ClosedWorld(_) => continue,
         };
         if reason.span == decision.span
             || reason.span.start == reason.span.end
@@ -2032,6 +2060,20 @@ fn provenance_labels(
 }
 
 /// What relying on a closed-world `assumption` makes a decision depend on.
+/// [`DefinitionTyping::principal_reason`] over a reason arena. A reason's
+/// sides are always earlier reasons, so the walk ends.
+pub(super) fn principal_reason(reasons: &[Reason], reason: ReasonId) -> ReasonId {
+    let mut id = reason;
+    while let Some(reason) = reasons.get(id.0 as usize)
+        && matches!(reason.kind, ReasonKind::Kept)
+        && let Some(kept) = reason.from.first()
+        && *kept != id
+    {
+        id = *kept;
+    }
+    id
+}
+
 const fn closed_world_dependency(assumption: Assumption) -> TypingDependency {
     match assumption {
         Assumption::Generic(generic) => TypingDependency::Methods(generic),
@@ -2170,6 +2212,7 @@ fn reason_label(module: &sem::Module, reason: &Reason) -> String {
         | ReasonKind::Literal
         | ReasonKind::Constructed
         | ReasonKind::Joined
+        | ReasonKind::Kept
         | ReasonKind::Interval
         | ReasonKind::Widened
         | ReasonKind::Exit
