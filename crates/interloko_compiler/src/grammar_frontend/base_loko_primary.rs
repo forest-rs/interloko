@@ -413,11 +413,60 @@ impl BaseLokoCstProjector<'_> {
 
     fn build_parameter_list(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let mut roles = Vec::new();
-        self.collect_role_nodes(node, "parameter-name", CstKind::ParameterName, &mut roles);
-        self.collect_annotation_type_roles(node, &mut roles);
-        let mut children = self.direct_tokens(node.span, &[]);
+        let mut keywords = Vec::new();
+        for child in &node.children {
+            if child.is_rule("keyword-parameters") {
+                keywords.extend(
+                    child
+                        .children
+                        .iter()
+                        .filter(|keyword| keyword.is_rule("keyword-parameter"))
+                        .map(|keyword| self.build_keyword_parameter(keyword)),
+                );
+            } else {
+                self.collect_role_nodes(
+                    child,
+                    "parameter-name",
+                    CstKind::ParameterName,
+                    &mut roles,
+                );
+                self.collect_annotation_type_roles(child, &mut roles);
+            }
+        }
+        let excluded = keywords
+            .iter()
+            .map(|keyword| keyword.span)
+            .collect::<Vec<_>>();
+        let mut children = self.direct_tokens(node.span, &excluded);
         children.extend(roles.into_iter().map(CstElement::Node));
+        children.extend(keywords.into_iter().map(CstElement::Node));
         self.node(CstKind::ParameterList, self.sorted(children), node.span)
+    }
+
+    /// Builds `name :: <type> = default` after `#key`: the name and type
+    /// roles, then the default expression.
+    fn build_keyword_parameter(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let mut roles = Vec::new();
+        self.collect_child_roles(
+            node,
+            "keyword-parameter-name",
+            CstKind::KeywordParameterName,
+            &mut roles,
+        );
+        self.collect_type_roles_from_rule_children(node, &["type-annotation"], &mut roles);
+        let default = node
+            .children
+            .iter()
+            .filter(|child| child.is_rule("keyword-default"))
+            .filter_map(|child| {
+                child
+                    .children
+                    .iter()
+                    .find(|expr| expr.is_rule("expression"))
+            })
+            .map(|expr| self.build_expr(expr))
+            .collect();
+        self.node_with_nested_and_roles(CstKind::KeywordParameter, node, default, roles)
     }
 
     fn build_body(&self, node: &InterpretedRuleNode<'_>) -> CstNode {

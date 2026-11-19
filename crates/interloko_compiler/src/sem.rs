@@ -13,7 +13,9 @@ use crate::promotion;
 use crate::syntax::{self, Span};
 
 mod collection;
+mod keywords;
 pub use collection::{BUILTIN_METHODS, BuiltinMethod, CollectionFunction};
+use keywords::{KeywordDefault, KeywordSignature};
 
 use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
 use interloko_model::sealing::Sealing;
@@ -4072,6 +4074,13 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// Whether this is `$unsupplied`, which a call passes for a keyword
+    /// argument it does not pass and that has no default.
+    #[must_use]
+    pub fn is_unsupplied(&self) -> bool {
+        matches!(self, Self::SymbolLiteral { name, .. } if name == keywords::UNSUPPLIED_SYMBOL)
+    }
+
     /// Visits this expression's direct subexpressions in evaluation order,
     /// including those of the bodies it contains. A closure's body is code
     /// of its own and is not visited.
@@ -4297,8 +4306,13 @@ pub fn lower(module: &ast::Module) -> Module {
 /// Lowers an AST module with host-backed metaobject declarations.
 #[must_use]
 pub fn lower_with_host_registry(module: &ast::Module, registry: &HostMetaRegistry) -> Module {
-    let mut lowering = Lowering::new(module, registry);
-    lowering.lower_module(module)
+    let keywords::Desugared {
+        module,
+        functions,
+        generics,
+    } = keywords::desugar(module);
+    let mut lowering = Lowering::new(&module, registry, functions, generics);
+    lowering.lower_module(&module)
 }
 
 #[derive(Clone, Debug)]
@@ -4891,6 +4905,10 @@ impl FunctionContext {
 
 struct Lowering {
     source_file: SourceFileId,
+    /// The keyword parameters of each function that takes them, by name.
+    keyword_functions: Vec<(String, KeywordSignature)>,
+    /// The keyword parameters of each generic that takes them, by name.
+    keyword_generics: Vec<(String, KeywordSignature)>,
     host_registry: HostMetaRegistry,
     host_functions: Vec<ResolvedHostFunction>,
     classes: Vec<Class>,
@@ -4919,9 +4937,16 @@ struct Lowering {
 }
 
 impl Lowering {
-    fn new(module: &ast::Module, registry: &HostMetaRegistry) -> Self {
+    fn new(
+        module: &ast::Module,
+        registry: &HostMetaRegistry,
+        keyword_functions: Vec<(String, KeywordSignature)>,
+        keyword_generics: Vec<(String, KeywordSignature)>,
+    ) -> Self {
         let mut lowering = Self {
             source_file: module.source_file,
+            keyword_functions,
+            keyword_generics,
             host_registry: registry.clone(),
             host_functions: Vec::new(),
             classes: Vec::new(),
@@ -5800,7 +5825,10 @@ impl Lowering {
                 param_kinds,
                 arity: generic.params.len(),
                 dispatch_param: 0,
-                dispatch_params: (0..generic.params.len()).collect(),
+                // Dispatch looks only at the required parameters, not at
+                // keywords.
+                dispatch_params: (0..self.keyword_start(&generic.name, generic.params.len()))
+                    .collect(),
                 param_ranges,
                 result_kinds: return_kinds,
                 result_callable_sigs: return_callable_sigs,
@@ -6816,10 +6844,19 @@ impl Lowering {
             let generic_range = generic_symbol
                 .as_ref()
                 .and_then(|symbol| symbol.param_ranges.get(index).copied().flatten());
-            let (specializer, kind) =
+            let (mut specializer, kind) =
                 self.resolve_method_specializer(param, generic_kind, generic_range);
+            // A keyword parameter has its generic's type, which the keyword
+            // pass checked, and dispatch does not look at it.
+            let keyword = generic_symbol
+                .as_ref()
+                .is_some_and(|symbol| index >= self.keyword_start(&symbol.name, symbol.arity()));
+            if keyword {
+                specializer = Some(OBJECT_CLASS_ID);
+            }
             // A specializer that did not resolve has been reported already.
             if let Some(expected) = generic_kind
+                && !keyword
                 && kind != ValueKind::Error
                 && !self.generic_specializer_matches(expected, specializer)
             {
@@ -7182,7 +7219,9 @@ impl Lowering {
                             )),
                         );
                     }
+                    // A value that did not check has been reported already.
                     if let Some(expected) = expected_kind
+                        && actual_kind != ValueKind::Error
                         && !self.kinds_match(expected, actual_kind)
                     {
                         ctx.diagnostics.push(
@@ -7198,6 +7237,7 @@ impl Lowering {
                     if let Some(expected) = expected_type
                         .as_ref()
                         .and_then(|resolved| resolved.callable_signature.as_ref())
+                        && actual_kind != ValueKind::Error
                         && !self.callable_signatures_match(
                             Some(expected),
                             actual_callable_signature.as_ref(),
@@ -7608,21 +7648,35 @@ impl Lowering {
                 ..
             } => self.lower_cast(ctx, value, target, *span),
             ast::Expr::Call {
+                id,
                 callee,
                 args,
                 keywords,
                 span,
-                ..
             } => {
                 if let Some(function) = CollectionFunction::from_name(callee)
                     .filter(|_| !self.defines_callable(ctx, callee))
                 {
-                    return self.lower_collection_call(ctx, function, args, keywords, *span);
+                    return self.lower_collection_call(ctx, *id, function, args, keywords, *span);
+                }
+                let callable_value = ctx
+                    .find_local(callee)
+                    .is_some_and(|local| ctx.local_kind(local) == ValueKind::Callable)
+                    || ctx.capture_source_is_callable(callee);
+                if !callable_value && let Some(signature) = self.keyword_signature(callee).cloned()
+                {
+                    return self
+                        .lower_keyword_call(ctx, *id, callee, &signature, args, keywords, *span);
                 }
                 // No other call takes keyword arguments.
                 for keyword in keywords {
-                    ctx.diagnostics
-                        .push(Self::unexpected_keyword(callee, keyword));
+                    ctx.diagnostics.push(if callable_value {
+                        Diagnostic::error(keyword.span, DiagnosticCode::CallableKeywordArgument)
+                            .with_arg(DiagnosticArg::text("callee", callee.clone()))
+                            .with_arg(DiagnosticArg::text("keyword", keyword.name.clone()))
+                    } else {
+                        Self::unexpected_keyword(callee, keyword)
+                    });
                 }
                 if callee == "apply" {
                     return self.lower_apply(ctx, args, expected_results, *span);
@@ -7678,104 +7732,8 @@ impl Lowering {
                 if let Some(call) = self.lower_intrinsic_call(ctx, callee, &lowered_args, *span) {
                     return call;
                 }
-                if let Some(symbol) = self.resolve_function(callee) {
-                    if symbol.arity() == args.len() {
-                        adapt_literal_args(&mut lowered_args, symbol.param_kinds.iter().map(Some));
-                        for (index, (arg, expected)) in
-                            lowered_args.iter().zip(&symbol.param_kinds).enumerate()
-                        {
-                            let actual = self.expr_kind(arg);
-                            if !self.kinds_match(*expected, actual) {
-                                ctx.diagnostics.push(
-                                    Diagnostic::error(
-                                        arg.span(),
-                                        DiagnosticCode::FunctionArgumentTypeMismatch,
-                                    )
-                                    .with_arg(DiagnosticArg::text("function", callee.clone()))
-                                    .with_arg(DiagnosticArg::unsigned(
-                                        "argument_index",
-                                        u64::try_from(index + 1).unwrap_or(u64::MAX),
-                                    ))
-                                    .with_arg(DiagnosticArg::text(
-                                        "expected",
-                                        self.kind_name(*expected),
-                                    ))
-                                    .with_arg(
-                                        DiagnosticArg::text("actual", self.kind_name(actual)),
-                                    ),
-                                );
-                            }
-                            if let Some(expected) = symbol
-                                .param_callable_sigs
-                                .get(index)
-                                .and_then(|signature| signature.as_ref())
-                                && let actual_signature = self.expr_callable_signature(arg)
-                                && !self.callable_signatures_match(
-                                    Some(expected),
-                                    actual_signature.as_ref(),
-                                )
-                            {
-                                let diagnostic = self
-                                    .callable_variance_diagnostic(
-                                        arg.span(),
-                                        expected,
-                                        actual_signature.as_ref(),
-                                    )
-                                    .unwrap_or_else(|| {
-                                        Diagnostic::error(
-                                            arg.span(),
-                                            DiagnosticCode::FunctionArgumentTypeMismatch,
-                                        )
-                                        .with_arg(DiagnosticArg::text("function", callee.clone()))
-                                        .with_arg(DiagnosticArg::unsigned(
-                                            "argument_index",
-                                            u64::try_from(index + 1).unwrap_or(u64::MAX),
-                                        ))
-                                        .with_arg(DiagnosticArg::text(
-                                            "expected",
-                                            self.callable_signature_name(expected),
-                                        ))
-                                        .with_arg(
-                                            DiagnosticArg::text(
-                                                "actual",
-                                                actual_signature.as_ref().map_or_else(
-                                                    || self.kind_name(actual),
-                                                    |signature| {
-                                                        self.callable_signature_name(signature)
-                                                    },
-                                                ),
-                                            ),
-                                        )
-                                    });
-                                ctx.diagnostics.push(diagnostic);
-                            }
-                        }
-                        // The caller checks each argument for a limited
-                        // parameter, where typing usually knows its range.
-                        let args = self.limit_args(
-                            lowered_args,
-                            &symbol.param_kinds,
-                            &symbol.param_ranges,
-                        );
-                        return Expr::DirectCall {
-                            function: symbol.id,
-                            args,
-                            span: *span,
-                        };
-                    }
-                    ctx.diagnostics.push(
-                        Diagnostic::error(*span, DiagnosticCode::FunctionArityMismatch)
-                            .with_arg(DiagnosticArg::text("callee", callee.clone()))
-                            .with_arg(DiagnosticArg::unsigned(
-                                "expected_count",
-                                u64::try_from(symbol.arity()).unwrap_or(u64::MAX),
-                            ))
-                            .with_arg(DiagnosticArg::unsigned(
-                                "actual_count",
-                                u64::try_from(args.len()).unwrap_or(u64::MAX),
-                            )),
-                    );
-                    return Expr::Error { span: *span };
+                if let Some(symbol) = self.resolve_function(callee).cloned() {
+                    return self.lower_function_call(ctx, &symbol, lowered_args, callee, *span);
                 }
                 if let Some(function) = self.resolve_host_function(callee).cloned() {
                     if function.param_kinds.len() == args.len() {
@@ -8105,6 +8063,22 @@ impl Lowering {
                 span,
             };
         }
+        if name == keywords::UNSUPPLIED {
+            return self.unsupplied(span);
+        }
+        // Calls through callable values pass no keywords yet.
+        let kernel_keywords = self.resolve_generic(name).is_some_and(|symbol| {
+            self.collection_generics
+                .iter()
+                .any(|(function, id)| *id == symbol.id && !function.keywords().is_empty())
+        });
+        if kernel_keywords || self.keyword_signature(name).is_some() {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::KeywordCallableValue)
+                    .with_arg(DiagnosticArg::text("callee", name)),
+            );
+            return Expr::Error { span };
+        }
         if let Some(symbol) = self.resolve_function(name) {
             return Expr::KnownCallable {
                 callable: KnownCallable::DirectFunction(symbol.id),
@@ -8388,6 +8362,388 @@ impl Lowering {
         }
     }
 
+    /// The index of the first keyword parameter of the generic `name` of
+    /// `arity` parameters: `arity` when it takes no keywords.
+    fn keyword_start(&self, name: &str, arity: usize) -> usize {
+        if let Some(function) = CollectionFunction::from_name(name)
+            && self
+                .collection_generics
+                .iter()
+                .any(|(existing, _)| *existing == function)
+            && !self.shadows_collection_generic(name)
+        {
+            return function.arity();
+        }
+        self.keyword_generics
+            .iter()
+            .find(|(owner, _)| owner == name)
+            .map_or(arity, |(_, signature)| signature.required)
+    }
+
+    /// The keyword parameters of the function or generic a call of `name`
+    /// calls, when it takes any. A built-in collection generic's are
+    /// [`keywords::kernel_signature`].
+    fn keyword_signature(&self, name: &str) -> Option<&KeywordSignature> {
+        let table = if self.resolve_function(name).is_some() {
+            &self.keyword_functions
+        } else if self.resolve_generic(name).is_some() {
+            &self.keyword_generics
+        } else {
+            return None;
+        };
+        table
+            .iter()
+            .find(|(owner, _)| owner == name)
+            .map(|(_, signature)| signature)
+    }
+
+    /// `$unsupplied`: the symbol `#unsupplied`, which a keyword declared
+    /// without a default takes when a call does not pass it.
+    fn unsupplied(&self, span: Span) -> Expr {
+        Expr::SymbolLiteral {
+            name: keywords::UNSUPPLIED_SYMBOL.into(),
+            class: self
+                .builtin_value_class(BuiltinValueClass::Symbol)
+                .unwrap_or(ClassId(u32::MAX)),
+            span,
+        }
+    }
+
+    /// Lowers a call of the function or generic `callee`, which takes the
+    /// keyword parameters `signature`: a direct call or a send passing
+    /// every parameter, keywords in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_keyword_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        callee: &str,
+        signature: &KeywordSignature,
+        args: &[ast::Expr],
+        keywords: &[ast::KeywordArg],
+        span: Span,
+    ) -> Expr {
+        let scope = ctx.scope_start();
+        let positional = args
+            .iter()
+            .map(|arg| self.lower_expr(ctx, arg))
+            .collect::<Vec<_>>();
+        let call = if let Some(symbol) = self.resolve_function(callee).cloned() {
+            let kinds = symbol
+                .param_kinds
+                .iter()
+                .copied()
+                .map(Some)
+                .collect::<Vec<_>>();
+            self.lower_keyword_args(
+                ctx, id, callee, signature, &kinds, positional, keywords, span,
+            )
+            .map(|(lets, args)| {
+                (
+                    lets,
+                    self.lower_function_call(ctx, &symbol, args, callee, span),
+                )
+            })
+        } else if let Some(symbol) = self.resolve_generic(callee).cloned() {
+            self.lower_keyword_args(
+                ctx,
+                id,
+                callee,
+                signature,
+                &symbol.param_kinds,
+                positional,
+                keywords,
+                span,
+            )
+            .map(|(lets, args)| {
+                (
+                    lets,
+                    self.lower_generic_send(ctx, &symbol, args, callee, span),
+                )
+            })
+        } else {
+            None
+        };
+        ctx.hide_locals_from(scope);
+        match call {
+            None => Expr::Error { span },
+            Some((lets, call)) if lets.is_empty() => call,
+            Some((lets, call)) => Expr::Block {
+                exit: None,
+                body: Box::new(Block {
+                    statements: lets.into_iter().map(Statement::Let).collect(),
+                    result: call,
+                    span,
+                }),
+                cleanup: None,
+                span,
+            },
+        }
+    }
+
+    /// Lowers the arguments of a call of `callee`, which takes `signature`'s
+    /// keyword parameters after its required ones, all of kinds
+    /// `param_kinds`, to one argument per parameter in parameter order.
+    /// `positional` are the call's positional arguments, already lowered.
+    ///
+    /// The order the call evaluates its arguments in is the one [`keywords`]
+    /// documents: positional arguments and the keyword arguments passed, in
+    /// source order, then each missing keyword's default, in declaration
+    /// order. When that is not parameter order, the values go through
+    /// hidden locals, whose `let`s come back for the call to sit in.
+    ///
+    /// Returns `None`, having reported it, for a call with the wrong number
+    /// of positional arguments or a keyword the callee does not take or
+    /// passed twice.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_keyword_args(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        callee: &str,
+        signature: &KeywordSignature,
+        param_kinds: &[Option<ValueKind>],
+        mut positional: Vec<Expr>,
+        keywords: &[ast::KeywordArg],
+        span: Span,
+    ) -> Option<(Vec<Let>, Vec<Expr>)> {
+        let mut valid = true;
+        if positional.len() != signature.required {
+            ctx.diagnostics.push(Self::arity_mismatch(
+                callee,
+                signature.required,
+                positional.len(),
+                span,
+            ));
+            valid = false;
+        }
+        // The keyword argument passed for each keyword parameter, by index.
+        let mut supplied = vec![None; signature.keywords.len()];
+        for (index, keyword) in keywords.iter().enumerate() {
+            match signature.position(&keyword.name) {
+                None => {
+                    ctx.diagnostics
+                        .push(Self::unexpected_keyword(callee, keyword));
+                    valid = false;
+                }
+                Some(position) if supplied[position].is_some() => {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(keyword.span, DiagnosticCode::DuplicateKeywordArgument)
+                            .with_arg(DiagnosticArg::text("keyword", keyword.name.clone())),
+                    );
+                    valid = false;
+                }
+                Some(position) => supplied[position] = Some(index),
+            }
+        }
+        let mut passed = keywords
+            .iter()
+            .map(|keyword| Some(self.lower_expr(ctx, &keyword.value)))
+            .collect::<Vec<_>>();
+        if !valid {
+            return None;
+        }
+        adapt_literal_args(&mut positional, param_kinds.iter().map(Option::as_ref));
+        for (position, index) in supplied.iter().enumerate() {
+            if let Some(index) = index
+                && let Some(value) = passed[*index].as_mut()
+            {
+                adapt_literal_args(
+                    core::slice::from_mut(value),
+                    [param_kinds
+                        .get(signature.required + position)
+                        .and_then(Option::as_ref)],
+                );
+            }
+        }
+        let runs_defaults = signature
+            .keywords
+            .iter()
+            .zip(&supplied)
+            .any(|(slot, supplied)| {
+                supplied.is_none() && matches!(slot.default, KeywordDefault::Function(_))
+            });
+        let in_order = supplied
+            .iter()
+            .flatten()
+            .zip(supplied.iter().flatten().skip(1))
+            .all(|(earlier, later)| earlier < later);
+        if !runs_defaults && in_order {
+            let mut args = positional;
+            for (slot, index) in signature.keywords.iter().zip(&supplied) {
+                args.push(match index {
+                    Some(index) => passed[*index].take()?,
+                    None => self.keyword_default_value(slot, span),
+                });
+            }
+            return Some((Vec::new(), args));
+        }
+        let mut lets = Vec::new();
+        let required = positional
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let name = format!("{callee} #arg {index}@{}", span.start);
+                self.hidden_read(ctx, &mut lets, id, &name, value, span)
+            })
+            .collect::<Vec<_>>();
+        let mut values = vec![None; signature.keywords.len()];
+        for (index, value) in passed.into_iter().enumerate() {
+            let Some(position) = supplied.iter().position(|passed| *passed == Some(index)) else {
+                continue;
+            };
+            let name = format!("{callee} #key {}@{}", keywords[index].name, span.start);
+            values[position] = Some(self.hidden_read(ctx, &mut lets, id, &name, value?, span));
+        }
+        for (position, slot) in signature.keywords.iter().enumerate() {
+            if values[position].is_some() {
+                continue;
+            }
+            let value = match &slot.default {
+                KeywordDefault::Unsupplied | KeywordDefault::Missing => {
+                    self.keyword_default_value(slot, span)
+                }
+                KeywordDefault::Function(default) => {
+                    let function = self.resolve_function(default)?.clone();
+                    let mut args = required.clone();
+                    args.extend(values[..position].iter().flatten().cloned());
+                    let args = self.limit_args(args, &function.param_kinds, &function.param_ranges);
+                    let call = Expr::DirectCall {
+                        function: function.id,
+                        args,
+                        span,
+                    };
+                    let name = format!("{callee} #key {}@{}", slot.name, span.start);
+                    self.hidden_read(ctx, &mut lets, id, &name, call, span)
+                }
+            };
+            values[position] = Some(value);
+        }
+        let mut args = required;
+        args.extend(values.into_iter().flatten());
+        Some((lets, args))
+    }
+
+    /// The value a call passes for the keyword `slot` it does not pass, when
+    /// `slot` has no default function.
+    fn keyword_default_value(&self, slot: &keywords::KeywordSlot, span: Span) -> Expr {
+        match slot.default {
+            KeywordDefault::Missing => Expr::Error { span },
+            _ => self.unsupplied(span),
+        }
+    }
+
+    /// Binds `value` to the hidden local `name`, adding its `let` to `lets`,
+    /// and returns a read of it.
+    fn hidden_read(
+        &mut self,
+        ctx: &mut FunctionContext,
+        lets: &mut Vec<Let>,
+        id: AstNodeId,
+        name: &str,
+        value: Expr,
+        span: Span,
+    ) -> Expr {
+        let binding = self.bind_hidden_local(ctx, id, name, value, span);
+        let local = binding.local;
+        lets.push(binding);
+        Expr::Local {
+            local,
+            result_kind: ctx.local_kind(local),
+            callable_signature: ctx.local_callable_signature(local),
+            span,
+        }
+    }
+
+    /// Lowers a call of the function `symbol` with `lowered_args`, keyword
+    /// arguments already in their parameters' places.
+    fn lower_function_call(
+        &self,
+        ctx: &mut FunctionContext,
+        symbol: &FunctionSymbol,
+        mut lowered_args: Vec<Expr>,
+        callee: &str,
+        span: Span,
+    ) -> Expr {
+        if symbol.arity() == lowered_args.len() {
+            adapt_literal_args(&mut lowered_args, symbol.param_kinds.iter().map(Some));
+            for (index, (arg, expected)) in lowered_args.iter().zip(&symbol.param_kinds).enumerate()
+            {
+                let actual = self.expr_kind(arg);
+                if !self.kinds_match(*expected, actual) {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
+                            .with_arg(DiagnosticArg::text("function", callee.to_string()))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "argument_index",
+                                u64::try_from(index + 1).unwrap_or(u64::MAX),
+                            ))
+                            .with_arg(DiagnosticArg::text("expected", self.kind_name(*expected)))
+                            .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                    );
+                }
+                if let Some(expected) = symbol
+                    .param_callable_sigs
+                    .get(index)
+                    .and_then(|signature| signature.as_ref())
+                    && let actual_signature = self.expr_callable_signature(arg)
+                    && !self.callable_signatures_match(Some(expected), actual_signature.as_ref())
+                {
+                    let diagnostic = self
+                        .callable_variance_diagnostic(
+                            arg.span(),
+                            expected,
+                            actual_signature.as_ref(),
+                        )
+                        .unwrap_or_else(|| {
+                            Diagnostic::error(
+                                arg.span(),
+                                DiagnosticCode::FunctionArgumentTypeMismatch,
+                            )
+                            .with_arg(DiagnosticArg::text("function", callee.to_string()))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "argument_index",
+                                u64::try_from(index + 1).unwrap_or(u64::MAX),
+                            ))
+                            .with_arg(DiagnosticArg::text(
+                                "expected",
+                                self.callable_signature_name(expected),
+                            ))
+                            .with_arg(DiagnosticArg::text(
+                                "actual",
+                                actual_signature.as_ref().map_or_else(
+                                    || self.kind_name(actual),
+                                    |signature| self.callable_signature_name(signature),
+                                ),
+                            ))
+                        });
+                    ctx.diagnostics.push(diagnostic);
+                }
+            }
+            // The caller checks each argument for a limited
+            // parameter, where typing usually knows its range.
+            let args = self.limit_args(lowered_args, &symbol.param_kinds, &symbol.param_ranges);
+            return Expr::DirectCall {
+                function: symbol.id,
+                args,
+                span,
+            };
+        }
+        ctx.diagnostics.push(
+            Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
+                .with_arg(DiagnosticArg::text("callee", callee.to_string()))
+                .with_arg(DiagnosticArg::unsigned(
+                    "expected_count",
+                    u64::try_from(symbol.arity()).unwrap_or(u64::MAX),
+                ))
+                .with_arg(DiagnosticArg::unsigned(
+                    "actual_count",
+                    u64::try_from(lowered_args.len()).unwrap_or(u64::MAX),
+                )),
+        );
+        Expr::Error { span }
+    }
+
     /// Lowers a send of the generic `symbol` names to `args`, checking them
     /// against its parameters.
     fn lower_generic_send(
@@ -8493,7 +8849,12 @@ impl Lowering {
         }
         let id = GenericFunctionId(u32::try_from(self.generics.len()).unwrap_or(u32::MAX));
         let name = function.name();
-        let arity = function.arity();
+        let required = function.arity();
+        let arity = required + function.keywords().len();
+        // Keyword parameters are `<object>`s, after the required ones.
+        let param_kinds = (0..arity)
+            .map(|index| (index >= required).then_some(ValueKind::Any))
+            .collect::<Vec<_>>();
         let result_kinds = vec![match function {
             CollectionFunction::Size => ValueKind::I64,
             CollectionFunction::Element | CollectionFunction::ElementSetter => ValueKind::Any,
@@ -8501,7 +8862,7 @@ impl Lowering {
         self.generic_symbols.push(GenericSymbol {
             name: name.into(),
             id,
-            param_kinds: vec![None; arity],
+            param_kinds: param_kinds.clone(),
             param_ranges: vec![None; arity],
             return_kinds: result_kinds.clone(),
             return_callable_sigs: vec![None],
@@ -8522,13 +8883,14 @@ impl Lowering {
             params: function
                 .params()
                 .iter()
+                .chain(function.keywords())
                 .map(|name| (*name).into())
                 .collect(),
-            param_kinds: vec![None; arity],
+            param_kinds,
             param_ranges: vec![None; arity],
             arity,
             dispatch_param: function.collection_index(),
-            dispatch_params: (0..arity).collect(),
+            dispatch_params: (0..required).collect(),
             result_kinds: result_kinds.clone(),
             result_callable_sigs: vec![None],
             result_ranges: vec![None],
@@ -8551,6 +8913,7 @@ impl Lowering {
                 let classes = function
                     .params()
                     .iter()
+                    .chain(function.keywords())
                     .enumerate()
                     .map(|(index, _)| {
                         if index == function.collection_index() {
@@ -8576,7 +8939,12 @@ impl Lowering {
                 let mut ctx = FunctionContext::new();
                 let mut params = Vec::new();
                 let mut args = Vec::new();
-                for (name, class) in function.params().iter().zip(&classes) {
+                for (name, class) in function
+                    .params()
+                    .iter()
+                    .chain(function.keywords())
+                    .zip(&classes)
+                {
                     let kind = self
                         .kind_for_builtin_class(*class)
                         .unwrap_or(ValueKind::Any);
@@ -8654,11 +9022,12 @@ impl Lowering {
         }
     }
 
-    /// Lowers a call of a built-in collection generic: a send, or a kernel
-    /// method's defaulting operation for a call passing `default:`.
+    /// Lowers a call of a built-in collection generic: a send passing every
+    /// keyword, `$unsupplied` for each the call does not pass.
     fn lower_collection_call(
         &mut self,
         ctx: &mut FunctionContext,
+        id: AstNodeId,
         function: CollectionFunction,
         args: &[ast::Expr],
         keywords: &[ast::KeywordArg],
@@ -8669,84 +9038,53 @@ impl Lowering {
             .iter()
             .map(|arg| self.lower_expr(ctx, arg))
             .collect::<Vec<_>>();
-        let mut valid = true;
-        let mut default = None;
-        for keyword in keywords {
-            if !function.keywords().contains(&keyword.name.as_str()) {
-                ctx.diagnostics
-                    .push(Self::unexpected_keyword(name, keyword));
-                valid = false;
-            } else if default.is_some() {
-                ctx.diagnostics.push(
-                    Diagnostic::error(keyword.span, DiagnosticCode::DuplicateKeywordArgument)
-                        .with_arg(DiagnosticArg::text("keyword", keyword.name.clone())),
-                );
-                valid = false;
-            } else {
-                default = Some(self.lower_expr(ctx, &keyword.value));
-            }
-        }
-        if !valid {
-            return Expr::Error { span };
-        }
         // A slot getter of the same name serves its own class.
         if let [receiver] = args.as_slice()
-            && default.is_none()
+            && keywords.is_empty()
             && self.class_has_accessor(self.expr_kind(receiver), name)
         {
             let receiver = args.into_iter().next().expect("one argument was matched");
             return self.lower_accessor_call(ctx, receiver, name, span);
         }
-        if args.len() != function.arity() {
-            ctx.diagnostics.push(Self::arity_mismatch(
-                name,
-                function.arity(),
-                args.len(),
+        let generic = self.collection_generic(function);
+        let Some(symbol) = self
+            .generic_symbols
+            .iter()
+            .find(|symbol| symbol.id == generic)
+            .cloned()
+        else {
+            return Expr::Error { span };
+        };
+        let signature = keywords::kernel_signature(function);
+        let scope = ctx.scope_start();
+        let lowered = self.lower_keyword_args(
+            ctx,
+            id,
+            name,
+            &signature,
+            &symbol.param_kinds,
+            args,
+            keywords,
+            span,
+        );
+        ctx.hide_locals_from(scope);
+        let Some((lets, args)) = lowered else {
+            return Expr::Error { span };
+        };
+        let send = self.lower_generic_send(ctx, &symbol, args, name, span);
+        if lets.is_empty() {
+            return send;
+        }
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements: lets.into_iter().map(Statement::Let).collect(),
+                result: send,
                 span,
-            ));
-            return Expr::Error { span };
+            }),
+            cleanup: None,
+            span,
         }
-        let Some(default) = default else {
-            let generic = self.collection_generic(function);
-            let Some(symbol) = self
-                .generic_symbols
-                .iter()
-                .find(|symbol| symbol.id == generic)
-                .cloned()
-            else {
-                return Expr::Error { span };
-            };
-            return self.lower_generic_send(ctx, &symbol, args, name, span);
-        };
-        // Methods cannot take keyword parameters yet, so `default:` runs the
-        // kernel method's defaulting operation, for a receiver whose class
-        // typing knows has one.
-        let collection = self.expr_kind(&args[function.collection_index()]);
-        if collection == ValueKind::Error {
-            return Expr::Error { span };
-        }
-        let operation = self.value_kind_class(collection).and_then(|class| {
-            collection::builtin_methods(function)
-                .filter(|method| self.builtin_value_class(method.collection) == Some(class))
-                .find_map(|method| method.with_default)
-        });
-        let Some(operation) = operation else {
-            let classes = collection::builtin_methods(function)
-                .filter(|method| method.with_default.is_some())
-                .map(|method| method.collection.name())
-                .collect::<Vec<_>>()
-                .join(", ");
-            ctx.diagnostics.push(
-                Diagnostic::error(span, DiagnosticCode::CollectionDefaultUnsupported)
-                    .with_arg(DiagnosticArg::text("function", name))
-                    .with_arg(DiagnosticArg::text("actual", self.kind_name(collection)))
-                    .with_arg(DiagnosticArg::text("expected", classes)),
-            );
-            return Expr::Error { span };
-        };
-        let mut args = args;
-        args.push(default);
-        self.checked_intrinsic_call(ctx, operation, name, args, span)
     }
 
     /// The diagnostic for a keyword argument `callee` does not take.

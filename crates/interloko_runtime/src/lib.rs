@@ -161,8 +161,12 @@ pub const MOP_TYPE_NAME: &str = "interloko.mop.type_name";
 pub const VECTOR_SIZE: &str = "interloko.vector_size";
 /// Host-call symbol for immutable vector indexing. With
 /// [`vector_ref_signature`], an index outside the vector fails; with
-/// [`vector_element_or_signature`], it returns the default argument.
+/// [`vector_element_or_signature`], it returns the default argument, unless
+/// that is [`UNSUPPLIED_SYMBOL`], when it fails too.
 pub const VECTOR_REF: &str = "interloko.vector_ref";
+/// The name of the symbol `$unsupplied` is: the value of a keyword argument
+/// a call does not pass, when the keyword has no default.
+pub const UNSUPPLIED_SYMBOL: &str = "unsupplied";
 /// Host-call symbol for rendering a float as its shortest round-trip literal.
 pub const FLOAT_TO_STRING: &str = "interloko.float_to_string";
 /// Host-call symbol for rendering an integer in decimal.
@@ -2587,7 +2591,13 @@ impl Host for InterlokoHost {
                 let (arg, index, default) = match args {
                     [arg, ValueRef::I64(index)] => (arg, index, None),
                     [arg, ValueRef::I64(index), default @ ValueRef::Obj(_)] => {
-                        (arg, index, Some(default))
+                        // `$unsupplied` is no default.
+                        let unsupplied = self.value_object(*default).is_some_and(|object| {
+                            self.symbols.iter().any(|entry| {
+                                entry.name == UNSUPPLIED_SYMBOL && entry.object == object
+                            })
+                        });
+                        (arg, index, (!unsupplied).then_some(default))
                     }
                     _ => return Err(HostError::Failed),
                 };

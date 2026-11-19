@@ -1,0 +1,8 @@
+// expect: diagnostic code sem.method-keyword-default
+// expect: diagnostics 1
+// Defaults belong to the generic, which a send fills them from, so a
+// method cannot give its own.
+
+define generic size-of (x, #key unit) => <integer>;
+define method size-of (x :: <integer>, #key unit = 3) => <integer> x end;
+define function main() => <integer> size-of(1) end;

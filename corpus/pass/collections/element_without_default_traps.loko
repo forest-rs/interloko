@@ -1,0 +1,12 @@
+// expect: runtime code runtime.trap
+// expect: diagnostics 0
+// An index outside a vector traps when the call passes no `default:`,
+// through dispatch as inline.
+
+define function g(v :: <object>) => <object>
+  element(v, 7)
+end;
+
+define function main() => <object>
+  g(#[1])
+end;

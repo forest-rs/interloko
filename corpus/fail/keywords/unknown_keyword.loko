@@ -1,0 +1,6 @@
+// expect: diagnostic code sem.unexpected-keyword-argument
+// expect: diagnostics 1
+// A keyword the callee does not take is an error, not dropped.
+
+define function f(x :: <integer>, #key by :: <integer> = 2) => <integer> x * by end;
+define function main() => <integer> f(1, bx: 3) end;

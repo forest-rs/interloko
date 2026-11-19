@@ -8048,10 +8048,10 @@ impl<'module> BodyLowering<'module> {
         else {
             return Ok(None);
         };
-        if method.generic != generic.id
-            || !matches!(method.origin, sem::MethodOrigin::Collection { .. })
-            || method.params.len() != args.len()
-        {
+        let sem::MethodOrigin::Collection { function } = method.origin else {
+            return Ok(None);
+        };
+        if method.generic != generic.id || method.params.len() != args.len() {
             return Ok(None);
         }
         for (param, arg) in method.params.iter().zip(args) {
@@ -8059,14 +8059,29 @@ impl<'module> BodyLowering<'module> {
                 return Ok(None);
             };
             let actual = self.module.expr_kind(arg);
+            // An `<object>` parameter, a keyword, takes any value boxed.
             let fits = actual == local.kind
+                || local.kind == sem::ValueKind::Any
                 || (local.kind == sem::ValueKind::I64
                     && matches!(actual, sem::ValueKind::I32 | sem::ValueKind::U32));
             if !fits {
                 return Ok(None);
             }
         }
-        let result = self.lower_intrinsic_call(*intrinsic, args, *result_kind, span)?;
+        // A call that passes no keyword runs the operation that does not
+        // test for `$unsupplied`.
+        let (required, keywords) = args.split_at(function.arity().min(args.len()));
+        let unsupplied = sem::BUILTIN_METHODS
+            .iter()
+            .find(|row| row.function == function && row.operation == *intrinsic)
+            .and_then(|row| row.unsupplied)
+            .filter(|_| keywords.iter().all(sem::Expr::is_unsupplied));
+        let result = match unsupplied {
+            Some(operation) => {
+                self.lower_intrinsic_call(operation, required, *result_kind, span)?
+            }
+            None => self.lower_intrinsic_call(*intrinsic, args, *result_kind, span)?,
+        };
         self.record(site, CheckCodegen::Inlined);
         Ok(Some(result))
     }

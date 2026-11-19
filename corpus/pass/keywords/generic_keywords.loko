@@ -1,0 +1,27 @@
+// expect: run 15
+// expect: diagnostics 0
+// A generic declares its keywords, types and defaults; a send fills the
+// defaults from it, and each method binds the keywords it uses. Dispatch
+// looks only at the required parameter.
+
+define generic area (s, #key scale :: <integer> = 1) => <integer>;
+
+define class <sq> (<object>)
+  slot side :: <integer>, required-init-keyword: side:;
+end;
+
+define class <rect> (<object>)
+  slot w :: <integer>, required-init-keyword: w:;
+end;
+
+define method area (s :: <sq>, #key scale :: <integer>) => <integer>
+  s.side * s.side * scale
+end;
+
+define method area (s :: <rect>) => <integer>
+  s.w
+end;
+
+define function main() => <integer>
+  area(make(<sq>, side: 2)) + area(make(<sq>, side: 1), scale: 4) + area(make(<rect>, w: 7))
+end;

@@ -1,0 +1,7 @@
+// expect: diagnostic code sem.method-keyword-type-mismatch
+// expect: diagnostics 1
+// A method keeps its generic's keyword types.
+
+define generic size-of (x, #key unit :: <integer> = 1) => <integer>;
+define method size-of (x :: <integer>, #key unit :: <string>) => <integer> x end;
+define function main() => <integer> size-of(1) end;

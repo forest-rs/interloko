@@ -157,6 +157,28 @@ The current slices include:
 - nominal classes with typed slots, init keywords, inherited slots, and slot
   assignment through setter generics;
 - generic functions and multi-argument method dispatch over nominal classes;
+- Dylan's keyword parameters: `define function scale (x, #key by :: <integer>
+  = 2, plus = 0)`, called as `scale(3)`, `scale(3, by: 10)` or `scale(3,
+  plus: 1, by: 5)`, keywords after the positional arguments in any order.
+  A call evaluates its positional and keyword arguments in source order,
+  then the default of each keyword it does not pass in declaration order;
+  a default may read the required parameters and the keywords declared
+  before it. A keyword without a type is an `<object>`, and one without a
+  default is `$unsupplied`, a kernel constant tested with `==`, when a call
+  does not pass it; any other type needs a default. Each default is a
+  hidden function, `scale #key by`, that callers which do not pass the
+  keyword call, so a typed call is a direct call with every keyword in
+  place, never a parse at run time, and editing a default changes only that
+  function, while editing a keyword's type changes its callers' contract.
+  Unlike Dylan, where each method has its own defaults, a generic declares
+  its keywords, their types and their defaults (`define generic area (s,
+  #key scale :: <integer> = 1)`), a send fills the defaults from the
+  generic, a method binds any of them under the generic's types and gives
+  none of its own, and dispatch looks only at the required parameters.
+  Calls through callable values pass no keywords yet, so an anonymous
+  function cannot declare them and a function or generic that takes them
+  cannot be used as a value; a keyword its callee does not take, or one
+  passed twice, is an error;
 - Dylan's class and generic adjectives: `define abstract class` (no direct
   instances, so `make` refuses it), `define sealed class` and `define
   sealed generic`, with `open` and `concrete` as the explicit defaults.
@@ -309,12 +331,13 @@ The current slices include:
   kernel classes it has methods for, so a program's method for `<vector>`
   is refused. A program's own function or generic of one of these names
   replaces the built-in generic, and a slot named `size` keeps its getter
-  for its own class. Methods cannot take keyword parameters yet, so
-  `element(c, k, default: d)`, which returns `d` for a key outside the
-  collection, needs a receiver typing knows has a kernel method (a vector
-  index outside it otherwise traps). Keyword arguments are passed by name,
-  and a call to something that does not take one is an error rather than
-  a silent drop;
+  for its own class. `default` is a real keyword parameter of `element`,
+  so `element(c, k, default: d)` returns `d` for a key outside the
+  collection whatever `c` is, and a program's method takes it as `#key
+  default`, testing `default == $unsupplied` when the call passed none (a
+  vector index outside it otherwise traps). A typed `c[k]` on a vector runs
+  the kernel's plain index inline, without testing for a default. Like any
+  generic that takes keywords, `element` cannot be used as a value yet;
 - recoverable condition/restart forms, with `<condition>`, `<error>`,
   `<type-error>`, `<no-applicable-method>` and `<select-error>` defined by
   the kernel: a

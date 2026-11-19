@@ -342,6 +342,10 @@ pub enum CstKind {
     ExprStmt,
     /// Function, method, or generic parameter name.
     ParameterName,
+    /// `#key` parameter: its name, optional type and default.
+    KeywordParameter,
+    /// Keyword parameter name, which is also its keyword.
+    KeywordParameterName,
     /// Local binding name.
     LetName,
     /// Restart condition binding name.
@@ -451,6 +455,7 @@ impl CstKind {
                 | Self::SlotName
                 | Self::SlotKeyword
                 | Self::ParameterName
+                | Self::KeywordParameterName
                 | Self::LetName
                 | Self::RestartName
                 | Self::BlockExitName
@@ -579,6 +584,7 @@ fn syntax_node_id(
         | CstKind::SlotKeyword
         | CstKind::LetStmt
         | CstKind::ParameterName
+        | CstKind::KeywordParameterName
         | CstKind::LetName
         | CstKind::RestartName
         | CstKind::BlockExitName
@@ -729,6 +735,8 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::ValueDefinitionName => 35,
         CstKind::SlotName => 36,
         CstKind::ParameterName => 37,
+        CstKind::KeywordParameter => 65,
+        CstKind::KeywordParameterName => 66,
         CstKind::LetName => 38,
         CstKind::RestartName => 39,
         CstKind::CallName => 40,

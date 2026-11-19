@@ -85,12 +85,10 @@ impl CollectionFunction {
         }
     }
 
-    /// Returns the keyword arguments a call may pass, without colons.
-    ///
-    /// Loko has no keyword parameters yet, so a method cannot take one: a
-    /// call passing `default:` runs a kernel method's defaulting operation
-    /// ([`BuiltinMethod::with_default`]), and needs a receiver whose class
-    /// typing knows has one.
+    /// Returns the keyword parameters, without colons, in declaration
+    /// order. Each is an `<object>` declared without a default, so a call
+    /// that does not pass it passes `$unsupplied`; every method takes them
+    /// after the required parameters, and dispatch does not look at them.
     #[must_use]
     pub const fn keywords(self) -> &'static [&'static str] {
         match self {
@@ -109,11 +107,14 @@ pub struct BuiltinMethod {
     pub collection: BuiltinValueClass,
     /// The key class it specializes on, for a generic that takes a key.
     pub key: Option<BuiltinValueClass>,
-    /// The operation, taking the generic's arguments in order.
+    /// The operation, taking the generic's arguments in order, keywords
+    /// included.
     pub operation: Intrinsic,
-    /// The operation that serves a call passing `default:`, taking the
-    /// arguments and then the default, for a generic that takes one.
-    pub with_default: Option<Intrinsic>,
+    /// For a generic that takes keywords, the operation for a call that
+    /// passes none of them, taking only the required arguments. It does
+    /// what [`Self::operation`] does when every keyword is `$unsupplied`,
+    /// and lets a typed call that passes no keyword skip testing for it.
+    pub unsupplied: Option<Intrinsic>,
 }
 
 /// The kernel's methods of the collection generics, one row per generic and
@@ -125,14 +126,14 @@ pub const BUILTIN_METHODS: &[BuiltinMethod] = &[
         collection: BuiltinValueClass::Vector,
         key: None,
         operation: Intrinsic::VectorSize,
-        with_default: None,
+        unsupplied: None,
     },
     BuiltinMethod {
         function: CollectionFunction::Element,
         collection: BuiltinValueClass::Vector,
         key: Some(BuiltinValueClass::Integer),
-        operation: Intrinsic::VectorRef,
-        with_default: Some(Intrinsic::VectorElementOr),
+        operation: Intrinsic::VectorElementOr,
+        unsupplied: Some(Intrinsic::VectorRef),
     },
 ];
 
@@ -176,9 +177,10 @@ mod tests {
             );
             let takes_key = method.function != CollectionFunction::Size;
             assert_eq!(method.key.is_some(), takes_key);
-            assert!(
-                method.with_default.is_none() || !method.function.keywords().is_empty(),
-                "{} takes no default",
+            assert_eq!(
+                method.unsupplied.is_some(),
+                !method.function.keywords().is_empty(),
+                "{} has an operation for calls passing no keyword exactly when it takes keywords",
                 method.function.name()
             );
         }

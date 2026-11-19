@@ -79,6 +79,14 @@
 //! closure captures it, so it lives in a shared cell, against the same loop
 //! with the total in a register.
 //!
+//! Two cases measure keyword parameters, each against `inc-called`, the
+//! same `n + 1` through a function taking one positional parameter:
+//!
+//! - `keyword call`: `step(d, by: 1)`, a typed call passing the keyword,
+//!   which is a direct call with the keyword in its parameter's place.
+//! - `keyword default`: `step(d)`, which calls the keyword's hidden default
+//!   function for its value first.
+//!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
 use std::hint::black_box;
@@ -293,6 +301,18 @@ define function inc-called(d :: <integer>) => <integer>
   if (d = 0) inc(d) else inc-called(d - 1) + inc-called(d - 1) end
 end;
 
+define function step(n :: <integer>, #key by :: <integer> = 1) => <integer>
+  n + by
+end;
+
+define function keyword-called(d :: <integer>) => <integer>
+  if (d = 0) step(d, by: 1) else keyword-called(d - 1) + keyword-called(d - 1) end
+end;
+
+define function default-called(d :: <integer>) => <integer>
+  if (d = 0) step(d) else default-called(d - 1) + default-called(d - 1) end
+end;
+
 define function untyped-tree(f :: <callable>, d :: <integer>) => <integer>
   if (d = 0) apply(f, d) else untyped-tree(f, d - 1) + untyped-tree(f, d - 1) end
 end;
@@ -459,6 +479,8 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("untyped passed", net("untyped-passed", "plain")),
         ("loop iteration", net("looped", "unlooped")),
         ("cell access", net("cell-looped", "looped")),
+        ("keyword call", net("keyword-called", "inc-called")),
+        ("keyword default", net("default-called", "inc-called")),
     ]
 }
 

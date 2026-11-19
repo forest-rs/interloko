@@ -78,6 +78,9 @@ pub enum DiagnosticCode {
     AstInvalidSignal,
     /// `:=` was used with something other than a local name or an object slot.
     AstInvalidSlotAssignment,
+    /// An anonymous function declares `#key` parameters, which no call
+    /// through a callable value can pass yet.
+    AstAnonymousKeywordParameter,
     /// A definition repeats an adjective, as in `define sealed sealed class`.
     AstDuplicateAdjective,
     /// A definition has two adjectives that contradict each other, such as
@@ -240,9 +243,23 @@ pub enum DiagnosticCode {
     UnexpectedKeywordArgument,
     /// A call passes the same keyword argument twice.
     DuplicateKeywordArgument,
-    /// A call passes `default:` to `element` on a collection whose class is
-    /// not statically one with a kernel method that takes it.
-    CollectionDefaultUnsupported,
+    /// A keyword parameter of a type other than `<object>` declares no
+    /// default, so a call that does not pass it has no value for it.
+    KeywordParameterNeedsDefault,
+    /// A method declares a keyword parameter its generic does not.
+    MethodKeywordNotInGeneric,
+    /// A method gives one of its generic's keyword parameters a default:
+    /// defaults belong to the generic.
+    MethodKeywordDefault,
+    /// A method declares a keyword parameter with a type other than its
+    /// generic's.
+    MethodKeywordTypeMismatch,
+    /// A function or generic that takes keyword parameters is used as a
+    /// callable value, whose calls pass no keywords yet.
+    KeywordCallableValue,
+    /// A call through a callable value passes a keyword argument, which
+    /// callable values do not take yet.
+    CallableKeywordArgument,
     /// A method of a built-in collection generic specializes on a kernel
     /// class the generic already has a kernel method for.
     CollectionMethodOverridesKernel,
@@ -372,6 +389,7 @@ impl DiagnosticCode {
         Self::AstInvalidTypeLiteral,
         Self::AstInvalidSignal,
         Self::AstInvalidSlotAssignment,
+        Self::AstAnonymousKeywordParameter,
         Self::AstDuplicateAdjective,
         Self::AstConflictingAdjectives,
         Self::DuplicateDefinition,
@@ -448,7 +466,12 @@ impl DiagnosticCode {
         Self::AssignmentTargetNotAssignable,
         Self::UnexpectedKeywordArgument,
         Self::DuplicateKeywordArgument,
-        Self::CollectionDefaultUnsupported,
+        Self::KeywordParameterNeedsDefault,
+        Self::MethodKeywordNotInGeneric,
+        Self::MethodKeywordDefault,
+        Self::MethodKeywordTypeMismatch,
+        Self::KeywordCallableValue,
+        Self::CallableKeywordArgument,
         Self::CollectionMethodOverridesKernel,
         Self::SlotDefaultTypeMismatch,
         Self::SlotDefaultBindsLocals,
@@ -519,6 +542,7 @@ impl DiagnosticCode {
             Self::AstInvalidTypeLiteral => "ast.invalid-type-literal",
             Self::AstInvalidSignal => "ast.invalid-signal",
             Self::AstInvalidSlotAssignment => "ast.invalid-slot-assignment",
+            Self::AstAnonymousKeywordParameter => "ast.anonymous-keyword-parameter",
             Self::AstDuplicateAdjective => "ast.duplicate-adjective",
             Self::AstConflictingAdjectives => "ast.conflicting-adjectives",
             Self::DuplicateDefinition => "sem.duplicate-definition",
@@ -597,7 +621,12 @@ impl DiagnosticCode {
             Self::AssignmentTargetNotAssignable => "sem.assignment-target-not-assignable",
             Self::UnexpectedKeywordArgument => "sem.unexpected-keyword-argument",
             Self::DuplicateKeywordArgument => "sem.duplicate-keyword-argument",
-            Self::CollectionDefaultUnsupported => "sem.collection-default-unsupported",
+            Self::KeywordParameterNeedsDefault => "sem.keyword-parameter-needs-default",
+            Self::MethodKeywordNotInGeneric => "sem.method-keyword-not-in-generic",
+            Self::MethodKeywordDefault => "sem.method-keyword-default",
+            Self::MethodKeywordTypeMismatch => "sem.method-keyword-type-mismatch",
+            Self::KeywordCallableValue => "sem.keyword-callable-value",
+            Self::CallableKeywordArgument => "sem.callable-keyword-argument",
             Self::CollectionMethodOverridesKernel => "sem.collection-method-overrides-kernel",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
             Self::SlotDefaultBindsLocals => "sem.slot-default-binds-locals",
@@ -669,6 +698,7 @@ impl DiagnosticCode {
             "ast.invalid-type-literal" => Self::AstInvalidTypeLiteral,
             "ast.invalid-signal" => Self::AstInvalidSignal,
             "ast.invalid-slot-assignment" => Self::AstInvalidSlotAssignment,
+            "ast.anonymous-keyword-parameter" => Self::AstAnonymousKeywordParameter,
             "ast.duplicate-adjective" => Self::AstDuplicateAdjective,
             "ast.conflicting-adjectives" => Self::AstConflictingAdjectives,
             "sem.duplicate-definition" => Self::DuplicateDefinition,
@@ -747,7 +777,12 @@ impl DiagnosticCode {
             "sem.assignment-target-not-assignable" => Self::AssignmentTargetNotAssignable,
             "sem.unexpected-keyword-argument" => Self::UnexpectedKeywordArgument,
             "sem.duplicate-keyword-argument" => Self::DuplicateKeywordArgument,
-            "sem.collection-default-unsupported" => Self::CollectionDefaultUnsupported,
+            "sem.keyword-parameter-needs-default" => Self::KeywordParameterNeedsDefault,
+            "sem.method-keyword-not-in-generic" => Self::MethodKeywordNotInGeneric,
+            "sem.method-keyword-default" => Self::MethodKeywordDefault,
+            "sem.method-keyword-type-mismatch" => Self::MethodKeywordTypeMismatch,
+            "sem.keyword-callable-value" => Self::KeywordCallableValue,
+            "sem.callable-keyword-argument" => Self::CallableKeywordArgument,
             "sem.collection-method-overrides-kernel" => Self::CollectionMethodOverridesKernel,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,
             "sem.slot-default-binds-locals" => Self::SlotDefaultBindsLocals,
