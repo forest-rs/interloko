@@ -402,7 +402,7 @@ The current slices include:
   `end-position` read the string's UTF-8 in tape code, with no host call
   unless a position has no character there; the other operations are
   runtime host calls. A loop reading a character and stepping costs
-  about 105 ns per character. Normalization and grapheme clusters are
+  about 87 ns per character. Normalization and grapheme clusters are
   left to a library;
 - mutable collections, which live in the runtime's heap as instances do
   (a turn's stores into image collections are logged, undone if it aborts

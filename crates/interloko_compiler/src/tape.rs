@@ -2176,11 +2176,11 @@ impl<'a> FunctionEmitter<'a> {
                     .host_sig_for(function.symbol(), function.signature());
                 match (
                     check,
-                    function.checked_arg().and_then(|index| args.get(index)),
+                    function.checked_arg().filter(|index| *index < args.len()),
                 ) {
                     (Some(check), Some(checked)) => {
                         self.emit_checked_text_call(
-                            *dst, *function, sig, args, *checked, check, *span,
+                            *dst, *function, sig, args, checked, check, *span,
                         )?;
                     }
                     (None, None) => {
@@ -3087,9 +3087,9 @@ impl<'a> FunctionEmitter<'a> {
     ///
     /// ```text
     ///         at = i64.to_u64_wrap p          // a negative p is huge: missing
-    ///         c, moved, missing = obj.utf8_next s, at   // utf8_prev for previous-position
-    ///         br missing, slow, found
-    /// found:  dst = c                         // or i64(moved) for a position
+    ///         dst, moved, missing = obj.utf8_next s, at   // utf8_prev for previous-position
+    ///         br missing, slow, done          // a character read ends here
+    /// found:  dst = u64.to_i64_wrap moved     // a position read
     ///         jmp done
     /// slow:
     /// ```
@@ -3132,33 +3132,41 @@ impl<'a> FunctionEmitter<'a> {
         } else {
             self.asm.obj_utf8_next(scalar, moved, missing, string, at);
         }
-        let found = self.asm.label();
-        self.asm.br(missing, slow, found);
-        self.asm.place(found).map_err(build_error)?;
-        if !reads_character {
+        if reads_character {
+            // The decode wrote the character to `dst` already.
+            self.asm.br(missing, slow, done);
+        } else {
+            let found = self.asm.label();
+            self.asm.br(missing, slow, found);
+            self.asm.place(found).map_err(build_error)?;
             self.asm.u64_to_i64_wrap(dst, moved);
+            self.asm.jmp(done);
         }
-        self.asm.jmp(done);
         Ok(true)
     }
 
-    /// Emits a text call that can reject its argument `checked`, and what
-    /// happens when it does ([`lower::TextCheck`]):
+    /// Emits a text call that can reject its argument `args[checked]`, and
+    /// what happens when it does ([`lower::TextCheck`]):
     ///
     /// ```text
-    /// retry:  <decode, jumping to done>   // string reads; see emit_string_decode
-    /// call:   region (check-failed -> failed)
-    ///           dst = call(args)
+    ///         <decode, branching to done or slow>   // string reads; see emit_string_decode
+    /// slow:   copy = args[checked]
+    ///         jmp retry
+    /// retry:  region (check-failed -> failed)
+    ///           dst = call(args with copy)
     ///         end region
     ///         jmp done
-    /// failed: condition = type-error(boxed checked, site)
-    ///         checked = signal(condition)    // use-value
+    /// failed: condition = type-error(boxed copy, site)
+    ///         copy = signal(condition)    // use-value
     ///         jmp retry
     /// done:
     /// ```
     ///
-    /// The operation checks every argument it is given, so a replacement
-    /// is checked the same way when the call is made again.
+    /// A `use-value` replacement is written to the call's own copy, never to
+    /// the argument's register, which may be a local's; the copy is made only
+    /// once the fast path, if any, has missed. The operation checks every argument it
+    /// is given, so a replacement is checked the same way when the call is
+    /// made again.
     #[expect(
         clippy::too_many_arguments,
         reason = "one call site passes the lowered call's parts"
@@ -3169,24 +3177,32 @@ impl<'a> FunctionEmitter<'a> {
         function: sem::TextFunction,
         sig: HostSigId,
         args: &[Reg],
-        checked: Reg,
+        checked: usize,
         check: &lower::TextCheck,
         span: Span,
     ) -> Result<(), TapeError> {
         let control = self.abi.control()?;
         let check_failed = control.check_failed;
-        let (retry, failed, done) = (self.asm.label(), self.asm.label(), self.asm.label());
+        let (slow, retry, failed, done) = (
+            self.asm.label(),
+            self.asm.label(),
+            self.asm.label(),
+            self.asm.label(),
+        );
+        self.set_span(span);
+        if self.emit_string_decode(dst, function, args, slow, done)? {
+            self.asm.place(slow).map_err(build_error)?;
+        }
+        let copy_type = self.register_type(args[checked])?;
+        let copy = self.alloc_temp(copy_type);
+        self.asm.mov(copy, args[checked]);
         self.asm.jmp(retry);
         self.asm.place(retry).map_err(build_error)?;
-        self.set_span(span);
-        let call = self.asm.label();
-        if !self.emit_string_decode(dst, function, args, call, done)? {
-            self.asm.jmp(call);
-        }
-        self.asm.place(call).map_err(build_error)?;
+        let mut call_args = args.to_vec();
+        call_args[checked] = copy;
         self.asm.begin_region(&[Catch::Tag(check_failed, failed)]);
         self.asm
-            .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[dst]);
+            .host_call(Reg::EFFECT, sig, Reg::EFFECT, &call_args, &[dst]);
         self.asm
             .end_region()
             .ok_or_else(|| invalid_lowered("check region is not open"))?;
@@ -3209,10 +3225,10 @@ impl<'a> FunctionEmitter<'a> {
             Some(sig) => {
                 let boxed = self.alloc_temp(runtime::any_type());
                 self.asm
-                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[checked], &[boxed]);
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[copy], &[boxed]);
                 (boxed, runtime::any_type())
             }
-            None => (checked, self.register_type(checked)?),
+            None => (copy, copy_type),
         };
         let site = self.type_error_site(&check.type_error, span)?;
         let condition = self.shared_temp(SharedTemp::Condition, runtime::object_type());
@@ -3224,8 +3240,7 @@ impl<'a> FunctionEmitter<'a> {
             &[reported, site],
             &[condition],
         );
-        let replacement = self.register_type(checked)?;
-        self.emit_signal(&[replacement], &[checked], condition, span)?;
+        self.emit_signal(&[copy_type], &[copy], condition, span)?;
         self.asm.jmp(retry);
         self.asm.place(done).map_err(build_error)?;
         Ok(())
