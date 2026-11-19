@@ -1,0 +1,29 @@
+// expect: run 2344
+// expect: diagnostics 0
+
+// `apply` and `values` are built-in functions a program may shadow, as it
+// may shadow any other: a local binding is called by its name, and a
+// definition of the program replaces the built-in one. The code the
+// compiler writes for `floor/` and for `for` still calls the built-in
+// `values`, whatever the program calls by that name.
+
+define function values(n :: <integer>) => <integer>
+  n * 2
+end;
+
+define function divide(a :: <integer>, b :: <integer>) => <integer>
+  let values = 300;
+  let (q, r) = floor/(a, b);
+  q * 10 + r + values
+end;
+
+define function total(c :: <object>) => <integer>
+  let sum = 0;
+  for (x :: <integer> in c) sum := sum + x end;
+  sum
+end;
+
+define function main() => <integer>
+  let apply = method (a :: <integer>) => <integer> a + 1 end;
+  apply(1) * 1000 + values(5) + divide(7, 2) + total(#[1, 2])
+end;
