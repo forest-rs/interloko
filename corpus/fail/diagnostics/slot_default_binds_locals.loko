@@ -1,0 +1,15 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.slot-default-binds-locals
+// expect: diagnostic contains slot `value`'s init-value binds the local `t`
+
+// A slot default is evaluated inline where each instance is made, in the
+// making function's frame, so it cannot bind locals of its own yet.
+
+define class <cell> (<object>)
+  slot value :: <integer>, init-value: begin let t = 2; t + 1 end;
+end;
+
+define function main() => <integer>
+  let a = 10;
+  make(<cell>).value + a
+end;

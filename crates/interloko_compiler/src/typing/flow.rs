@@ -452,9 +452,9 @@ impl<'a> Analysis<'a> {
 
     /// Analyzes an expression outside any function body, such as a
     /// constant's initializer, and returns its type.
-    pub(super) fn detached(&mut self, expr: &'a sem::Expr) -> Type {
-        self.contexts.push(Context::new(None, &[], &[]));
-        let mut env = Env::new(0, 0);
+    pub(super) fn detached(&mut self, locals: &'a [sem::Local], expr: &'a sem::Expr) -> Type {
+        self.contexts.push(Context::new(None, locals, &[]));
+        let mut env = Env::new(locals.len(), 0);
         let fact = self.eval(&mut env, expr);
         self.result = Some(fact.reason);
         self.contexts.pop();
@@ -1502,7 +1502,7 @@ impl<'a> Analysis<'a> {
         } else {
             let mut nested = Analysis::new(self.module, constant.definition);
             nested.depth = self.depth + 1;
-            nested.detached(&constant.value)
+            nested.detached(&constant.locals, &constant.value)
         };
         if let Some(slot) = self.constants.get_mut(index) {
             *slot = Some(ty.clone());

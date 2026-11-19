@@ -670,6 +670,30 @@ fn multiline_definitions_wait_for_select_end() {
 }
 
 #[test]
+fn multiline_definitions_wait_for_loops_and_begin() {
+    let (stdout, stderr) = run_repl(
+        "define function main()\n\
+           let n = begin\n\
+             let i = 0;\n\
+             while (i < 4)\n\
+               i := i + 1\n\
+             end;\n\
+             until (i > 5)\n\
+               i := i + 1\n\
+             end;\n\
+             i\n\
+           end;\n\
+           n\n\
+         end\n\
+         :run main\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.lines().any(|line| line == "6"), "{stdout}");
+}
+
+#[test]
 fn quit_discards_pending_definition_and_exits() {
     let (stdout, stderr) = run_repl("define function broken()\n:quit\n");
 

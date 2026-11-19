@@ -97,6 +97,7 @@
 "sem.collection-default-unsupported" = "[ps] { $function } default: needs { $expected }, got { $actual }"
 "sem.collection-method-overrides-kernel" = "[ps] { $function } kernel method for { $class } cannot be overridden"
 "sem.slot-default-type-mismatch" = "[ps] slot { $slot } default got { $actual }, need { $expected }"
+"sem.slot-default-binds-locals" = "[ps] slot { $slot } default binds local { $local }"
 "sem.missing-required-init-keyword" = "[ps] slot { $slot } needs init keyword { $keyword }"
 "sem.missing-slot-initializer" = "[ps] slot { $slot } needs initializer"
 "sem.unknown-slot" = "[ps] slot { $slot } missing on { $class }"

@@ -1,0 +1,15 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// `begin body end` is a body as an expression: its statements run in
+// order, its `let`s are its own, and its last expression is its value.
+
+define function main() => <integer>
+  let x = begin
+    let a = 40;
+    let b = 2;
+    a + b
+  end;
+  let a = begin 0 end;
+  x + a
+end;

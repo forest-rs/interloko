@@ -1979,7 +1979,9 @@ impl<'tree> Lowering<'tree> {
             CstKind::CaseExpr => self.lower_case(node),
             CstKind::SelectExpr => self.lower_select(node),
             CstKind::HandleExpr => self.lower_handle(node),
-            CstKind::BlockExpr => self.lower_block_expr(node),
+            // `begin body end` is `block () body end`: a scope, no exit and
+            // no cleanup.
+            CstKind::BlockExpr | CstKind::BeginExpr => self.lower_block_expr(node),
             CstKind::WhileExpr => self.lower_loop(node, LoopKind::While),
             CstKind::UntilExpr => self.lower_loop(node, LoopKind::Until),
             _ => Expr::Error {

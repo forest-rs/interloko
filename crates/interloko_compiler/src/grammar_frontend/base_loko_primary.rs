@@ -493,6 +493,10 @@ impl BaseLokoCstProjector<'_> {
             "expression" => self.unwrap_first_expr(node),
             "handle-expression" => self.build_handle(node),
             "block-expression" => self.build_block(node),
+            "begin-expression" => {
+                let body = self.bodies(node);
+                self.node_with_nested(CstKind::BeginExpr, node, body)
+            }
             "restart-clause" => self.build_restart(node),
             "while-expression" => self.build_loop(node, CstKind::WhileExpr),
             "until-expression" => self.build_loop(node, CstKind::UntilExpr),
@@ -1222,6 +1226,7 @@ impl BaseLokoCstProjector<'_> {
             rule,
             "handle-expression"
                 | "block-expression"
+                | "begin-expression"
                 | "while-expression"
                 | "until-expression"
                 | "if-expression"

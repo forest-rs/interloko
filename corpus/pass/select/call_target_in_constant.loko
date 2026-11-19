@@ -1,0 +1,20 @@
+// expect: run 50
+// expect: diagnostics 0
+
+// A `select` whose target is a call binds the target to a hidden local,
+// which a constant's initializer has a frame for like any body.
+
+define function two() => <integer>
+  2
+end;
+
+define constant $picked = select (two())
+  1 => 10;
+  2 => 50;
+  otherwise => 0;
+end;
+
+define function main() => <integer>
+  let a = 7;
+  $picked + a - a
+end;

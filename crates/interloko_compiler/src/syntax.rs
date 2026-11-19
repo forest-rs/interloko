@@ -81,6 +81,8 @@ pub enum TokenKind {
     When,
     /// `block`.
     Block,
+    /// `begin`.
+    Begin,
     /// `cleanup`.
     Cleanup,
     /// `while`.
@@ -213,6 +215,7 @@ impl TokenKind {
             | Self::Restart
             | Self::When
             | Self::Block
+            | Self::Begin
             | Self::Cleanup
             | Self::While
             | Self::Until
@@ -289,6 +292,7 @@ impl Token {
             | TokenKind::Restart
             | TokenKind::When
             | TokenKind::Block
+            | TokenKind::Begin
             | TokenKind::Cleanup
             | TokenKind::While
             | TokenKind::Until
@@ -408,6 +412,8 @@ pub enum CstKind {
     RestartClause,
     /// Dylan-style `block` expression.
     BlockExpr,
+    /// `begin body end`: a body in its own scope, as an expression.
+    BeginExpr,
     /// `cleanup` clause of a `block` expression.
     CleanupClause,
     /// `while (test) body end` loop.
@@ -733,6 +739,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::RestartConditionType => 45,
         CstKind::ExpressionTypeName => 46,
         CstKind::BlockExpr => 47,
+        CstKind::BeginExpr => 64,
         CstKind::CleanupClause => 48,
         CstKind::BlockExitName => 49,
         CstKind::RestartGuard => 50,
@@ -773,7 +780,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Star => 17,
         TokenKind::Equal => 18,
         TokenKind::EqualEqual => 58,
-        TokenKind::Select => 59,
+        TokenKind::Select => 61,
         TokenKind::Arrow => 19,
         TokenKind::Colon => 20,
         TokenKind::Assign => 45,
@@ -806,6 +813,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::RBracket => 43,
         TokenKind::VectorStart => 44,
         TokenKind::Block => 48,
+        TokenKind::Begin => 62,
         TokenKind::Cleanup => 49,
         TokenKind::When => 50,
         TokenKind::Elseif => 54,
@@ -1030,6 +1038,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "restart" => TokenKind::Restart,
                     "when" => TokenKind::When,
                     "block" => TokenKind::Block,
+                    "begin" => TokenKind::Begin,
                     "cleanup" => TokenKind::Cleanup,
                     "while" => TokenKind::While,
                     "until" => TokenKind::Until,

@@ -465,7 +465,7 @@ fn synthesis_joins_branches_and_stays_within_sem() {
     assert_eq!(actual("same"), "exactly <circle>");
     for function in &module.functions {
         let kind = module.expr_kind(&function.body.result);
-        let ty = synthesize(&module, &function.body.result);
+        let ty = synthesize(&module, &function.locals, &function.body.result);
         assert!(ty.is_subtype(&module.kind_type(kind), &module));
     }
 }
@@ -1968,6 +1968,32 @@ fn strict_reports_each_unproved_check_with_its_code_reasons_and_fixes() {
     );
     // The secondary labels point at where the operand types came from.
     assert!(dispatch.labels.len() > 1, "{:?}", dispatch.labels);
+}
+
+#[test]
+fn a_strict_constants_fixes_name_its_initializers_locals() {
+    let (_, artifact) = decisions_for(
+        "define class <box> (<object>)\n  slot v :: <object>, init-value: 2;\nend;\n\
+         define generic size(x);\n\
+         define method size(x :: <integer>) => <integer>\n  x\nend;\n\
+         define method size(x :: <string>) => <integer>\n  0\nend;\n\
+         define strict constant $k = begin\n  let t = make(<box>).v;\n  size(t)\nend;\n\
+         define function main()\n  $k\nend;",
+    );
+    let dispatch = artifact
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::TypingUnprovedDispatch)
+        .expect("dispatch error");
+    let notes = dispatch
+        .notes
+        .iter()
+        .map(|note| note.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        notes.contains(&"fix: test t with instance? against <string> first"),
+        "{notes:?}"
+    );
 }
 
 #[test]

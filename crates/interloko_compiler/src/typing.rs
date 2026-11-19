@@ -1692,7 +1692,7 @@ fn run_definition(
             .constants
             .iter()
             .find(|constant| constant.definition == definition)?;
-        let _ = analysis.detached(&constant.value);
+        let _ = analysis.detached(&constant.locals, &constant.value);
         DefinitionKind::Constant
     };
     let finished = analysis.finish();
@@ -1716,15 +1716,18 @@ fn run_definition(
 /// everything else follows the transfer rules of the flow analysis. The
 /// result is `kind_type(expr_kind(expr))` narrowed by what the expression's
 /// shape proves, and never wider than it.
+///
+/// `locals` is the frame `expr`'s locals index, such as a constant
+/// initializer's [`sem::Constant::locals`].
 #[must_use]
-pub fn synthesize(module: &sem::Module, expr: &sem::Expr) -> Type {
+pub fn synthesize(module: &sem::Module, locals: &[sem::Local], expr: &sem::Expr) -> Type {
     let owner = DefinitionId::new(
         module.source_file,
         DefinitionKind::Function,
         "<synthesize>",
         "",
     );
-    flow::Analysis::new(module, owner).detached(expr)
+    flow::Analysis::new(module, owner).detached(locals, expr)
 }
 
 /// Argument tuples a dispatch distributes over before it checks whole

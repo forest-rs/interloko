@@ -558,13 +558,9 @@ fn read_binding<'a>(
             .find(|function| function.definition == typed.definition)
         {
             Some(function) => (&function.locals, &function.params),
-            None => {
-                let method = module
-                    .methods
-                    .iter()
-                    .find(|method| method.definition == typed.definition)?;
-                (&method.locals, &[])
-            }
+            // A method's parameters are its specializers, not bindings a
+            // fix should test.
+            None => (module.definition_locals(typed.definition)?.0, &[]),
         },
         Binding::ClosureLocal { closure, .. } => {
             let closure = module.closures.get(closure.0 as usize)?;

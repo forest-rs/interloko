@@ -2236,14 +2236,17 @@ fn block_definition_boundary(tokens: &[syntax::Token]) -> Option<PendingDefiniti
                 depth += 1;
             }
             // Every form closed by `end`: a defined or anonymous function,
-            // the conditionals, `handle`, and `block`.
+            // the conditionals, the loops, `handle`, `block` and `begin`.
             TokenKind::Function
             | TokenKind::If
             | TokenKind::Unless
             | TokenKind::Case
             | TokenKind::Select
+            | TokenKind::While
+            | TokenKind::Until
             | TokenKind::Handle
-            | TokenKind::Block => {
+            | TokenKind::Block
+            | TokenKind::Begin => {
                 depth += 1;
             }
             TokenKind::End if depth > 0 => {
@@ -3610,6 +3613,7 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::Restart
         | TokenKind::When
         | TokenKind::Block
+        | TokenKind::Begin
         | TokenKind::Cleanup
         | TokenKind::While
         | TokenKind::Until

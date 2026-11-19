@@ -1,0 +1,16 @@
+// expect: run 13
+// expect: diagnostics 0
+
+// A constant read inside a function does not share the function's locals:
+// `$k`'s `t` and `main`'s `a` are both the first local of their frames,
+// and setting one leaves the other alone.
+
+define constant $k = begin
+  let t = 2;
+  t + 1
+end;
+
+define function main() => <integer>
+  let a = 10;
+  $k + a
+end;

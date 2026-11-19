@@ -971,6 +971,31 @@ impl Module {
         }
     }
 
+    /// The locals of `definition`'s own frame, indexed by [`LocalId`], and
+    /// its parameters among them: a function's or a method's, or a constant
+    /// initializer's, which has no parameters.
+    #[must_use]
+    pub fn definition_locals(&self, definition: DefinitionId) -> Option<(&[Local], &[LocalId])> {
+        if let Some(function) = self
+            .functions
+            .iter()
+            .find(|function| function.definition == definition)
+        {
+            return Some((&function.locals, &function.params));
+        }
+        if let Some(method) = self
+            .methods
+            .iter()
+            .find(|method| method.definition == definition)
+        {
+            return Some((&method.locals, &method.params));
+        }
+        self.constants
+            .iter()
+            .find(|constant| constant.definition == definition)
+            .map(|constant| (constant.locals.as_slice(), [].as_slice()))
+    }
+
     /// Returns the type contract of the generic, method or function
     /// `definition` names, or `None` for any other definition.
     ///
@@ -2840,6 +2865,10 @@ pub struct Constant {
     pub name: String,
     /// Lowered initializer expression.
     pub value: Expr,
+    /// The initializer's own locals, indexed by [`LocalId`]: those its
+    /// `let`s, `block` exits and handlers bind. The initializer is a frame
+    /// of its own, as a function body is, wherever it is evaluated.
+    pub locals: Vec<Local>,
     /// Result value category.
     pub result_kind: ValueKind,
     /// Typed callable signature when the constant is a typed callable value.
@@ -5437,6 +5466,26 @@ impl Lowering {
                     Some(core::slice::from_ref(&slot_kind)),
                 );
                 self.diagnostics.extend(ctx.diagnostics);
+                // A default is lowered inline wherever an instance is made,
+                // in the making body's frame, so it has none of its own to
+                // bind locals in.
+                if let Some(local) = ctx.locals.first() {
+                    self.diagnostics.push(
+                        Diagnostic::error(local.span, DiagnosticCode::SlotDefaultBindsLocals)
+                            .with_arg(DiagnosticArg::text("slot", slot.name.clone()))
+                            .with_arg(DiagnosticArg::text("local", local.name.clone())),
+                    );
+                    // The slot still has a default, so a `make` relying on
+                    // it reports nothing more.
+                    lowered_values.push((
+                        lowered_class_index,
+                        slot_index,
+                        Expr::Error {
+                            span: init_value.span(),
+                        },
+                    ));
+                    continue;
+                }
                 let value_kind = self.expr_kind(&value);
                 if !self.kinds_match(slot_kind, value_kind) {
                     self.diagnostics.push(
@@ -6516,6 +6565,7 @@ impl Lowering {
                 definition: constant.definition,
                 name: constant.name.clone(),
                 value,
+                locals: ctx.locals,
                 result_kind,
                 callable_signature,
                 strict: constant.strict,

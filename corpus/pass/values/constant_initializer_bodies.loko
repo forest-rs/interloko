@@ -1,0 +1,40 @@
+// expect: run 1236
+// expect: diagnostics 0
+// expect: dump sem contains local l0 def
+
+// A constant's initializer is any expression, bodies included: `let`s,
+// assignment and loops, a closure over its locals, a `block` exit and a
+// handler. Its locals are its own frame's wherever it is evaluated.
+
+define class <cell> (<object>)
+  slot value :: <integer>, init-value: 0;
+end;
+
+define constant $total :: <integer> = begin
+  let sum = 0;
+  let i = 0;
+  while (i < 5)
+    i := i + 1;
+    sum := sum + i
+  end;
+  sum
+end;
+
+define constant $adder = begin
+  let base = 10;
+  function (x :: <integer>) => <integer> x + base end
+end;
+
+define constant $exited = block (return) let t = 4; return(t * 2); 0 end;
+
+define constant $handled = begin
+  let c = make(<cell>, value: 3);
+  handle signal(c) with restart e :: <cell> e.value end
+end;
+
+define function main() => <integer>
+  let a = 100;
+  let b = 1000;
+  let add = $adder;
+  $total + add(a) + $exited + $handled + b + a
+end;

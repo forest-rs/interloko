@@ -3126,7 +3126,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "expression",
-            "handle-expression | block-expression | while-expression | until-expression | if-expression | unless-expression | case-expression | select-expression | assignment-expression",
+            "handle-expression | block-expression | begin-expression | while-expression | until-expression | if-expression | unless-expression | case-expression | select-expression | assignment-expression",
             "syntax.rs:Parser::parse_expr",
         ),
         (
@@ -3158,6 +3158,11 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "block-expression",
             "`block` `(` block-exit-name? `)` body cleanup-clause? `end`",
             "base_loko_primary::BaseLokoCstBuilder::build_block",
+        ),
+        (
+            "begin-expression",
+            "`begin` body `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_expr",
         ),
         (
             "block-exit-name",
@@ -3953,6 +3958,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::HandleExpr => Some("handle-expression"),
         CstKind::RestartClause => Some("restart-clause"),
         CstKind::BlockExpr => Some("block-expression"),
+        CstKind::BeginExpr => Some("begin-expression"),
         CstKind::WhileExpr => Some("while-expression"),
         CstKind::UntilExpr => Some("until-expression"),
         CstKind::BlockExitName => Some("block-exit-name"),
@@ -4395,7 +4401,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 72);
+        assert_eq!(grammar.effective_rules.len(), 73);
 
         assert!(
             !records

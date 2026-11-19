@@ -8377,6 +8377,7 @@ fn dump_sem(module: &sem::Module) -> String {
             sem_kind_label(module, constant.result_kind),
             strict_label(constant.strict)
         );
+        dump_sem_locals(module, &mut out, &constant.locals, 2);
         dump_sem_expr(&mut out, &constant.value, 2);
     }
     for closure in &module.closures {
@@ -15148,7 +15149,10 @@ fn contract_fingerprint(module: &sem::Module, definition: DefinitionId) -> Strin
         .iter()
         .find(|constant| constant.definition == definition)
     {
-        return format!("constant:{:?}", typing::synthesize(module, &constant.value));
+        return format!(
+            "constant:{:?}",
+            typing::synthesize(module, &constant.locals, &constant.value)
+        );
     }
     for class in &module.classes {
         if let Some(slot) = class
@@ -20727,6 +20731,33 @@ mod tests {
         assert!(affected(QueryArtifact::DefinitionTyping(main)));
         assert!(!affected(QueryArtifact::DefinitionTyping(quiet)));
         assert!(!affected(QueryArtifact::Bind));
+    }
+
+    #[test]
+    fn constant_body_edit_retypes_its_readers() {
+        // The constant's type comes from a loop over its own locals, so
+        // its contract fingerprint must read them to see the edit.
+        let source = "define constant $f = begin\n  let u = 0;\n  \
+                      while (u < 3) u := u + 1 end;\n  u\nend;\n\
+                      define function main() => <integer>\n  \
+                      let x :: limited(<integer>, min: 3) = $f;\n  x\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let id = session.add_source("loop.loko", source);
+        let _ = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+        let update = session
+            .edit_and_compile(
+                id,
+                &source.replace("u < 3", "u < 1"),
+                RuntimeMode::CompileOnly,
+            )
+            .expect("source exists");
+        let constant = update.artifacts.sem.constants[0].definition;
+        let main = function_definition(&update.artifacts, "main");
+        let affected = |artifact| cache_report(&update, artifact).is_some_and(|r| r.affected);
+        assert!(affected(QueryArtifact::Contract(constant)));
+        assert!(affected(QueryArtifact::DefinitionTyping(main)));
     }
 
     #[test]
