@@ -1,0 +1,11 @@
+// expect: diagnostic code sem.duplicate-keyword-argument
+// expect: diagnostics 1
+// A callable type names each keyword once.
+
+define function use(f :: callable(<integer>, #key by :: <integer>, by :: <integer>) => <integer>) => <integer>
+  f(3)
+end;
+
+define function main() => <integer>
+  0
+end;
