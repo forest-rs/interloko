@@ -8032,7 +8032,11 @@ impl Lowering {
                 | Intrinsic::ClassDirectSlots
                 | Intrinsic::ClassEffectiveSlots,
                 0,
-            ) => matches!(actual, ValueKind::ClassObject(_) | ValueKind::Any),
+            ) => {
+                // A value declared `<class>` is a class object too.
+                matches!(actual, ValueKind::ClassObject(_) | ValueKind::Any)
+                    || self.is_builtin_instance(actual, BuiltinValueClass::Class)
+            }
             (
                 Intrinsic::SlotName
                 | Intrinsic::SlotType

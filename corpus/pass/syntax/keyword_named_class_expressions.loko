@@ -1,0 +1,17 @@
+// expect: run "<method>"
+// expect: diagnostics 0
+
+// A class name is a word between `<` and `>`, reserved words included, so
+// `<class>` and `<method>` are written like any other class: as expressions
+// and in annotations.
+
+define function class-of-class(k :: <class>) => <class>
+  class-of(k)
+end;
+
+define function main() => <string>
+  let k = class-of-class(<integer>);
+  let same :: <boolean> = k = <class>;
+  let named :: <class> = <method>;
+  class-name(named)
+end;
