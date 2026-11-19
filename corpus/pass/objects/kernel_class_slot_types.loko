@@ -1,0 +1,27 @@
+// expect: run 2321
+// expect: diagnostics 0
+
+// A slot may be declared as any kernel class, as a parameter or local may:
+// a collection, a string builder, a character or a function.
+
+define class <inventory> (<object>)
+  slot items :: <stretchy-vector>, init-value: make(<stretchy-vector>);
+  slot counts :: <table>, init-value: make(<table>);
+  slot all :: <sequence>, init-value: #[1, 2];
+  slot log :: <string-builder>, init-value: make(<string-builder>);
+  slot mark :: <character>, init-value: 'x';
+  slot step :: <function>, init-value: function (n :: <integer>) => <integer> n + 1 end;
+end;
+
+define function main() => <integer>
+  let inv = make(<inventory>);
+  add!(inv.items, 7);
+  add!(inv.items, 8);
+  inv.counts['a'] := 3;
+  add!(inv.log, inv.mark);
+  let step :: <function> = inv.step;
+  // 2000 for two items, 300 for the count, 20 for two elements, 1 for the
+  // logged mark, and 0 for `step(0) - 1`.
+  size(inv.items) * 1000 + as(<integer>, inv.counts['a']) * 100
+    + size(inv.all) * 10 + size(as(<string>, inv.log)) + step(0) - 1
+end;

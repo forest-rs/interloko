@@ -5003,6 +5003,44 @@ fn visit_evaluated_block(block: &Block, visit: &mut impl FnMut(&Expr)) {
     visit_evaluated(&block.result, visit);
 }
 
+/// The kind a value declared as the built-in class `kind`, whose id is
+/// `class`, has, or `None` for an abstract numeric class, which has no
+/// single representation.
+///
+/// Every annotation that names a built-in class as the type of a value
+/// resolves through this one match, so a new kernel class must say here how
+/// its values are held before anything compiles.
+const fn builtin_value_kind(kind: BuiltinValueClass, class: ClassId) -> Option<ValueKind> {
+    match kind {
+        BuiltinValueClass::String => Some(ValueKind::String(class)),
+        BuiltinValueClass::Symbol => Some(ValueKind::Symbol(class)),
+        BuiltinValueClass::Vector => Some(ValueKind::Vector(class)),
+        BuiltinValueClass::Integer => Some(ValueKind::I64),
+        BuiltinValueClass::DoubleFloat => Some(ValueKind::F64),
+        BuiltinValueClass::SingleFloat => Some(ValueKind::F32),
+        BuiltinValueClass::Boolean => Some(ValueKind::Bool),
+        BuiltinValueClass::Character => Some(ValueKind::Char),
+        BuiltinValueClass::StringPosition => Some(ValueKind::Position),
+        // A value declared `<function>` is any callable value.
+        BuiltinValueClass::Function => Some(ValueKind::Callable),
+        BuiltinValueClass::Number
+        | BuiltinValueClass::Real
+        | BuiltinValueClass::Rational
+        | BuiltinValueClass::Float => None,
+        BuiltinValueClass::Class
+        | BuiltinValueClass::GenericFunction
+        | BuiltinValueClass::Method
+        | BuiltinValueClass::SlotDescriptor
+        | BuiltinValueClass::Type
+        | BuiltinValueClass::LimitedIntegerType
+        | BuiltinValueClass::SubclassType
+        | BuiltinValueClass::StringBuilder
+        | BuiltinValueClass::StretchyVector
+        | BuiltinValueClass::Table
+        | BuiltinValueClass::Sequence => Some(ValueKind::Object(class)),
+    }
+}
+
 /// The hidden local a `select` binds its target to when the target is not
 /// already a local, suffixed with where the `select` starts. Its name has a
 /// space, so source cannot name it.
@@ -6351,6 +6389,9 @@ impl Lowering {
                             | ValueKind::I32
                             | ValueKind::U32
                             | ValueKind::F32
+                            | ValueKind::Bool
+                            | ValueKind::Char
+                            | ValueKind::Position
                             | ValueKind::Vector(_)
                             | ValueKind::Callable
                             | ValueKind::Error
@@ -6358,10 +6399,9 @@ impl Lowering {
                     && let Some(param) = generic.params.get(param_index)
                     && let Some(annotation) = param.type_annotation.as_ref()
                 {
-                    // Methods specialize a generic's parameters on classes. A
-                    // callable signature is not one (`<function>` is), and
-                    // a `<boolean>` parameter is not supported yet: the same
-                    // fact a method parameter declared so reports.
+                    // Methods specialize a generic's parameters on classes,
+                    // so each must be declared as a type whose values have
+                    // one: any class, scalars and `<function>` included.
                     self.diagnostics.push(
                         Diagnostic::error(annotation.span(), DiagnosticCode::AstAnnotationNotClass)
                             .with_arg(DiagnosticArg::text("position", "generic parameter"))
@@ -13982,64 +14022,8 @@ impl Lowering {
     }
 
     fn kind_for_builtin_class(&self, class: ClassId) -> Option<ValueKind> {
-        match self
-            .classes
-            .get(class.0 as usize)
-            .map(|class| class.origin)?
-        {
-            ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::String,
-            } => Some(ValueKind::String(class)),
-            ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Symbol,
-            } => Some(ValueKind::Symbol(class)),
-            ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Integer,
-            } => Some(ValueKind::I64),
-            ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::DoubleFloat,
-            } => Some(ValueKind::F64),
-            ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::SingleFloat,
-            } => Some(ValueKind::F32),
-            ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Boolean,
-            } => Some(ValueKind::Bool),
-            ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Character,
-            } => Some(ValueKind::Char),
-            ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::StringPosition,
-            } => Some(ValueKind::Position),
-            // A value declared `<function>` is any callable value.
-            ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Function,
-            } => Some(ValueKind::Callable),
-            // Abstract numeric classes have no single representation.
-            ClassOrigin::BuiltinValue {
-                kind:
-                    BuiltinValueClass::Number
-                    | BuiltinValueClass::Real
-                    | BuiltinValueClass::Rational
-                    | BuiltinValueClass::Float,
-            } => None,
-            ClassOrigin::BuiltinValue {
-                kind: BuiltinValueClass::Vector,
-            } => Some(ValueKind::Vector(class)),
-            ClassOrigin::BuiltinValue {
-                kind:
-                    BuiltinValueClass::Class
-                    | BuiltinValueClass::GenericFunction
-                    | BuiltinValueClass::Method
-                    | BuiltinValueClass::SlotDescriptor
-                    | BuiltinValueClass::Type
-                    | BuiltinValueClass::LimitedIntegerType
-                    | BuiltinValueClass::SubclassType
-                    | BuiltinValueClass::StringBuilder
-                    | BuiltinValueClass::StretchyVector
-                    | BuiltinValueClass::Table
-                    | BuiltinValueClass::Sequence,
-            } => Some(ValueKind::Object(class)),
+        match self.classes.get(class.0 as usize)?.origin {
+            ClassOrigin::BuiltinValue { kind } => builtin_value_kind(kind, class),
             ClassOrigin::ObjectRoot
             | ClassOrigin::Native
             | ClassOrigin::Condition { .. }
@@ -14415,71 +14399,46 @@ impl Lowering {
         span: Span,
         diagnostics: &mut Vec<Diagnostic>,
     ) -> ValueKind {
+        let unresolved = |diagnostics: &mut Vec<Diagnostic>| {
+            diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
+                    .with_arg(DiagnosticArg::text("class", type_name)),
+            );
+            ValueKind::Error
+        };
+        // A kernel class resolves by its kind, not by looking for its class
+        // among those defined so far: annotations resolved before the kernel
+        // classes are added, such as slot types, still find it.
+        let builtin = BuiltinValueClass::from_name(type_name)
+            .and_then(|kind| Some((kind, self.builtin_value_class(kind)?)));
         if class_object {
-            return self
-                .resolve_class(type_name)
-                .map(|class| ValueKind::ClassObject(class.id))
-                .unwrap_or_else(|| {
-                    diagnostics.push(
-                        Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
-                            .with_arg(DiagnosticArg::text("class", type_name)),
-                    );
-                    ValueKind::Error
-                });
+            return builtin
+                .map(|(_, class)| class)
+                .or_else(|| self.condition_class(ConditionClass::from_name(type_name)?))
+                .or_else(|| self.resolve_class(type_name).map(|class| class.id))
+                .map_or_else(|| unresolved(diagnostics), ValueKind::ClassObject);
         }
-        match type_name {
-            "<object>" => ValueKind::Any,
-            "<boolean>" => ValueKind::Bool,
-            "<character>" => ValueKind::Char,
-            "<string-position>" => ValueKind::Position,
-            "<string>" => self
-                .builtin_value_class(BuiltinValueClass::String)
-                .map_or(ValueKind::Error, ValueKind::String),
-            "<symbol>" => self
-                .builtin_value_class(BuiltinValueClass::Symbol)
-                .map_or(ValueKind::Error, ValueKind::Symbol),
-            "<integer>" => ValueKind::I64,
-            "<double-float>" => ValueKind::F64,
-            "<single-float>" => ValueKind::F32,
-            "<i32>" => ValueKind::I32,
-            "<u32>" => ValueKind::U32,
-            "<number>" | "<real>" | "<rational>" | "<float>" => {
+        if let Some((kind, class)) = builtin {
+            return builtin_value_kind(kind, class).unwrap_or_else(|| {
                 diagnostics.push(
                     Diagnostic::error(span, DiagnosticCode::AbstractNumericTypeUnsupported)
                         .with_arg(DiagnosticArg::text("class", type_name)),
                 );
                 ValueKind::Error
-            }
-            // `<function>` is the class of every callable value, which
-            // `<callable>` names without a signature.
-            "<callable>" | "<function>" => ValueKind::Callable,
-            "<vector>" => self
-                .builtin_value_class(BuiltinValueClass::Vector)
-                .map_or(ValueKind::Error, ValueKind::Vector),
-            "<class>" => self
-                .builtin_value_class(BuiltinValueClass::Class)
-                .map_or(ValueKind::Error, ValueKind::Object),
-            "<generic-function>" => self
-                .builtin_value_class(BuiltinValueClass::GenericFunction)
-                .map_or(ValueKind::Error, ValueKind::Object),
-            "<method>" => self
-                .builtin_value_class(BuiltinValueClass::Method)
-                .map_or(ValueKind::Error, ValueKind::Object),
-            "<slot-descriptor>" => self
-                .builtin_value_class(BuiltinValueClass::SlotDescriptor)
-                .map_or(ValueKind::Error, ValueKind::Object),
+            });
+        }
+        match type_name {
+            "<object>" => ValueKind::Any,
+            "<i32>" => ValueKind::I32,
+            "<u32>" => ValueKind::U32,
+            // `<callable>` names a callable value without a signature, as
+            // `<function>`, the class of every one, does.
+            "<callable>" => ValueKind::Callable,
             name => self
                 .resolve_class(name)
                 .map(|class| class.id)
                 .or_else(|| self.condition_class(ConditionClass::from_name(name)?))
-                .map(ValueKind::Object)
-                .unwrap_or_else(|| {
-                    diagnostics.push(
-                        Diagnostic::error(span, DiagnosticCode::UnresolvedClass)
-                            .with_arg(DiagnosticArg::text("class", name)),
-                    );
-                    ValueKind::Error
-                }),
+                .map_or_else(|| unresolved(diagnostics), ValueKind::Object),
         }
     }
 
@@ -14516,18 +14475,21 @@ impl Lowering {
             // A scalar argument reaches every method specialized on its
             // class or a superclass, such as `<float>` or `<real>` for an
             // f64.
-            ValueKind::I64 | ValueKind::F64 | ValueKind::I32 | ValueKind::U32 | ValueKind::F32 => {
-                self.value_kind_class(expected)
-                    .is_some_and(|class| self.is_same_or_subclass(class, specializer))
-            }
+            ValueKind::I64
+            | ValueKind::F64
+            | ValueKind::I32
+            | ValueKind::U32
+            | ValueKind::F32
+            | ValueKind::Bool
+            | ValueKind::Char
+            | ValueKind::Position => self
+                .value_kind_class(expected)
+                .is_some_and(|class| self.is_same_or_subclass(class, specializer)),
             // A callable reaches methods on `<function>` and `<object>`.
             ValueKind::Callable | ValueKind::KnownCallable(_) => self
                 .value_kind_class(expected)
                 .is_some_and(|class| self.is_same_or_subclass(class, specializer)),
-            ValueKind::Bool
-            | ValueKind::Char
-            | ValueKind::Position
-            | ValueKind::ClassObject(_)
+            ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
             | ValueKind::SlotDescriptorObject { .. } => false,
@@ -15219,6 +15181,108 @@ mod tests {
             .iter()
             .find(|function| function.name == name)
             .expect("function")
+    }
+
+    /// Each annotation position, with `{C}` for the class it names, and
+    /// whether it names the class itself, as an abstract class may be named,
+    /// rather than the type of a value.
+    const ANNOTATION_POSITIONS: &[(&str, &str, bool)] = &[
+        (
+            "parameter",
+            "define function f(x :: {C}) => <integer>\n  0\nend;\n",
+            false,
+        ),
+        (
+            "result",
+            "define function f(x :: <object>) => {C}\n  as({C}, x)\nend;\n",
+            false,
+        ),
+        (
+            "let",
+            "define function f(x :: <object>) => <integer>\n  \
+             let y :: {C} = as({C}, x);\n  0\nend;\n",
+            false,
+        ),
+        (
+            "slot",
+            "define class <holder> (<object>)\n  slot s :: {C};\nend;\n",
+            false,
+        ),
+        ("generic", "define generic f(x :: {C}) => {C};\n", false),
+        (
+            "as",
+            "define function f(x :: <object>) => <object>\n  as({C}, x)\nend;\n",
+            false,
+        ),
+        (
+            "instance?",
+            "define function f(x :: <object>) => <boolean>\n  instance?(x, {C})\nend;\n",
+            true,
+        ),
+        (
+            "specializer",
+            "define generic f(x) => <object>;\n\
+             define method f(x :: {C}) => <object>\n  x\nend;\n",
+            true,
+        ),
+        (
+            "class parameter",
+            "define function f(x :: class {C}) => <integer>\n  0\nend;\n",
+            true,
+        ),
+        (
+            "class slot",
+            "define class <holder> (<object>)\n  slot s :: class {C};\nend;\n",
+            true,
+        ),
+    ];
+
+    #[test]
+    fn every_kernel_class_resolves_in_every_annotation_position() {
+        // Every kernel class, built-in or condition, is a type a program can
+        // name wherever it names one, except that the abstract numeric
+        // classes type no value yet.
+        let builtins = BuiltinValueClass::ALL
+            .iter()
+            .map(|(kind, name)| (*name, kind.is_abstract() && kind.is_numeric()));
+        let conditions = ConditionClass::ALL
+            .iter()
+            .map(|condition| (condition.name(), false));
+        let mut failures = Vec::new();
+        for (class, abstract_numeric) in builtins.chain(conditions) {
+            for (position, template, names_class) in ANNOTATION_POSITIONS {
+                if abstract_numeric && !names_class {
+                    continue;
+                }
+                let source = format!(
+                    "{}define function main() => <integer>\n  0\nend;\n",
+                    template.replace("{C}", class)
+                );
+                let module = lower_source(&source);
+                if !module.diagnostics.is_empty() {
+                    failures.push(format!("{class} as {position}: {:?}", module.diagnostics));
+                    continue;
+                }
+                // A slot type resolves before the kernel classes exist, so
+                // check it found the class it names, not merely a class.
+                let Some(holder) = module.classes.iter().find(|item| item.name == "<holder>")
+                else {
+                    continue;
+                };
+                let found = match holder.direct_slots[0].kind {
+                    ValueKind::ClassObject(class) => Some(class),
+                    kind => module.value_kind_class(kind),
+                };
+                let found = found.and_then(|id| module.classes.get(id.0 as usize));
+                if found.is_none_or(|found| found.name != class) {
+                    failures.push(format!(
+                        "{class} as {position} resolved to {:?}",
+                        found.map(|found| &found.name)
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[test]

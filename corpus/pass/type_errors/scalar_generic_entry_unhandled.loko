@@ -1,0 +1,19 @@
+// expect: runtime code type-error.entry
+// expect: run reports 3 is not of type <character>
+// expect: diagnostics 0
+
+// A call through a `<function>` reaches a `<character>` generic's entry,
+// which checks the argument it cannot know statically.
+
+define generic code(c :: <character>) => <integer>;
+define method code(c :: <character>) => <integer>
+  1
+end;
+
+define function via(f :: <function>, x :: <object>) => <integer>
+  f(x)
+end;
+
+define function main() => <integer>
+  via(code, 3)
+end;
