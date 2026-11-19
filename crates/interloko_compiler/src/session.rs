@@ -7301,6 +7301,13 @@ impl Host for SharedFunctionCallHost<'_> {
     ) -> Option<execution_tape::value::Obj> {
         self.0.borrow().convert_object(object, to)
     }
+    fn object_bytes<R>(
+        &self,
+        object: execution_tape::value::Obj,
+        read: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> R {
+        self.0.borrow().object_bytes(object, read)
+    }
 }
 
 struct FunctionCallHost<'a> {
@@ -7388,6 +7395,13 @@ impl Host for FunctionCallHost<'_> {
         to: execution_tape::program::HostTypeId,
     ) -> Option<execution_tape::value::Obj> {
         self.runtime.convert_object(object, to)
+    }
+    fn object_bytes<R>(
+        &self,
+        object: execution_tape::value::Obj,
+        read: impl FnOnce(Option<&[u8]>) -> R,
+    ) -> R {
+        self.runtime.object_bytes(object, read)
     }
     fn call(
         &mut self,
@@ -23841,6 +23855,167 @@ end;
     }
 
     #[test]
+    fn string_reads_decode_in_place_and_signal_where_they_must() {
+        // Each read decodes the string's bytes in tape code, and a position
+        // with no character falls back to the runtime, which returns a
+        // default or signals; a `use-value` replacement is read again. In
+        // "é!", offset 1 is inside `é` and 3 is the end.
+        let cases: [(&str, &[i64], i64); 6] = [
+            (
+                "byte-offset(next-position(s, position-at(\"abc\", 1)))",
+                &[0],
+                2,
+            ),
+            (
+                "byte-offset(previous-position(s, position-at(\"abc\", 1)))",
+                &[3],
+                2,
+            ),
+            (
+                "byte-offset(previous-position(s, start-position(s)))",
+                &[2],
+                0,
+            ),
+            (
+                "as(<integer>, element(s, end-position(s), default: 'd'))",
+                &[],
+                100,
+            ),
+            (
+                "as(<integer>, element(s, position-at(\"abc\", 1), default: 'd'))",
+                &[-1, 2],
+                33,
+            ),
+            (
+                "byte-offset(next-position(s, next-position(s, start-position(s))))",
+                &[],
+                3,
+            ),
+        ];
+        for (expr, replacements, expected) in cases {
+            let source = format!(
+                "define function main() => <integer>\n  let s = \"\u{e9}!\";\n  {expr}\nend;"
+            );
+            let artifacts =
+                CompilerSession::compile_source("reads.loko", &source, RuntimeMode::CompileOnly);
+            assert_eq!(artifacts.diagnostics, Vec::new(), "{expr}");
+            for policy in lower::CodegenPolicy::ALL {
+                let artifacts = artifacts.with_codegen_policy(*policy);
+                let mut breaks = 0;
+                let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                    let report = condition.type_error().expect("a type error");
+                    assert_eq!(report.kind(), Some(TypeErrorKind::Range), "{expr}");
+                    assert_eq!(report.expected, "<string-position>", "{expr}");
+                    let replacement = replacements[breaks];
+                    breaks += 1;
+                    Choice::UseValue(vec![Value::I64(replacement)])
+                });
+                assert_eq!(
+                    call_with_chooser(&artifacts, &mut chooser).expect("the read resumes"),
+                    FunctionValue::Integer(expected),
+                    "{expr} under {policy:?}"
+                );
+                assert_eq!(breaks, replacements.len(), "{expr} under {policy:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn string_reads_agree_with_the_runtime_at_every_position() {
+        // A read is made at an offset inside `é`, which signals; the
+        // `use-value` replacement is the position under test, decoded in
+        // tape code. Where the runtime's rules accept it, the read answers
+        // for it; where they reject it, it signals again and a known-good
+        // replacement answers. Each read's rules are restated here from
+        // `interloko_runtime::text`, so the decode must agree with them.
+        const TEXT: &str = "a\u{e9}\u{20ac}\u{1f600}";
+        let len = TEXT.len() as i64;
+        let boundary = |p: i64| {
+            usize::try_from(p).is_ok_and(|at| at <= TEXT.len() && TEXT.is_char_boundary(at))
+        };
+        let char_at = |p: i64| {
+            TEXT[p as usize..]
+                .chars()
+                .next()
+                .map(|c| u32::from(c) as i64)
+        };
+        // (expression, the runtime's answer for p or None to reject, fallback, its answer)
+        type Rule = fn(i64, &dyn Fn(i64) -> bool, &dyn Fn(i64) -> Option<i64>, i64) -> Option<i64>;
+        let reads: [(&str, Rule, i64); 4] = [
+            (
+                "as(<integer>, s[p])",
+                |p, boundary, char_at, len| (boundary(p) && p < len).then(|| char_at(p)).flatten(),
+                0,
+            ),
+            (
+                "as(<integer>, element(s, p, default: 'd'))",
+                |p, boundary, char_at, len| {
+                    if p >= len {
+                        Some(i64::from(b'd'))
+                    } else {
+                        (boundary(p) && p < len).then(|| char_at(p)).flatten()
+                    }
+                },
+                0,
+            ),
+            (
+                "byte-offset(next-position(s, p))",
+                |p, boundary, char_at, len| {
+                    (boundary(p) && p < len)
+                        .then(|| char_at(p))
+                        .flatten()
+                        .map(|c| p + char::from_u32(c as u32).unwrap().len_utf8() as i64)
+                },
+                0,
+            ),
+            (
+                "byte-offset(previous-position(s, p))",
+                |p, boundary, _, _| {
+                    (boundary(p) && p > 0)
+                        .then(|| TEXT[..p as usize].char_indices().next_back().unwrap().0 as i64)
+                },
+                1,
+            ),
+        ];
+        let mut positions = vec![i64::MIN, -1, 1 << 44, i64::MAX];
+        positions.extend(0..=len + 1);
+        for (expr, rule, fallback) in reads {
+            let source = format!(
+                "define function main() => <integer>\n  let s = \"{TEXT}\";\n  \
+                 let p = position-at(\"abcdefgh\", 2);\n  {expr}\nend;"
+            );
+            let artifacts =
+                CompilerSession::compile_source("agree.loko", &source, RuntimeMode::CompileOnly);
+            assert_eq!(artifacts.diagnostics, Vec::new(), "{expr}");
+            for policy in lower::CodegenPolicy::ALL {
+                let artifacts = artifacts.with_codegen_policy(*policy);
+                for &p in &positions {
+                    let answer = rule(p, &boundary, &char_at, len);
+                    let mut breaks = 0;
+                    let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                        let report = condition.type_error().expect("a type error");
+                        assert_eq!(report.kind(), Some(TypeErrorKind::Range));
+                        breaks += 1;
+                        Choice::UseValue(vec![Value::I64(if breaks == 1 { p } else { fallback })])
+                    });
+                    let value = call_with_chooser(&artifacts, &mut chooser).expect("resumes");
+                    let expected = answer
+                        .or_else(|| rule(fallback, &boundary, &char_at, len))
+                        .expect("the fallback is accepted");
+                    assert_eq!(
+                        (value, breaks),
+                        (
+                            FunctionValue::Integer(expected),
+                            if answer.is_some() { 1 } else { 2 }
+                        ),
+                        "{expr} at {p} under {policy:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn a_failed_unboxing_to_a_character_checks_its_replacement() {
         let artifacts = CompilerSession::compile_source(
             "unbox.loko",
@@ -27334,6 +27509,13 @@ end;
             to: execution_tape::program::HostTypeId,
         ) -> Option<execution_tape::value::Obj> {
             self.0.convert_object(object, to)
+        }
+        fn object_bytes<R>(
+            &self,
+            object: execution_tape::value::Obj,
+            read: impl FnOnce(Option<&[u8]>) -> R,
+        ) -> R {
+            self.0.object_bytes(object, read)
         }
     }
 

@@ -1947,6 +1947,24 @@ impl InterlokoHost {
         }
     }
 
+    /// The UTF-8 of the `<string>` `object`, which compiled code reads with
+    /// `obj.utf8_next` and friends instead of a host call per character, or
+    /// `None` for any other object.
+    ///
+    /// A `<string>` is immutable once made, so its bytes never change while
+    /// it lives, as `Host::object_bytes` requires. A `<string-builder>`
+    /// changes, so it lends nothing.
+    #[must_use]
+    pub fn string_bytes(&self, object: Obj) -> Option<&[u8]> {
+        if object.host_type != INTERLOKO_OBJECT_TYPE {
+            return None;
+        }
+        match &self.object(object).ok()?.storage {
+            RuntimeObjectStorage::String { text } => Some(text.as_str().as_bytes()),
+            _ => None,
+        }
+    }
+
     /// Allocates a native runtime object for `class` using layout-ordered fields.
     pub fn make_object(
         &mut self,
@@ -2373,6 +2391,9 @@ impl Host for InterlokoHost {
     }
     fn convert_object(&self, object: Obj, to: HostTypeId) -> Option<Obj> {
         Self::convert_object(self, object, to)
+    }
+    fn object_bytes<R>(&self, object: Obj, read: impl FnOnce(Option<&[u8]>) -> R) -> R {
+        read(self.string_bytes(object))
     }
     fn call(
         &mut self,
@@ -4242,6 +4263,23 @@ mod tests {
             panic!("expected an object, got {value:?}");
         };
         *object
+    }
+
+    #[test]
+    fn strings_lend_their_utf8_and_nothing_else_does() {
+        let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+        let string = object_of(&host.make_string("h\u{e9}llo").expect("string"));
+        let boxed = object_of(&host.box_top_value(Value::Bool(false)).expect("box"));
+        let cell = object_of(
+            &host
+                .make_object(ClassId(2), &[ValueRef::Obj(boxed)])
+                .expect("cell"),
+        );
+        let bytes = |object| host.object_bytes(object, |bytes| bytes.map(<[u8]>::to_vec));
+        assert_eq!(bytes(string), Some("h\u{e9}llo".as_bytes().to_vec()));
+        // Compiled code reading any other object traps rather than reading it.
+        assert_eq!(bytes(cell), None);
+        assert_eq!(bytes(boxed), None);
     }
 
     #[test]

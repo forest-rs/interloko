@@ -1587,7 +1587,9 @@ struct FunctionEmitter<'a> {
 ///
 /// One activation runs at most one signal path at a time (a guard runs in
 /// its own activation), so the paths can share their scratch registers
-/// rather than each adding its own to every call's frame.
+/// rather than each adding its own to every call's frame. The `Text` roles
+/// are scratch for string reads, whose values die within the instructions
+/// that read them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SharedTemp {
     /// Whether the handler search waits on a guard.
@@ -1604,6 +1606,14 @@ enum SharedTemp {
     Site,
     /// A `use-value` replacement to check again.
     Replacement,
+    /// A string position as `obj.utf8_next` takes it, or a byte length.
+    TextPosition,
+    /// The position past the character a string decode read.
+    TextMoved,
+    /// Whether a string decode found no character.
+    TextMissing,
+    /// The character a decode for a position read.
+    TextScalar,
 }
 
 impl<'a> FunctionEmitter<'a> {
@@ -2156,17 +2166,22 @@ impl<'a> FunctionEmitter<'a> {
                 check,
                 span,
             } => {
+                self.set_span(*span);
+                if check.is_none() && self.emit_string_bounds(*dst, *function, args)? {
+                    return Ok(());
+                }
                 // Declared at its first use, as only text code calls it.
                 let sig = self
                     .builder
                     .host_sig_for(function.symbol(), function.signature());
-                self.set_span(*span);
                 match (
                     check,
                     function.checked_arg().and_then(|index| args.get(index)),
                 ) {
                     (Some(check), Some(checked)) => {
-                        self.emit_checked_text_call(*dst, sig, args, *checked, check, *span)?;
+                        self.emit_checked_text_call(
+                            *dst, *function, sig, args, *checked, check, *span,
+                        )?;
                     }
                     (None, None) => {
                         self.asm
@@ -3030,11 +3045,109 @@ impl<'a> FunctionEmitter<'a> {
         Ok(site)
     }
 
+    /// Emits `start-position` and `end-position` without a host call: the
+    /// start is always 0, and the end is the string's byte length, which
+    /// `obj.bytes_len` reads from the runtime's bytes
+    /// ([`interloko_runtime::InterlokoHost::string_bytes`]). Returns whether
+    /// `function` was one of them.
+    ///
+    /// The argument is a `<string>` by construction: lowering passes these
+    /// operations only a `String`-kinded register. A register that held
+    /// anything else would trap `NoObjectBytes` here, where the host call
+    /// would have failed.
+    fn emit_string_bounds(
+        &mut self,
+        dst: Reg,
+        function: sem::TextFunction,
+        args: &[Reg],
+    ) -> Result<bool, TapeError> {
+        match (function, args) {
+            (sem::TextFunction::StartPosition, [_]) => {
+                self.asm.const_i64(dst, 0);
+            }
+            (sem::TextFunction::EndPosition, [string]) => {
+                let len = self.shared_temp(SharedTemp::TextPosition, ValueType::U64);
+                self.asm
+                    .obj_bytes_len(len, *string)
+                    .u64_to_i64_wrap(dst, len);
+            }
+            (sem::TextFunction::StartPosition | sem::TextFunction::EndPosition, _) => {
+                return Err(invalid_lowered("a string bound has the wrong arity"));
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Emits the tape decode that answers `function` without a host call
+    /// when its position starts (or ends) a character, and branches to
+    /// `slow` otherwise, where the host call decides what the position
+    /// means: the default of `element(s, p, default:)` at the end, or a
+    /// rejection. Returns whether `function` has such a decode.
+    ///
+    /// ```text
+    ///         at = i64.to_u64_wrap p          // a negative p is huge: missing
+    ///         c, moved, missing = obj.utf8_next s, at   // utf8_prev for previous-position
+    ///         br missing, slow, found
+    /// found:  dst = c                         // or i64(moved) for a position
+    ///         jmp done
+    /// slow:
+    /// ```
+    ///
+    /// The decode checks bounds and boundaries as the host call does, on
+    /// the same bytes, so the two agree wherever the decode answers; a
+    /// session test compares them at every edge position. It relies on what
+    /// lowering guarantees and the host checks itself: the string is a
+    /// `<string>`, and `element`'s default is a scalar value, as every
+    /// `<character>` register holds once made or checked.
+    fn emit_string_decode(
+        &mut self,
+        dst: Reg,
+        function: sem::TextFunction,
+        args: &[Reg],
+        slow: Label,
+        done: Label,
+    ) -> Result<bool, TapeError> {
+        use sem::TextFunction as F;
+        let (string, position) = match (function, args) {
+            (F::StringElement | F::NextPosition | F::PreviousPosition, [string, position])
+            | (F::StringElementOr, [string, position, _]) => (*string, *position),
+            (F::StringElement | F::StringElementOr | F::NextPosition | F::PreviousPosition, _) => {
+                return Err(invalid_lowered("a string decode has the wrong arity"));
+            }
+            _ => return Ok(false),
+        };
+        let reads_character = matches!(function, F::StringElement | F::StringElementOr);
+        let at = self.shared_temp(SharedTemp::TextPosition, ValueType::U64);
+        let moved = self.shared_temp(SharedTemp::TextMoved, ValueType::U64);
+        let missing = self.shared_temp(SharedTemp::TextMissing, ValueType::Bool);
+        let scalar = if reads_character {
+            dst
+        } else {
+            self.shared_temp(SharedTemp::TextScalar, ValueType::U32)
+        };
+        self.asm.i64_to_u64_wrap(at, position);
+        if function == F::PreviousPosition {
+            self.asm.obj_utf8_prev(scalar, moved, missing, string, at);
+        } else {
+            self.asm.obj_utf8_next(scalar, moved, missing, string, at);
+        }
+        let found = self.asm.label();
+        self.asm.br(missing, slow, found);
+        self.asm.place(found).map_err(build_error)?;
+        if !reads_character {
+            self.asm.u64_to_i64_wrap(dst, moved);
+        }
+        self.asm.jmp(done);
+        Ok(true)
+    }
+
     /// Emits a text call that can reject its argument `checked`, and what
     /// happens when it does ([`lower::TextCheck`]):
     ///
     /// ```text
-    /// retry:  region (check-failed -> failed)
+    /// retry:  <decode, jumping to done>   // string reads; see emit_string_decode
+    /// call:   region (check-failed -> failed)
     ///           dst = call(args)
     ///         end region
     ///         jmp done
@@ -3046,9 +3159,14 @@ impl<'a> FunctionEmitter<'a> {
     ///
     /// The operation checks every argument it is given, so a replacement
     /// is checked the same way when the call is made again.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one call site passes the lowered call's parts"
+    )]
     fn emit_checked_text_call(
         &mut self,
         dst: Reg,
+        function: sem::TextFunction,
         sig: HostSigId,
         args: &[Reg],
         checked: Reg,
@@ -3061,6 +3179,11 @@ impl<'a> FunctionEmitter<'a> {
         self.asm.jmp(retry);
         self.asm.place(retry).map_err(build_error)?;
         self.set_span(span);
+        let call = self.asm.label();
+        if !self.emit_string_decode(dst, function, args, call, done)? {
+            self.asm.jmp(call);
+        }
+        self.asm.place(call).map_err(build_error)?;
         self.asm.begin_region(&[Catch::Tag(check_failed, failed)]);
         self.asm
             .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[dst]);
