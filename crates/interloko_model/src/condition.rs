@@ -16,6 +16,7 @@
 //!       <not-found-error>
 //!       <immutable-collection-error>
 //!       <collection-modified-error>
+//!       <constant-cycle-error>
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
@@ -30,8 +31,10 @@
 //! `<immutable-collection-error>` a store into a constant collection, a
 //! vector literal ([`IMMUTABLE_COLLECTION_CODE`]). A
 //! `<collection-modified-error>` reports a `<table>` whose keys changed
-//! while a `for` loop iterated it ([`COLLECTION_MODIFIED_CODE`]). Their
-//! slots are
+//! while a `for` loop iterated it ([`COLLECTION_MODIFIED_CODE`]). A
+//! `<constant-cycle-error>` reports a constant read while its own
+//! initializer was running: the constant, the definition whose code read
+//! it, and the stable code [`CONSTANT_CYCLE_CODE`]. Their slots are
 //! read-only, so they add no setter generics to a program.
 //!
 //! A send never finds several equally specific methods: a module whose
@@ -64,6 +67,9 @@ pub enum ConditionClass {
     /// `<collection-modified-error>`: a collection's keys changed while it
     /// was being iterated.
     CollectionModifiedError,
+    /// `<constant-cycle-error>`: a constant was read while its own
+    /// initializer was running.
+    ConstantCycleError,
 }
 
 impl ConditionClass {
@@ -80,6 +86,7 @@ impl ConditionClass {
         Self::NotFoundError,
         Self::ImmutableCollectionError,
         Self::CollectionModifiedError,
+        Self::ConstantCycleError,
     ];
 
     /// Returns the Loko-visible class name.
@@ -94,6 +101,7 @@ impl ConditionClass {
             Self::NotFoundError => "<not-found-error>",
             Self::ImmutableCollectionError => "<immutable-collection-error>",
             Self::CollectionModifiedError => "<collection-modified-error>",
+            Self::ConstantCycleError => "<constant-cycle-error>",
         }
     }
 
@@ -109,6 +117,7 @@ impl ConditionClass {
             b"<not-found-error>" => Some(Self::NotFoundError),
             b"<immutable-collection-error>" => Some(Self::ImmutableCollectionError),
             b"<collection-modified-error>" => Some(Self::CollectionModifiedError),
+            b"<constant-cycle-error>" => Some(Self::ConstantCycleError),
             _ => None,
         }
     }
@@ -125,7 +134,8 @@ impl ConditionClass {
             | Self::SelectError
             | Self::NotFoundError
             | Self::ImmutableCollectionError
-            | Self::CollectionModifiedError => Some(Self::Error),
+            | Self::CollectionModifiedError
+            | Self::ConstantCycleError => Some(Self::Error),
         }
     }
 
@@ -140,6 +150,7 @@ impl ConditionClass {
             Self::NotFoundError => &NOT_FOUND_ERROR_SLOTS,
             Self::ImmutableCollectionError => &IMMUTABLE_COLLECTION_ERROR_SLOTS,
             Self::CollectionModifiedError => &COLLECTION_MODIFIED_ERROR_SLOTS,
+            Self::ConstantCycleError => &CONSTANT_CYCLE_ERROR_SLOTS,
         }
     }
 }
@@ -237,6 +248,58 @@ pub const SELECT_ERROR_SLOTS: [ConditionSlot; 1] = [ConditionSlot {
     type_name: "<object>",
     init_keyword: "value",
 }];
+
+/// The slots of `<constant-cycle-error>`, in layout order:
+/// [`ConstantCycleErrorSlot`] indexes them.
+pub const CONSTANT_CYCLE_ERROR_SLOTS: [ConditionSlot; 3] = [
+    ConditionSlot {
+        name: "constant-cycle-error-constant",
+        type_name: "<string>",
+        init_keyword: "constant",
+    },
+    ConditionSlot {
+        name: "constant-cycle-error-reader",
+        type_name: "<string>",
+        init_keyword: "reader",
+    },
+    ConditionSlot {
+        name: "constant-cycle-error-code",
+        type_name: "<string>",
+        init_keyword: "code",
+    },
+];
+
+/// One slot of `<constant-cycle-error>`, by its position in
+/// [`CONSTANT_CYCLE_ERROR_SLOTS`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ConstantCycleErrorSlot {
+    /// The constant's source name, such as `$table`.
+    Constant,
+    /// The source name of the definition whose code read it: a function,
+    /// a generic or another constant.
+    Reader,
+    /// The stable code, [`CONSTANT_CYCLE_CODE`] when the compiled code
+    /// signalled it.
+    Code,
+}
+
+impl ConstantCycleErrorSlot {
+    /// Returns the slot's index in [`CONSTANT_CYCLE_ERROR_SLOTS`] and in
+    /// the layout of `<constant-cycle-error>`, whose superclasses declare no
+    /// slots.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Constant => 0,
+            Self::Reader => 1,
+            Self::Code => 2,
+        }
+    }
+}
+
+/// The stable code of a `<constant-cycle-error>` compiled code signals, in
+/// the diagnostic code scheme with `constant` as its area.
+pub const CONSTANT_CYCLE_CODE: &str = "constant.read-during-initialization";
 
 /// One slot of `<no-applicable-method>`, by its position in
 /// [`NO_APPLICABLE_METHOD_SLOTS`].
@@ -448,6 +511,27 @@ mod tests {
                 type_name: "<object>",
                 init_keyword: "value",
             }]
+        );
+    }
+
+    #[test]
+    fn constant_cycle_error_slots_follow_their_indices() {
+        let slots = ConditionClass::ConstantCycleError.slots();
+        assert_eq!(
+            ConditionClass::ConstantCycleError.superclass(),
+            Some(ConditionClass::Error)
+        );
+        assert_eq!(
+            slots[ConstantCycleErrorSlot::Constant.index()].name,
+            "constant-cycle-error-constant"
+        );
+        assert_eq!(
+            slots[ConstantCycleErrorSlot::Reader.index()].name,
+            "constant-cycle-error-reader"
+        );
+        assert_eq!(
+            slots[ConstantCycleErrorSlot::Code.index()].name,
+            "constant-cycle-error-code"
         );
     }
 

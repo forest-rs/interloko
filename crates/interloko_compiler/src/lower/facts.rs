@@ -186,7 +186,8 @@ fn relies_on_checked_inputs(typing: &DefinitionTyping, decision: &TypingDecision
         .all(|dependency| match dependency {
             // Sem's category for the value, which the contract records:
             // a generic's is checked at install, a function's at retry, a
-            // slot's by the layout; a constant's value is lowered inline.
+            // slot's by the layout; a constant's value is lowered in the
+            // same unit, and kept in that unit's cell.
             TypingDependency::Contract(_) => true,
             // Fixed by the runtime layout, which an install must keep. A
             // unit records the sealed classes and method sets its code
@@ -289,7 +290,7 @@ fn claim_expr(
     owner: Option<DefinitionId>,
     expr: &sem::Expr,
 ) {
-    visit_exprs(expr, &mut |inner| {
+    sem::visit_evaluated(expr, &mut |inner| {
         let sem::Expr::Closure { closure, .. } = inner else {
             return;
         };
@@ -312,7 +313,7 @@ fn claim_expr(
 /// Calls `visit` on every check site in `expr` that its own code evaluates:
 /// closure bodies are lowered as functions of their own and are skipped.
 pub(super) fn for_each_site(expr: &sem::Expr, visit: &mut impl FnMut(SiteId)) {
-    visit_exprs(expr, &mut |inner| {
+    sem::visit_evaluated(expr, &mut |inner| {
         let site = match inner {
             sem::Expr::GenericCall { site, .. }
             | sem::Expr::Cast { site, .. }
@@ -333,7 +334,7 @@ pub(super) fn for_each_site(expr: &sem::Expr, visit: &mut impl FnMut(SiteId)) {
 /// it in a closure.
 pub(super) fn reads_local(expr: &sem::Expr, local: sem::LocalId) -> bool {
     let mut reads = false;
-    visit_exprs(expr, &mut |inner| match inner {
+    sem::visit_evaluated(expr, &mut |inner| match inner {
         sem::Expr::Local { local: read, .. } => reads |= *read == local,
         sem::Expr::Closure { captures, .. } => {
             reads |= captures.iter().any(|capture| capture.source == local);
@@ -341,134 +342,4 @@ pub(super) fn reads_local(expr: &sem::Expr, local: sem::LocalId) -> bool {
         _ => {}
     });
     reads
-}
-
-/// Visits `expr` and every expression its own code evaluates, in evaluation
-/// order. Closure bodies are not visited; a constant's value is not either.
-fn visit_exprs(expr: &sem::Expr, visit: &mut impl FnMut(&sem::Expr)) {
-    use sem::Expr as E;
-    match expr {
-        E::VectorLiteral {
-            elements: items, ..
-        }
-        | E::Values { values: items, .. }
-        | E::IntrinsicCall { args: items, .. }
-        | E::HostCall { args: items, .. }
-        | E::DirectCall { args: items, .. }
-        | E::GenericCall { args: items, .. }
-        | E::FloatCall { args: items, .. } => {
-            for item in items {
-                visit_exprs(item, visit);
-            }
-        }
-        E::CallableCall { callable, args, .. } => {
-            visit_exprs(callable, visit);
-            for arg in args {
-                visit_exprs(arg, visit);
-            }
-        }
-        E::Convert { value: inner, .. }
-        | E::CheckRange { value: inner, .. }
-        | E::Negate { value: inner, .. }
-        | E::Signal {
-            condition: inner, ..
-        }
-        | E::ClassOf { object: inner, .. }
-        | E::InstanceOf { value: inner, .. }
-        | E::InstanceOfLimited { value: inner, .. }
-        | E::Cast { value: inner, .. }
-        | E::AccessorCall {
-            receiver: inner, ..
-        } => visit_exprs(inner, visit),
-        E::MakeObject { class, fields, .. } => {
-            visit_exprs(class, visit);
-            for field in fields {
-                visit_exprs(&field.value, visit);
-            }
-        }
-        E::MakeRuntimeClass {
-            class,
-            init_args,
-            candidates,
-            ..
-        } => {
-            visit_exprs(class, visit);
-            for arg in init_args {
-                visit_exprs(&arg.value, visit);
-            }
-            for field in candidates.iter().flat_map(|candidate| &candidate.defaults) {
-                visit_exprs(&field.value, visit);
-            }
-        }
-        E::SlotWrite {
-            receiver, value, ..
-        } => {
-            visit_exprs(receiver, visit);
-            visit_exprs(value, visit);
-        }
-        E::AssignLocal { value, .. } | E::AssignCapture { value, .. } => visit_exprs(value, visit),
-        E::Loop { test, body, .. } => {
-            visit_exprs(test, visit);
-            visit_block(body, visit);
-        }
-        E::Binary { lhs, rhs, .. }
-        | E::Compare { lhs, rhs, .. }
-        | E::MixedCompare { lhs, rhs, .. }
-        | E::ValueEqual { lhs, rhs, .. }
-        | E::Identical { lhs, rhs, .. } => {
-            visit_exprs(lhs, visit);
-            visit_exprs(rhs, visit);
-        }
-        E::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            visit_exprs(condition, visit);
-            visit_exprs(then_branch, visit);
-            visit_exprs(else_branch, visit);
-        }
-        E::Discard { value, .. } => visit_exprs(value, visit),
-        E::Handle { body, restart, .. } => {
-            visit_exprs(body, visit);
-            if let Some(guard) = &restart.guard {
-                visit_exprs(guard, visit);
-            }
-            visit_exprs(&restart.body, visit);
-        }
-        E::Block { body, cleanup, .. } => {
-            visit_block(body, visit);
-            if let Some(cleanup) = cleanup {
-                visit_block(cleanup, visit);
-            }
-        }
-        E::Closure { .. }
-        | E::ConstI64 { .. }
-        | E::ConstF64 { .. }
-        | E::Const32 { .. }
-        | E::ConstBool { .. }
-        | E::ConstChar { .. }
-        | E::StringLiteral { .. }
-        | E::SymbolLiteral { .. }
-        | E::Local { .. }
-        | E::Capture { .. }
-        | E::ConstantRef { .. }
-        | E::ClassObject { .. }
-        | E::TypeObject { .. }
-        | E::KnownCallable { .. }
-        | E::GenericFunctionObject { .. }
-        | E::Error { .. } => {}
-    }
-    visit(expr);
-}
-
-fn visit_block(block: &sem::Block, visit: &mut impl FnMut(&sem::Expr)) {
-    for statement in &block.statements {
-        match statement {
-            sem::Statement::Let(binding) => visit_exprs(&binding.value, visit),
-            sem::Statement::Expr(expr) => visit_exprs(expr, visit),
-        }
-    }
-    visit_exprs(&block.result, visit);
 }

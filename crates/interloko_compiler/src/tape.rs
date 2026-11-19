@@ -2004,6 +2004,92 @@ impl<'a> FunctionEmitter<'a> {
                     &[*dst],
                 );
             }
+            lower::Instr::ConstantRead {
+                ready,
+                value,
+                key,
+                span,
+            } => {
+                let mut rets = vec![ValueType::Bool];
+                let mut dsts = vec![*ready];
+                if let Some(value) = value {
+                    let kind = self
+                        .function
+                        .register_kind(*value)
+                        .ok_or_else(|| invalid_lowered("constant register has no kind"))?;
+                    rets.push(value_type(kind));
+                    dsts.push(*value);
+                }
+                let sig = self.builder.host_sig_for(
+                    runtime::CONSTANT_READ,
+                    HostSig {
+                        args: vec![ValueType::U64],
+                        rets,
+                    },
+                );
+                let key_reg = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.const_u64(key_reg, *key);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[key_reg], &dsts);
+            }
+            lower::Instr::ConstantClaim { dst, key, span } => {
+                let sig = self
+                    .builder
+                    .host_sig_for(runtime::CONSTANT_CLAIM, runtime::constant_claim_signature());
+                let key_reg = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.const_u64(key_reg, *key);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[key_reg], &[*dst]);
+            }
+            lower::Instr::ConstantGet { dst, key, span } => {
+                let kind = self
+                    .function
+                    .register_kind(*dst)
+                    .ok_or_else(|| invalid_lowered("constant register has no kind"))?;
+                let sig = self.builder.host_sig_for(
+                    runtime::CONSTANT_GET,
+                    HostSig {
+                        args: vec![ValueType::U64],
+                        rets: vec![value_type(kind)],
+                    },
+                );
+                let key_reg = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.const_u64(key_reg, *key);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[key_reg], &[*dst]);
+            }
+            lower::Instr::ConstantSet { key, value, span } => {
+                let kind = self
+                    .function
+                    .register_kind(*value)
+                    .ok_or_else(|| invalid_lowered("constant register has no kind"))?;
+                let sig = self.builder.host_sig_for(
+                    runtime::CONSTANT_SET,
+                    HostSig {
+                        args: vec![ValueType::U64, value_type(kind)],
+                        rets: vec![],
+                    },
+                );
+                let key_reg = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.const_u64(key_reg, *key);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[key_reg, *value], &[]);
+            }
+            lower::Instr::ConstantAbandon { key, span } => {
+                let sig = self.builder.host_sig_for(
+                    runtime::CONSTANT_ABANDON,
+                    runtime::constant_abandon_signature(),
+                );
+                let key_reg = self.alloc_temp(ValueType::U64);
+                self.set_span(*span);
+                self.asm.const_u64(key_reg, *key);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[key_reg], &[]);
+            }
             lower::Instr::Identical {
                 dst,
                 lhs,

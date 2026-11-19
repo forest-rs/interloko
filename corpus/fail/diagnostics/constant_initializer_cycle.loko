@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.constant-initializer-cycle
+// expect: diagnostic contains constant `$a` reads itself while it is initialized: `$a` -> `$b` -> `$a`
+
+define constant $a = $b + 1;
+define constant $b = $a + 1;
+
+define function main() => <integer>
+  $a
+end;

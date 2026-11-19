@@ -170,6 +170,8 @@ impl InterlokoHost {
         run.cache.clear();
         run.sends = 0;
         run.hits = 0;
+        // A run initializes its constants afresh; see `constant.rs`.
+        self.constants.clear();
     }
 
     /// Hands the open run's sends a newly installed newest unit, emptying
@@ -209,7 +211,9 @@ impl InterlokoHost {
         run.open = false;
         run.units.clear();
         run.cache.clear();
-        (run.sends, run.hits)
+        let counts = (run.sends, run.hits);
+        self.constants.clear();
+        counts
     }
 
     /// The open run's send cache, while a [`crate::driver`] run is open.

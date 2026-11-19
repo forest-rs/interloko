@@ -1,0 +1,27 @@
+// expect: run 1031
+// expect: diagnostics 0
+// expect: dump lowered contains constant.claim
+// expect: dump lowered contains $box#initializer
+
+// A constant is evaluated once: its first read runs the initializer and
+// keeps the value, and every later read gets that value. So `$box` is the
+// same object at each read, and `$counted`'s initializer runs once
+// however often it is read.
+
+define class <box> (<object>)
+  slot n :: <integer>, init-value: 0;
+end;
+
+define constant $box = make(<box>);
+
+define constant $counted :: <integer> = begin
+  $box.n := $box.n + 1;
+  10
+end;
+
+define function main() => <integer>
+  let same = if ($box == $box) 1000 else 0 end;
+  let reads = $counted + $counted + $counted;
+  // 1000 for one box, 30 for three reads, and 1 for one initialization.
+  same + reads + $box.n
+end;

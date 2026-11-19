@@ -1,0 +1,20 @@
+// expect: run 7
+// expect: diagnostics 0
+
+// A constant may read constants declared after it, through a chain of any
+// length.
+
+define constant $a = $b;
+define constant $b = $c;
+define constant $c = $d;
+define constant $d = $e;
+define constant $e = $f;
+define constant $f = make(<box>);
+
+define class <box> (<object>)
+  slot n :: <integer>, init-value: 7;
+end;
+
+define function main() => <integer>
+  $a.n
+end;

@@ -14,6 +14,7 @@ pub mod chooser;
 pub mod code;
 mod collection;
 pub use collection::MAX_VECTOR_SIZE;
+mod constant;
 pub mod control;
 pub mod driver;
 mod evacuate;
@@ -72,6 +73,10 @@ enum Unboxed {
 }
 pub use boxed::{IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
 pub use census::{HeapStats, TurnStats};
+pub use constant::{
+    CONSTANT_ABANDON, CONSTANT_CLAIM, CONSTANT_GET, CONSTANT_READ, CONSTANT_SET, ConstantCellError,
+    ConstantCycleReport, constant_abandon_signature, constant_claim_signature,
+};
 pub use no_applicable_method::NoApplicableMethodReport;
 use region::{NurserySerials, ObjectRef, OpenTurn, Region, Space};
 pub use send::SendCacheReport;
@@ -1869,6 +1874,8 @@ pub struct InterlokoHost {
     /// The open driver run's generic sends, answered inline; see
     /// [`InterlokoHost::send_cache`].
     sends: send::RunSends,
+    /// The values of the constants read so far; see `constant.rs`.
+    constants: constant::ConstantCells,
 }
 
 impl InterlokoHost {
@@ -1886,6 +1893,7 @@ impl InterlokoHost {
             turn: None,
             evacuation_budget: u64::MAX,
             sends: send::RunSends::default(),
+            constants: constant::ConstantCells::default(),
         }
     }
 
@@ -2373,6 +2381,9 @@ impl Host for InterlokoHost {
             };
             *ret = Value::Func(target);
             return Ok(0);
+        }
+        if let Some(result) = self.constant_call(symbol, &ctx, args, rets) {
+            return result;
         }
         if let Some(function) = TextFunction::from_symbol(symbol) {
             let [ret] = rets else {

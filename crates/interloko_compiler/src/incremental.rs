@@ -50,8 +50,8 @@
 //! Under [`CodegenPolicy::Proved`] lowering also acts on typing decisions:
 //! a method's lowering (for functions and constants, the lowered module)
 //! then depends on its own [`QueryArtifact::DefinitionTyping`] and on that
-//! of every constant it reads, since a constant's value is lowered where it
-//! is read. Under [`CodegenPolicy::Off`] lowering reads no decision, and a
+//! of every constant it reads, since a constant's value is lowered into the
+//! same module, folded where it is read or as its initializer. Under [`CodegenPolicy::Off`] lowering reads no decision, and a
 //! typing change reaches no lowering.
 //!
 //! [`QueryArtifact::has_early_cutoff`]: crate::incremental::QueryArtifact::has_early_cutoff
@@ -954,22 +954,24 @@ mod tests {
     }
 
     #[test]
-    fn constant_contracts_follow_the_constants_they_read_even_in_a_cycle() {
+    fn constant_contracts_follow_the_constants_they_read() {
+        // A cycle among constants is an error, so a chain stands in for it.
         let module = lower_source(
             "define constant a = b + 1;\n\
-             define constant b = a + 1;\n\
+             define constant b = d + 1;\n\
              define constant c = 3;\n\
+             define constant d = 4;\n\
              define function main()\n  a\nend;",
         );
         assert_eq!(module.diagnostics, Vec::new());
         let a = module.constants[0].definition;
-        let b = module.constants[1].definition;
+        let d = module.constants[3].definition;
         let c = module.constants[2].definition;
         let main = module.functions[0].definition;
         let mut invalidation = graph(&module);
 
         let affected =
-            invalidation.changed_with_cutoff(&[QueryArtifact::DefinitionSem(b)], |_| false);
+            invalidation.changed_with_cutoff(&[QueryArtifact::DefinitionSem(d)], |_| false);
         assert!(affected.contains(&QueryArtifact::Contract(a)));
         assert!(affected.contains(&QueryArtifact::DefinitionTyping(main)));
         assert!(!affected.contains(&QueryArtifact::Contract(c)));

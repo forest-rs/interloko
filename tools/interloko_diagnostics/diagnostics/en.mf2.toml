@@ -99,6 +99,7 @@
 "sem.for-clause-type-mismatch" = "`for` clause `{ $word }` expects { $expected } but has { $actual }; a numeric `for` counts in <integer>s"
 "sem.slot-default-type-mismatch" = "slot `{ $slot }` expects { $expected } but default init-value has { $actual }"
 "sem.slot-default-binds-locals" = "slot `{ $slot }`'s init-value binds the local `{ $local }`; slot defaults cannot bind locals yet, so define a function and call it"
+"sem.constant-initializer-cycle" = "constant `{ $constant }` reads itself while it is initialized: { $cycle }"
 "sem.missing-required-init-keyword" = "missing required init keyword `{ $keyword }` for slot `{ $slot }`"
 "sem.missing-slot-initializer" = "missing initializer for slot `{ $slot }`"
 "sem.unknown-slot" = "class `{ $class }` has no slot `{ $slot }`"
@@ -141,4 +142,5 @@
 "type-error.range" = "a number is outside the range of the type it must convert to"
 "type-error.overflow" = "integer arithmetic produced a result its type cannot represent"
 "dispatch.no-applicable-method" = "a generic send found no method for its arguments"
+"constant.read-during-initialization" = "a constant was read while its own initializer was running"
 "session.unknown-source" = "session source file id is unknown"

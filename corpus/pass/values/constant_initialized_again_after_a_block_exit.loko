@@ -1,0 +1,34 @@
+// expect: run 405
+// expect: diagnostics 0
+
+// An initializer left through a block's exit procedure leaves its constant
+// unset, as an unwinding handler does: the next read runs it again.
+
+define function ident(x :: <integer>) => <integer>
+  x
+end;
+
+define class <holder> (<object>)
+  slot f :: callable(<integer>) => <integer>, init-value: ident;
+  slot n :: <integer>, init-value: 0;
+end;
+
+define constant $h = make(<holder>);
+
+define constant $x :: <integer> = begin
+  $h.n := $h.n + 1;
+  let g = $h.f;
+  let r = g(5);
+  $h.n * 100
+end;
+
+define function main() => <integer>
+  // The first read exits to the block with 5 from inside the initializer.
+  let first = block (k)
+    $h.f := k;
+    $x
+  end;
+  $h.f := ident;
+  // Then two reads: one initialization, the second, giving 200 twice.
+  first + $x + $x
+end;

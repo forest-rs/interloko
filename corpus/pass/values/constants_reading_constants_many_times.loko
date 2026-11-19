@@ -1,0 +1,21 @@
+// expect: run 262144
+// expect: diagnostics 0
+
+// Constants that read one another many times over are each computed once,
+// so neither compiling nor reading them grows with the number of paths
+// through them: `$c9` reads `$c8` four times, and so on down to `$c0`.
+
+define constant $c0 = 1;
+define constant $c1 = $c0 + $c0 + $c0 + $c0;
+define constant $c2 = $c1 + $c1 + $c1 + $c1;
+define constant $c3 = $c2 + $c2 + $c2 + $c2;
+define constant $c4 = $c3 + $c3 + $c3 + $c3;
+define constant $c5 = $c4 + $c4 + $c4 + $c4;
+define constant $c6 = $c5 + $c5 + $c5 + $c5;
+define constant $c7 = $c6 + $c6 + $c6 + $c6;
+define constant $c8 = $c7 + $c7 + $c7 + $c7;
+define constant $c9 = $c8 + $c8 + $c8 + $c8;
+
+define function main() => <integer>
+  $c9
+end;

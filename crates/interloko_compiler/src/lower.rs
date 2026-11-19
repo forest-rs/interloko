@@ -76,7 +76,7 @@ use crate::runtime as runtime_bridge;
 use crate::sem;
 use crate::syntax::Span;
 use crate::typing;
-use interloko_model::condition::TypeErrorKind;
+use interloko_model::condition::{CONSTANT_CYCLE_CODE, ConstantCycleErrorSlot, TypeErrorKind};
 use interloko_model::sealing::ClosedWorld;
 use interloko_model::type_object::TypeObject;
 use interloko_model::types::IntRange;
@@ -416,6 +416,9 @@ pub enum FunctionKind {
         /// The function of the typed entry it boxes.
         typed: FunctionId,
     },
+    /// Evaluates a constant's initializer, once per turn: the first read of
+    /// the constant calls it and keeps the value in the constant's cell.
+    ConstantInitializer(sem::ConstantId),
     /// Opens a callable value, an aggregate whose shape only this function's
     /// parameter contract proves to the tape: it returns the value's typed
     /// entry, its boxed entry and its shape.
@@ -1556,6 +1559,54 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Reads a constant's cell: `ready` is `#t` when the cell holds the
+    /// constant's value, which then goes to `value` when there is one.
+    ConstantRead {
+        /// Register for whether the cell holds a value, a `<boolean>`.
+        ready: Reg,
+        /// Register for the value; `None` for a callable, read with
+        /// [`Instr::ConstantGet`] instead.
+        value: Option<Reg>,
+        /// The constant's cell key.
+        key: u64,
+        /// Source span.
+        span: Span,
+    },
+    /// Claims a constant's empty cell: `dst` is `#t` once it is marked
+    /// initializing, and `#f` when its initializer is already running.
+    ConstantClaim {
+        /// Destination register, a `<boolean>`.
+        dst: Reg,
+        /// The constant's cell key, its definition id's raw bits.
+        key: u64,
+        /// Source span.
+        span: Span,
+    },
+    /// Reads the value a claimed constant's cell holds.
+    ConstantGet {
+        /// Destination register.
+        dst: Reg,
+        /// The constant's cell key.
+        key: u64,
+        /// Source span.
+        span: Span,
+    },
+    /// Stores a constant's value in its cell.
+    ConstantSet {
+        /// The constant's cell key.
+        key: u64,
+        /// Value register.
+        value: Reg,
+        /// Source span.
+        span: Span,
+    },
+    /// Gives up a constant's claim when its initializer did not return.
+    ConstantAbandon {
+        /// The constant's cell key.
+        key: u64,
+        /// Source span.
+        span: Span,
+    },
     /// Identity of two boxed values, `==`.
     Identical {
         /// Destination register.
@@ -2074,6 +2125,9 @@ struct LowerIds {
     /// The adapter of each signature an untyped value may enter, in
     /// discovery order.
     adapters: Vec<(CallableSigId, FunctionId)>,
+    /// The initializer of each constant that is kept in a cell, in
+    /// constant id order; a constant that folds to its value has none.
+    constant_initializers: Vec<Option<FunctionId>>,
     /// The function that opens callable values
     /// ([`FunctionKind::CallableParts`]).
     callable_parts: Option<FunctionId>,
@@ -2337,6 +2391,10 @@ impl<'module> Lowering<'module> {
                 pending.extend(signature.rets.iter().filter_map(typed_callable));
             }
         }
+        ids.constant_initializers = folding_constants(module)
+            .into_iter()
+            .map(|folds| (!folds).then(&mut take))
+            .collect();
         // The last id, so a module that never opens a callable value whose
         // shape the tape cannot see leaves it out without renumbering.
         ids.callable_parts = Some(take());
@@ -2465,6 +2523,19 @@ impl<'module> Lowering<'module> {
         }
         for (signature, id) in &self.ids.adapters {
             functions.push(self.lower_adapter(*signature, *id)?);
+        }
+        for (constant, id) in self
+            .module
+            .constants
+            .iter()
+            .zip(&self.ids.constant_initializers)
+        {
+            if let Some(id) = id {
+                functions.push(
+                    self.lower_constant_initializer(constant, *id, &mut checks)
+                        .map_err(|error| error.within(constant.span))?,
+                );
+            }
         }
         if let Some(parts) = self.ids.callable_parts
             && functions.iter().any(|function| {
@@ -2732,6 +2803,41 @@ impl<'module> Lowering<'module> {
             locals: body.locals,
             instructions: body.instructions,
             span: function.span,
+        })
+    }
+
+    /// Lowers a constant's initializer as a function of its own, with the
+    /// initializer's locals as its frame and its checks the constant's.
+    fn lower_constant_initializer(
+        &self,
+        constant: &sem::Constant,
+        id: FunctionId,
+        checks: &mut Vec<CheckCodegenRecord>,
+    ) -> Result<Function, LowerError> {
+        let mut body = BodyLowering::new(self.module, &self.ids, &constant.locals)
+            .typed(self.facts, Some(constant.definition));
+        let ret = body.value_kind_with_callable_signature(
+            constant.result_kind,
+            constant.callable_signature.as_ref(),
+        )?;
+        let block = sem::Block {
+            statements: Vec::new(),
+            result: constant.value.clone(),
+            span: constant.span,
+        };
+        body.lower_block(&block, &[ret])?;
+        checks.append(&mut body.checks);
+        Ok(Function {
+            id,
+            name: format!("{}#initializer", constant.name),
+            kind: FunctionKind::ConstantInitializer(constant.id),
+            register_kinds: body.register_kinds,
+            params: body.params,
+            ret,
+            rets: vec![ret],
+            locals: body.locals,
+            instructions: body.instructions,
+            span: constant.span,
         })
     }
 
@@ -5806,8 +5912,18 @@ impl<'module> BodyLowering<'module> {
                     constant_info.result_kind,
                     constant_info.callable_signature.as_ref(),
                 )?;
+                if let Some(Some(initializer)) =
+                    self.ids.constant_initializers.get(constant.0 as usize)
+                {
+                    return self.read_constant_cell(constant_info, *initializer, expected, *span);
+                }
+                // A constant that folds is its value wherever it is read.
                 self.active_constants.push(*constant);
-                let lowered = self.lower_constant_value(constant_info);
+                let owner = self.owner.replace(constant_info.definition);
+                let site_owner = self.site_owner.replace(constant_info.definition);
+                let lowered = self.lower_expr(&constant_info.value);
+                self.owner = owner;
+                self.site_owner = site_owner;
                 self.active_constants.pop();
                 self.coerce_value(lowered?, expected, *span)
             }
@@ -10382,35 +10498,181 @@ impl<'module> BodyLowering<'module> {
         label
     }
 
-    /// Lowers a constant's initializer where the constant is read, in a
-    /// frame of its own: its locals are the initializer's, not the reading
-    /// body's, and none of the body's captures, block exits or closure
-    /// bindings are in scope. Its check sites are the constant's.
-    fn lower_constant_value(
+    /// Reads `constant`, kept in a cell: one host call answers whether the
+    /// cell holds the value, and gives it. The first read in a run claims
+    /// the cell, calls the initializer and stores its value. A claim whose
+    /// initializer exits another way, unwinding or exiting to a block, is
+    /// given up on the way out, so a later read runs it again. A claim on a
+    /// cell whose initializer is still running means the initializer reads
+    /// its own constant: the read signals a `<constant-cycle-error>` naming
+    /// the constant and this code's definition, and a `use-value` restart
+    /// can supply the constant's value.
+    fn read_constant_cell(
         &mut self,
-        constant: &'module sem::Constant,
+        constant: &sem::Constant,
+        initializer: FunctionId,
+        kind: ValueKind,
+        span: Span,
     ) -> Result<Value, LowerError> {
-        let source_locals = core::mem::replace(&mut self.source_locals, &constant.locals);
-        let captures = core::mem::take(&mut self.captures);
-        let env = self.env.take();
-        let local_regs =
-            core::mem::replace(&mut self.local_regs, vec![None; constant.locals.len()]);
-        let locals = core::mem::take(&mut self.locals);
-        let exits = core::mem::take(&mut self.exits);
-        let closure = self.closure.take();
-        let owner = self.owner.replace(constant.definition);
-        let site_owner = self.site_owner.replace(constant.definition);
-        let lowered = self.lower_expr(&constant.value);
-        self.source_locals = source_locals;
-        self.captures = captures;
-        self.env = env;
-        self.local_regs = local_regs;
-        self.locals = locals;
-        self.exits = exits;
-        self.closure = closure;
-        self.owner = owner;
-        self.site_owner = site_owner;
-        lowered
+        let key = constant.definition.raw();
+        let ready = self.alloc(ValueKind::Bool);
+        let result = self.alloc(kind);
+        let held_label = self.alloc_label();
+        let empty_label = self.alloc_label();
+        let init_label = self.alloc_label();
+        let cycle_label = self.alloc_label();
+        let unwind_label = self.alloc_label();
+        let join_label = self.alloc_label();
+        // The host cannot make a placeholder callable, so a callable is
+        // read once the cell says it holds one.
+        let callable = matches!(kind, ValueKind::Closure(_));
+        self.instructions.push(Instr::ConstantRead {
+            ready: ready.reg,
+            value: (!callable).then_some(result.reg),
+            key,
+            span,
+        });
+        self.instructions.push(Instr::Branch {
+            cond: ready.reg,
+            then_label: held_label,
+            else_label: empty_label,
+            span,
+        });
+
+        self.instructions.push(Instr::Label { label: empty_label });
+        let claimed = self.alloc(ValueKind::Bool);
+        self.instructions.push(Instr::ConstantClaim {
+            dst: claimed.reg,
+            key,
+            span,
+        });
+        self.instructions.push(Instr::Branch {
+            cond: claimed.reg,
+            then_label: init_label,
+            else_label: cycle_label,
+            span,
+        });
+
+        self.instructions.push(Instr::Label { label: init_label });
+        self.enter_region(
+            vec![Catch::All {
+                target: unwind_label,
+            }],
+            span,
+        );
+        let value = self.alloc(kind);
+        self.instructions.push(Instr::Call {
+            dsts: vec![value.reg],
+            callee: initializer,
+            args: Vec::new(),
+            span,
+        });
+        self.instructions.push(Instr::LeaveRegion);
+        self.instructions.push(Instr::ConstantSet {
+            key,
+            value: value.reg,
+            span,
+        });
+        self.instructions.push(Instr::Move {
+            dst: result.reg,
+            src: value.reg,
+            span,
+        });
+        self.instructions.push(Instr::Jump {
+            label: join_label,
+            span,
+        });
+
+        let unwound = self.alloc(ValueKind::Exn);
+        self.instructions.push(Instr::CatchTarget {
+            label: unwind_label,
+            params: vec![unwound.reg],
+        });
+        self.instructions.push(Instr::ConstantAbandon { key, span });
+        self.instructions.push(Instr::Rethrow {
+            exception: unwound.reg,
+            span,
+        });
+
+        self.instructions.push(Instr::Label { label: cycle_label });
+        let resumed = self.signal_constant_cycle(constant, kind, span)?;
+        self.instructions.push(Instr::Move {
+            dst: result.reg,
+            src: resumed.reg,
+            span,
+        });
+        self.instructions.push(Instr::Jump {
+            label: join_label,
+            span,
+        });
+
+        self.instructions.push(Instr::Label { label: held_label });
+        if callable {
+            self.instructions.push(Instr::ConstantGet {
+                dst: result.reg,
+                key,
+                span,
+            });
+        }
+        self.instructions.push(Instr::Jump {
+            label: join_label,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: join_label });
+        Ok(result)
+    }
+
+    /// Signals the `<constant-cycle-error>` for `constant`, read by this
+    /// code's definition while its initializer runs, and returns the value
+    /// a `use-value` restart resumes it with.
+    fn signal_constant_cycle(
+        &mut self,
+        constant: &sem::Constant,
+        kind: ValueKind,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let class = self
+            .module
+            .condition_class(sem::ConditionClass::ConstantCycleError)
+            .ok_or_else(|| invalid_semantic("<constant-cycle-error> is missing"))?;
+        let string = builtin_class(self.module, sem::BuiltinValueClass::String)
+            .ok_or_else(|| invalid_semantic("<string> is missing"))?;
+        let reader = self
+            .owner
+            .and_then(|owner| definition_source_name(self.module, owner))
+            .unwrap_or_else(|| String::from("?"));
+        let mut fields = [Reg(0); 3];
+        for (slot, text) in [
+            (ConstantCycleErrorSlot::Constant, constant.name.clone()),
+            (ConstantCycleErrorSlot::Reader, reader),
+            (
+                ConstantCycleErrorSlot::Code,
+                String::from(CONSTANT_CYCLE_CODE),
+            ),
+        ] {
+            let field = self.alloc(ValueKind::Object(Some(string)));
+            self.instructions.push(Instr::StringLiteral {
+                dst: field.reg,
+                value: text,
+                class: string,
+                span,
+            });
+            fields[slot.index()] = field.reg;
+        }
+        let condition = self.alloc(ValueKind::Object(Some(class)));
+        self.instructions.push(Instr::MakeObject {
+            dst: condition.reg,
+            class,
+            fields: fields.to_vec(),
+            span,
+        });
+        let resumed = self.alloc(kind);
+        self.instructions.push(Instr::Signal {
+            dsts: vec![resumed.reg],
+            condition: condition.reg,
+            span,
+        });
+        self.check_resumed_scalar(resumed, span)
     }
 
     fn set_local(&mut self, id: sem::LocalId, value: Value) -> Result<(), LowerError> {
@@ -10425,6 +10687,83 @@ impl<'module> BodyLowering<'module> {
         self.source_locals.get(id.0 as usize)
     }
 }
+
+/// Which constants fold, in constant id order: those whose value is the
+/// same wherever it is computed and cheap to compute, so a read computes it
+/// in place instead of keeping it in a cell. Numbers, booleans, symbols,
+/// metaobjects and known functions fold, and float arithmetic and
+/// comparisons over them. Anything that allocates or runs code of its own
+/// (a string, a vector, an object, a call, a closure) does not, nor does
+/// anything with a check that could fail (integer arithmetic, a range check
+/// or a conversion), which runs once in the constant's initializer instead.
+/// A constant whose value, with the folding constants it reads expanded,
+/// would exceed [`MAX_FOLDED_CONSTANT_SIZE`] nodes is kept in a cell too.
+fn folding_constants(module: &sem::Module) -> Vec<bool> {
+    /// Each constant's expanded size once known: `Some(None)` when it does
+    /// not fold, or is being measured (a cycle never folds).
+    fn constant_size(
+        module: &sem::Module,
+        sizes: &mut Vec<Option<Option<usize>>>,
+        index: usize,
+    ) -> Option<usize> {
+        if let Some(known) = sizes.get(index).copied().flatten() {
+            return known;
+        }
+        let constant = module.constants.get(index)?;
+        sizes[index] = Some(None);
+        let size = if constant.locals.is_empty() {
+            expr_size(module, sizes, &constant.value)
+                .filter(|size| *size <= MAX_FOLDED_CONSTANT_SIZE)
+        } else {
+            None
+        };
+        sizes[index] = Some(size);
+        size
+    }
+    fn expr_size(
+        module: &sem::Module,
+        sizes: &mut Vec<Option<Option<usize>>>,
+        expr: &sem::Expr,
+    ) -> Option<usize> {
+        use sem::Expr as E;
+        match expr {
+            E::ConstI64 { .. }
+            | E::ConstF64 { .. }
+            | E::Const32 { .. }
+            | E::ConstBool { .. }
+            | E::SymbolLiteral { .. }
+            | E::ClassObject { .. }
+            | E::TypeObject { .. }
+            | E::GenericFunctionObject { .. }
+            | E::KnownCallable { .. } => Some(1),
+            E::Negate {
+                value, site: None, ..
+            } => expr_size(module, sizes, value).map(|size| size + 1),
+            E::Binary {
+                lhs,
+                rhs,
+                site: None,
+                ..
+            }
+            | E::Compare { lhs, rhs, .. }
+            | E::MixedCompare { lhs, rhs, .. } => {
+                let lhs = expr_size(module, sizes, lhs)?;
+                let rhs = expr_size(module, sizes, rhs)?;
+                Some(lhs + rhs + 1)
+            }
+            E::ConstantRef { constant, .. } => constant_size(module, sizes, constant.0 as usize),
+            _ => None,
+        }
+    }
+    let mut sizes = vec![None; module.constants.len()];
+    (0..module.constants.len())
+        .map(|index| constant_size(module, &mut sizes, index).is_some())
+        .collect()
+}
+
+/// The most expression nodes a folding constant expands to where it is
+/// read; a larger one is kept in a cell.
+const MAX_FOLDED_CONSTANT_SIZE: usize = 32;
 
 fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
     match kind {
@@ -10771,6 +11110,33 @@ fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         | ValueKind::Exn
         | ValueKind::Object(None) => None,
     }
+}
+
+/// The name source gives `definition`: a function's or constant's own, or
+/// a method's generic's.
+fn definition_source_name(module: &sem::Module, definition: DefinitionId) -> Option<String> {
+    if let Some(function) = module
+        .functions
+        .iter()
+        .find(|function| function.definition == definition)
+    {
+        return Some(function.name.clone());
+    }
+    if let Some(constant) = module
+        .constants
+        .iter()
+        .find(|constant| constant.definition == definition)
+    {
+        return Some(constant.name.clone());
+    }
+    let method = module
+        .methods
+        .iter()
+        .find(|method| method.definition == definition)?;
+    module
+        .generics
+        .get(method.generic.0 as usize)
+        .map(|generic| generic.name.clone())
 }
 
 fn builtin_class(module: &sem::Module, kind: sem::BuiltinValueClass) -> Option<sem::ClassId> {
@@ -11320,8 +11686,8 @@ fn respan_numeric_body(expr: &sem::Expr, span: Span) -> Option<sem::Expr> {
 
 /// Sorts check records by owner and site, one per site.
 ///
-/// A constant's value is lowered wherever it is read, so its sites can be
-/// recorded more than once. Lowering a constant does not depend on where it
+/// A constant that folds is lowered wherever it is read, so its sites can
+/// be recorded more than once. Lowering a constant does not depend on where it
 /// is read, so the copies agree; were they ever to differ, the site reports
 /// the least change.
 fn merge_check_records(mut checks: Vec<CheckCodegenRecord>) -> Vec<CheckCodegenRecord> {
@@ -11487,6 +11853,9 @@ impl Module {
             }
             FunctionKind::BoxedEntry { typed } => writeln!(f, " ; boxed entry of l{}", typed.0),
             FunctionKind::CallableParts => writeln!(f, " ; opens callable values"),
+            FunctionKind::ConstantInitializer(id) => {
+                writeln!(f, " ; initializer of constant {}", id.0)
+            }
             FunctionKind::Adapter { signature } => {
                 writeln!(f, " ; adapter to signature {}", signature.0)
             }
@@ -11832,6 +12201,34 @@ impl Module {
                 span,
             } => {
                 write!(f, "  %{dst} = identical %{lhs}, %{rhs}")?;
+                fmt_span(f, *span)
+            }
+            Instr::ConstantRead {
+                ready,
+                value,
+                key,
+                span,
+            } => {
+                match value {
+                    Some(value) => write!(f, "  %{ready}, %{value} = constant.read {key:#018x}")?,
+                    None => write!(f, "  %{ready} = constant.read {key:#018x}")?,
+                }
+                fmt_span(f, *span)
+            }
+            Instr::ConstantClaim { dst, key, span } => {
+                write!(f, "  %{dst} = constant.claim {key:#018x}")?;
+                fmt_span(f, *span)
+            }
+            Instr::ConstantGet { dst, key, span } => {
+                write!(f, "  %{dst} = constant.get {key:#018x}")?;
+                fmt_span(f, *span)
+            }
+            Instr::ConstantSet { key, value, span } => {
+                write!(f, "  constant.set {key:#018x}, %{value}")?;
+                fmt_span(f, *span)
+            }
+            Instr::ConstantAbandon { key, span } => {
+                write!(f, "  constant.abandon {key:#018x}")?;
                 fmt_span(f, *span)
             }
             Instr::Call {

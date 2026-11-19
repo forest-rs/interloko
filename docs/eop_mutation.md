@@ -766,8 +766,9 @@ category sem gives its result, which its contract records) and the closed
 method sets and class cones the runtime layout fixes, so the install and
 retry checks above already protect it: a body edit that keeps the contracts
 installs under proved frames, and one that breaks a generic's contract is
-refused. A constant's value is lowered where it is read, so a fact about it
-stays inside the unit that read it. Closure and exit-procedure entries keep
+refused. A constant is initialized by its own unit's code, which keeps
+its value in a cell of that unit's, so a fact about it stays inside the
+unit that computed it: installed code initializes its constants afresh. Closure and exit-procedure entries keep
 their class checks: typing cannot see who calls them. A break-loop edit is
 lowered under the session's current policy, which cannot change while the
 break waits; the frames it lists are the same under either policy unless a

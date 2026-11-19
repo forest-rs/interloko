@@ -4754,6 +4754,138 @@ struct SelectMatcher {
     callee: Option<String>,
 }
 
+/// Visits `expr` and every expression its own code evaluates, in evaluation
+/// order. Closure bodies are not visited; a constant's value is not either.
+pub fn visit_evaluated(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
+    use Expr as E;
+    match expr {
+        E::VectorLiteral {
+            elements: items, ..
+        }
+        | E::Values { values: items, .. }
+        | E::IntrinsicCall { args: items, .. }
+        | E::HostCall { args: items, .. }
+        | E::DirectCall { args: items, .. }
+        | E::GenericCall { args: items, .. }
+        | E::FloatCall { args: items, .. } => {
+            for item in items {
+                visit_evaluated(item, visit);
+            }
+        }
+        E::CallableCall { callable, args, .. } => {
+            visit_evaluated(callable, visit);
+            for arg in args {
+                visit_evaluated(arg, visit);
+            }
+        }
+        E::Convert { value: inner, .. }
+        | E::CheckRange { value: inner, .. }
+        | E::Negate { value: inner, .. }
+        | E::Signal {
+            condition: inner, ..
+        }
+        | E::ClassOf { object: inner, .. }
+        | E::InstanceOf { value: inner, .. }
+        | E::InstanceOfLimited { value: inner, .. }
+        | E::Cast { value: inner, .. }
+        | E::AccessorCall {
+            receiver: inner, ..
+        } => visit_evaluated(inner, visit),
+        E::MakeObject { class, fields, .. } => {
+            visit_evaluated(class, visit);
+            for field in fields {
+                visit_evaluated(&field.value, visit);
+            }
+        }
+        E::MakeRuntimeClass {
+            class,
+            init_args,
+            candidates,
+            ..
+        } => {
+            visit_evaluated(class, visit);
+            for arg in init_args {
+                visit_evaluated(&arg.value, visit);
+            }
+            for field in candidates.iter().flat_map(|candidate| &candidate.defaults) {
+                visit_evaluated(&field.value, visit);
+            }
+        }
+        E::SlotWrite {
+            receiver, value, ..
+        } => {
+            visit_evaluated(receiver, visit);
+            visit_evaluated(value, visit);
+        }
+        E::AssignLocal { value, .. } | E::AssignCapture { value, .. } => {
+            visit_evaluated(value, visit)
+        }
+        E::Loop { test, body, .. } => {
+            visit_evaluated(test, visit);
+            visit_evaluated_block(body, visit);
+        }
+        E::Binary { lhs, rhs, .. }
+        | E::Compare { lhs, rhs, .. }
+        | E::MixedCompare { lhs, rhs, .. }
+        | E::ValueEqual { lhs, rhs, .. }
+        | E::Identical { lhs, rhs, .. } => {
+            visit_evaluated(lhs, visit);
+            visit_evaluated(rhs, visit);
+        }
+        E::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            visit_evaluated(condition, visit);
+            visit_evaluated(then_branch, visit);
+            visit_evaluated(else_branch, visit);
+        }
+        E::Discard { value, .. } => visit_evaluated(value, visit),
+        E::Handle { body, restart, .. } => {
+            visit_evaluated(body, visit);
+            if let Some(guard) = &restart.guard {
+                visit_evaluated(guard, visit);
+            }
+            visit_evaluated(&restart.body, visit);
+        }
+        E::Block { body, cleanup, .. } => {
+            visit_evaluated_block(body, visit);
+            if let Some(cleanup) = cleanup {
+                visit_evaluated_block(cleanup, visit);
+            }
+        }
+        E::Closure { .. }
+        | E::ConstI64 { .. }
+        | E::ConstF64 { .. }
+        | E::Const32 { .. }
+        | E::ConstBool { .. }
+        | E::ConstChar { .. }
+        | E::StringLiteral { .. }
+        | E::SymbolLiteral { .. }
+        | E::Local { .. }
+        | E::Capture { .. }
+        | E::ConstantRef { .. }
+        | E::ClassObject { .. }
+        | E::TypeObject { .. }
+        | E::KnownCallable { .. }
+        | E::GenericFunctionObject { .. }
+        | E::Error { .. } => {}
+    }
+    visit(expr);
+}
+
+fn visit_evaluated_block(block: &Block, visit: &mut impl FnMut(&Expr)) {
+    for statement in &block.statements {
+        match statement {
+            Statement::Let(binding) => visit_evaluated(&binding.value, visit),
+            Statement::Expr(expr) => visit_evaluated(expr, visit),
+        }
+    }
+    visit_evaluated(&block.result, visit);
+}
+
 /// The hidden local a `select` binds its target to when the target is not
 /// already a local, suffixed with where the `select` starts. Its name has a
 /// space, so source cannot name it.
@@ -5265,7 +5397,6 @@ impl Lowering {
         lowering.finalize_classes();
         lowering.collect_slot_setter_generics();
         lowering.check_host_function_conflicts();
-        lowering.lower_constants(module);
         lowering
     }
 
@@ -6806,6 +6937,87 @@ impl Lowering {
         }
     }
 
+    /// Reports each cycle of constants whose initializers read one another,
+    /// such as `$a = $b + 1` and `$b = $a + 1`: none of them could finish
+    /// initializing. Only reads the initializers make themselves count; one
+    /// made through a function call fails when it runs instead.
+    fn report_constant_cycles(&mut self) {
+        let reads = self
+            .constants
+            .iter()
+            .map(|constant| {
+                let mut reads = Vec::new();
+                visit_evaluated(&constant.value, &mut |expr| {
+                    if let Expr::ConstantRef { constant, .. } = expr
+                        && !reads.contains(&(constant.0 as usize))
+                    {
+                        reads.push(constant.0 as usize);
+                    }
+                });
+                reads
+            })
+            .collect::<Vec<_>>();
+        // Depth-first from each constant in turn: a constant met again while
+        // its own reads are being followed closes a cycle.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Mark {
+            New,
+            Open,
+            Done,
+        }
+        let mut marks = vec![Mark::New; self.constants.len()];
+        let mut reported = Vec::new();
+        for root in 0..self.constants.len() {
+            if marks[root] != Mark::New {
+                continue;
+            }
+            marks[root] = Mark::Open;
+            let mut path = vec![(root, 0_usize)];
+            while let Some(&mut (index, ref mut next)) = path.last_mut() {
+                let Some(read) = reads[index].get(*next).copied() else {
+                    marks[index] = Mark::Done;
+                    path.pop();
+                    continue;
+                };
+                *next += 1;
+                match marks.get(read) {
+                    Some(Mark::New) => {
+                        marks[read] = Mark::Open;
+                        path.push((read, 0));
+                    }
+                    Some(Mark::Open) if !reported.contains(&read) => {
+                        let start = path.iter().position(|(open, _)| *open == read).unwrap_or(0);
+                        let cycle = path[start..]
+                            .iter()
+                            .map(|(open, _)| *open)
+                            .collect::<Vec<_>>();
+                        reported.extend(cycle.iter().copied());
+                        self.report_constant_cycle(&cycle);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn report_constant_cycle(&mut self, cycle: &[usize]) {
+        let names = cycle
+            .iter()
+            .chain(cycle.first())
+            .filter_map(|index| self.constants.get(*index))
+            .map(|constant| format!("`{}`", constant.name))
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        let Some(first) = cycle.first().and_then(|index| self.constants.get(*index)) else {
+            return;
+        };
+        self.diagnostics.push(
+            Diagnostic::error(first.span, DiagnosticCode::ConstantInitializerCycle)
+                .with_arg(DiagnosticArg::text("constant", first.name.clone()))
+                .with_arg(DiagnosticArg::text("cycle", names)),
+        );
+    }
+
     fn lower_constants(&mut self, module: &ast::Module) {
         self.constants.clear();
         for (index, constant) in module.constants.iter().enumerate() {
@@ -6923,6 +7135,9 @@ impl Lowering {
         self.collect_collection_methods();
         self.refresh_inferred_generic_results();
         self.check_ambiguous_generic_methods();
+        // After the methods, so an initializer's sends find them.
+        self.lower_constants(module);
+        self.report_constant_cycles();
 
         let functions = module
             .functions
@@ -6965,6 +7180,9 @@ impl Lowering {
             .len()
             .saturating_add(module.functions.len())
             .saturating_add(self.generics.len())
+            // A constant read before it is declared takes its kind a pass
+            // after the constant it reads.
+            .saturating_add(module.constants.len())
             .saturating_add(2);
         for _ in 0..max_passes {
             let before = self.result_signature_snapshot();
@@ -6982,6 +7200,7 @@ impl Lowering {
             self.collect_numeric_methods();
             self.collect_collection_methods();
             self.refresh_inferred_generic_results();
+            self.lower_constants(module);
             for (index, function) in module.functions.iter().enumerate() {
                 let _ = self.lower_function(
                     FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
@@ -7004,6 +7223,7 @@ impl Lowering {
                     .iter()
                     .map(|symbol| symbol.return_kinds.clone()),
             )
+            .chain(self.constant_symbols.iter().map(|symbol| vec![symbol.kind]))
             .collect()
     }
 
@@ -15549,7 +15769,6 @@ mod tests {
         let modified = class(&module, "<collection-modified-error>");
         assert_eq!(modified.superclass, Some(error));
         assert_eq!(modified.id.0, immutable.id.0 + 1);
-        assert_eq!(modified.id.0 as usize, module.classes.len() - 1);
         assert_eq!(
             not_found
                 .effective_slots
@@ -15569,6 +15788,23 @@ mod tests {
                 .map(|slot| (slot.name.as_str(), slot.kind))
                 .collect::<Vec<_>>(),
             [("select-error-value", ValueKind::Any)]
+        );
+        let cycle = class(&module, "<constant-cycle-error>");
+        assert_eq!(cycle.superclass, Some(error));
+        assert_eq!(cycle.id.0, modified.id.0 + 1);
+        assert_eq!(cycle.id.0 as usize, module.classes.len() - 1);
+        let string = ValueKind::String(class_id(&module, "<string>"));
+        assert_eq!(
+            cycle
+                .effective_slots
+                .iter()
+                .map(|slot| (slot.name.as_str(), slot.kind))
+                .collect::<Vec<_>>(),
+            [
+                ("constant-cycle-error-constant", string),
+                ("constant-cycle-error-reader", string),
+                ("constant-cycle-error-code", string),
+            ]
         );
         let kinds = no_method
             .effective_slots
