@@ -74,7 +74,7 @@ Finalization diagnoses:
 
 - unknown superclasses;
 - primitive superclasses such as `<integer>`, `<number>`, `<float>`,
-  `<double-float>`, and `<boolean>`;
+  `<double-float>`, `<boolean>` and `<character>`;
 - host-backed classes used as superclasses;
 - duplicate effective slot names;
 - duplicate effective init keywords;

@@ -1049,6 +1049,10 @@ impl<'a> Analysis<'a> {
             E::ConstBool { value, span } => {
                 self.literal(*span, Type::of(Atom::Boolean(*value), module))
             }
+            E::ConstChar { span, .. } => {
+                let ty = self.bound(expr);
+                self.literal(*span, ty)
+            }
             E::ConstF64 { span, .. }
             | E::StringLiteral { span, .. }
             | E::SymbolLiteral { span, .. }
@@ -3192,6 +3196,7 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
         | E::ConstF64 { .. }
         | E::Const32 { .. }
         | E::ConstBool { .. }
+        | E::ConstChar { .. }
         | E::StringLiteral { .. }
         | E::SymbolLiteral { .. }
         | E::Local { .. }

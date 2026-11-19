@@ -1,0 +1,18 @@
+// expect: run 1114111
+// expect: diagnostics 0
+
+// Characters compare by scalar value and convert to and from their
+// `<integer>` value explicitly; a character is never an integer.
+
+define function main() => <integer>
+  let a = 'a';
+  if (a = 'a')
+    if ('é' > 'z')
+      as(<integer>, as(<character>, as(<integer>, '\u{10FFFF}')))
+    else
+      -1
+    end
+  else
+    -2
+  end
+end;

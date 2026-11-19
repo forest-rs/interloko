@@ -1,0 +1,27 @@
+// expect: run 1234
+// expect: diagnostics 0
+// expect: dump lowered contains u32.eq
+
+// Character keys against a `<character>` target compare inline. Against an
+// `<object>` target an arm whose keys are characters sees the target as a
+// `<character>`.
+
+define function op-value(c :: <character>) => <integer>
+  select (c)
+    '+' => 1;
+    '-' => 2;
+    '*', '/' => 3;
+    otherwise => 0;
+  end
+end;
+
+define function code(x :: <object>) => <integer>
+  select (x)
+    'a', 'b' => as(<integer>, x) - 96;
+    otherwise => 9;
+  end
+end;
+
+define function main() => <integer>
+  op-value('+') * 1000 + op-value('-') * 100 + op-value('/') * 10 + code('b') + code(#t) - 7
+end;

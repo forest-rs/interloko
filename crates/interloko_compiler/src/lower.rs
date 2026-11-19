@@ -239,6 +239,10 @@ pub enum ValueKind {
     U64,
     /// Boolean value used by control-flow conditions.
     Bool,
+    /// `<character>`: a Unicode scalar value, held in a `u32` register. It
+    /// has its own kind because a `<u32>` integer has the same register
+    /// type, and the two box as different classes.
+    Char,
     /// Internal direct function reference, optionally tied to a callable signature.
     Function(Option<CallableSigId>),
     /// First-class callable value, optionally tied to a callable signature:
@@ -261,6 +265,23 @@ pub enum ValueKind {
     MethodObject(Option<sem::MethodId>),
     /// Slot descriptor metaobject.
     SlotDescriptorObject,
+}
+
+/// What a [`Instr::TextCall`] that rejects its checked argument does.
+///
+/// The call fails with the check-failed tag; the failure signals
+/// `type_error` for the argument and a `use-value` replacement for it, in
+/// the argument's register type, is written to the argument's register,
+/// which is the call's own copy, and the call is made again. The operation
+/// checks every argument it is given, so any replacement is safe.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextCheck {
+    /// The checked argument's kind, which says how to box it for the
+    /// condition: a `<character>` is boxed as one, not as the `<u32>` its
+    /// register would read as.
+    pub kind: ValueKind,
+    /// The `<type-error>` a rejection signals.
+    pub type_error: Box<TypeErrorSite>,
 }
 
 /// Typed call ABI for a first-class callable value.
@@ -1416,6 +1437,25 @@ pub enum Instr {
         function: sem::FloatFunction,
         /// `f64` argument registers.
         args: Vec<Reg>,
+        /// Source span.
+        span: Span,
+    },
+    /// Call of a text operation the runtime host serves
+    /// ([`sem::TextFunction`]), such as `digit?`.
+    ///
+    /// The one lowering seam for text: tape instructions that read a
+    /// string's bytes can replace a call here without changing the
+    /// semantic IR.
+    TextCall {
+        /// Destination register.
+        dst: Reg,
+        /// Called operation.
+        function: sem::TextFunction,
+        /// Argument registers, in the operation's parameter order.
+        args: Vec<Reg>,
+        /// For an operation that can reject its argument
+        /// ([`sem::TextFunction::checked_arg`]), what a rejection signals.
+        check: Option<Box<TextCheck>>,
         /// Source span.
         span: Span,
     },
@@ -3644,6 +3684,7 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
         | sem::Expr::ConstF64 { .. }
         | sem::Expr::Const32 { .. }
         | sem::Expr::ConstBool { .. }
+        | sem::Expr::ConstChar { .. }
         | sem::Expr::StringLiteral { .. }
         | sem::Expr::SymbolLiteral { .. }
         | sem::Expr::Local { .. }
@@ -5340,6 +5381,9 @@ impl<'module> BodyLowering<'module> {
             condition: condition.reg,
             span,
         });
+        for result in results.iter_mut().flatten() {
+            *result = self.check_resumed_character(*result, span)?;
+        }
         // Typing classifies none of a dispatcher's checks.
         let site = check_site_name(self.site_owner, None, span);
         let mut values = Vec::with_capacity(results.len());
@@ -5402,6 +5446,7 @@ impl<'module> BodyLowering<'module> {
                     || matches!(
                         kind,
                         sem::ValueKind::Bool
+                            | sem::ValueKind::Char
                             | sem::ValueKind::Callable
                             | sem::ValueKind::KnownCallable(_)
                     )
@@ -5508,6 +5553,16 @@ impl<'module> BodyLowering<'module> {
                 self.instructions.push(Instr::ConstBool {
                     dst: result.reg,
                     value: *value,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::ConstChar { value, span } => {
+                // A character's register is a `u32`'s.
+                let result = self.alloc(ValueKind::Char);
+                self.instructions.push(Instr::Const32 {
+                    dst: result.reg,
+                    value: sem::Number32::U32(u32::from(*value)),
                     span: *span,
                 });
                 Ok(result)
@@ -7658,7 +7713,44 @@ impl<'module> BodyLowering<'module> {
         result_kind: sem::ValueKind,
         span: Span,
     ) -> Result<Value, LowerError> {
-        let mut op = runtime_op_for_intrinsic(intrinsic);
+        match intrinsic {
+            sem::Intrinsic::Text(function) => return self.lower_text_call(function, args, span),
+            sem::Intrinsic::CharCompare(op) => {
+                let [lhs, rhs] = args else {
+                    return Err(invalid_semantic(
+                        "a character comparison takes two operands",
+                    ));
+                };
+                let lhs = self.lower_expr(lhs)?;
+                let rhs = self.lower_expr(rhs)?;
+                if lhs.kind != ValueKind::Char || rhs.kind != ValueKind::Char {
+                    return Err(invalid_semantic("a character comparison takes characters"));
+                }
+                // A scalar value orders as its `u32` does.
+                let op = num32_compare(sem::NumericKind::U32, op);
+                return Ok(self.num32_binary(op, lhs.reg, rhs.reg, ValueKind::Bool, span));
+            }
+            sem::Intrinsic::CharToInteger => {
+                let [value] = args else {
+                    return Err(invalid_semantic("as(<integer>, c) takes one operand"));
+                };
+                let value = self.lower_expr(value)?;
+                if value.kind != ValueKind::Char {
+                    return Err(invalid_semantic("as(<integer>, c) takes a character"));
+                }
+                let result = self.alloc(ValueKind::I64);
+                self.instructions.push(Instr::Num32Unary {
+                    dst: result.reg,
+                    op: Num32UnaryOp::U32ToI64,
+                    src: value.reg,
+                    span,
+                });
+                return Ok(result);
+            }
+            _ => {}
+        }
+        let mut op = runtime_op_for_intrinsic(intrinsic)
+            .ok_or_else(|| invalid_semantic("intrinsic has no runtime operation"))?;
         let mut regs = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             let value = self.lower_expr(arg)?;
@@ -7681,6 +7773,81 @@ impl<'module> BodyLowering<'module> {
             op,
             args: regs,
             kind: result.kind,
+            span,
+        });
+        Ok(result)
+    }
+
+    /// Lowers a call of the text operation `function`: its arguments in its
+    /// parameters' kinds, an `<integer>` widened to one, and for an
+    /// operation that can reject its argument, the check its rejection
+    /// signals ([`TextCheck`]).
+    fn lower_text_call(
+        &mut self,
+        function: sem::TextFunction,
+        args: &[sem::Expr],
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let checked = function.checked_arg();
+        let mut regs = Vec::with_capacity(args.len());
+        let mut check = None;
+        for (index, (arg, kind)) in args.iter().zip(function.params()).enumerate() {
+            let mut value = self.lower_expr(arg)?;
+            if *kind == interloko_runtime::TextKind::Integer
+                && matches!(value.kind, ValueKind::I32 | ValueKind::U32)
+            {
+                value = self.widen_integer(value, arg.span());
+            }
+            if value_type_of_kind(value.kind) != Some(kind.value_type()) {
+                return Err(invalid_semantic(
+                    "a text operation's argument has the wrong kind",
+                ));
+            }
+            if checked == Some(index) {
+                // A replacement is written to the argument's register, so
+                // the call gets a copy: the argument may be a local's.
+                let copy = self.alloc(value.kind);
+                self.instructions.push(Instr::Move {
+                    dst: copy.reg,
+                    src: value.reg,
+                    span,
+                });
+                let expected = match kind {
+                    interloko_runtime::TextKind::Character
+                    | interloko_runtime::TextKind::Integer => {
+                        builtin_class(self.module, sem::BuiltinValueClass::Character)
+                            .ok_or_else(|| invalid_semantic("<character> is missing"))?
+                    }
+                    interloko_runtime::TextKind::Boolean => {
+                        return Err(invalid_semantic("a boolean argument is never checked"));
+                    }
+                };
+                check = Some(Box::new(TextCheck {
+                    kind: value.kind,
+                    type_error: type_error_site(
+                        TypeErrorKind::Range,
+                        class_expected(expected),
+                        check_site_name(self.site_owner, None, span),
+                        span,
+                    ),
+                }));
+                value = copy;
+            }
+            regs.push(value.reg);
+        }
+        if regs.len() != function.params().len() {
+            return Err(invalid_semantic("a text operation has the wrong arity"));
+        }
+        let result = self.alloc(match function.result() {
+            interloko_runtime::TextKind::Integer => ValueKind::I64,
+            interloko_runtime::TextKind::Boolean => ValueKind::Bool,
+            interloko_runtime::TextKind::Character => ValueKind::Char,
+        });
+        self.instructions.push(Instr::TextCall {
+            dst: result.reg,
+            function,
+            args: regs,
+            check,
             span,
         });
         Ok(result)
@@ -7732,7 +7899,46 @@ impl<'module> BodyLowering<'module> {
             condition: condition.reg,
             span,
         });
-        Ok(results)
+        results
+            .into_iter()
+            .map(|result| self.check_resumed_character(result, span))
+            .collect()
+    }
+
+    /// Checks that `value`, a result a signal resumed with, is a scalar
+    /// value when it is a `<character>`: a `use-value` restart can supply
+    /// any `u32`, which the register type does not rule out. A value that is
+    /// not one signals a `type-error.entry` whose replacement is checked
+    /// again. Any other value is returned as it is.
+    fn check_resumed_character(&mut self, value: Value, span: Span) -> Result<Value, LowerError> {
+        if value.kind != ValueKind::Char {
+            return Ok(value);
+        }
+        let result = self.alloc(ValueKind::Char);
+        let copy = self.alloc(ValueKind::Char);
+        self.instructions.push(Instr::Move {
+            dst: copy.reg,
+            src: value.reg,
+            span,
+        });
+        let class = builtin_class(self.module, sem::BuiltinValueClass::Character)
+            .ok_or_else(|| invalid_semantic("<character> is missing"))?;
+        self.instructions.push(Instr::TextCall {
+            dst: result.reg,
+            function: sem::TextFunction::CheckCharacter,
+            args: vec![copy.reg],
+            check: Some(Box::new(TextCheck {
+                kind: ValueKind::Char,
+                type_error: type_error_site(
+                    TypeErrorKind::Entry,
+                    class_expected(class),
+                    check_site_name(self.site_owner, None, span),
+                    span,
+                ),
+            })),
+            span,
+        });
+        Ok(result)
     }
 
     /// Lowers `handle` as a dynamic handler binding around a protected body.
@@ -8466,7 +8672,11 @@ impl<'module> BodyLowering<'module> {
             (ValueKind::Any, ValueKind::Any) => Ok(value),
             (
                 ValueKind::Any,
-                ValueKind::I64 | ValueKind::F64 | ValueKind::F32 | ValueKind::Bool,
+                ValueKind::I64
+                | ValueKind::F64
+                | ValueKind::F32
+                | ValueKind::Bool
+                | ValueKind::Char,
             ) => {
                 let class = scalar_concrete_class(self.module, kind)
                     .ok_or_else(|| invalid_semantic("a number class is missing"))?;
@@ -9690,6 +9900,7 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         sem::ValueKind::U32 => Ok(ValueKind::U32),
         sem::ValueKind::F32 => Ok(ValueKind::F32),
         sem::ValueKind::Bool => Ok(ValueKind::Bool),
+        sem::ValueKind::Char => Ok(ValueKind::Char),
         sem::ValueKind::String(class)
         | sem::ValueKind::Symbol(class)
         | sem::ValueKind::Vector(class) => Ok(ValueKind::Object(Some(class))),
@@ -9731,8 +9942,28 @@ fn contracts(module: &sem::Module) -> Contracts {
     }
 }
 
-fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> RuntimeOp {
-    match intrinsic {
+/// The register type a value of `kind` travels in, for the kinds a text
+/// operation takes.
+const fn value_type_of_kind(kind: ValueKind) -> Option<execution_tape::program::ValueType> {
+    use execution_tape::program::ValueType;
+    match kind {
+        ValueKind::I64 => Some(ValueType::I64),
+        ValueKind::Bool => Some(ValueType::Bool),
+        ValueKind::Char => Some(ValueType::U32),
+        _ => None,
+    }
+}
+
+/// The runtime operation that serves `intrinsic`, or `None` for the text
+/// and character intrinsics, which lower on their own
+/// ([`BodyLowering::lower_text_call`]).
+fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> Option<RuntimeOp> {
+    Some(match intrinsic {
+        sem::Intrinsic::Text(_)
+        | sem::Intrinsic::CharCompare(_)
+        | sem::Intrinsic::CharToInteger => {
+            return None;
+        }
         sem::Intrinsic::ObjectClass => RuntimeOp::ObjectClass,
         sem::Intrinsic::ClassName => RuntimeOp::ClassName,
         sem::Intrinsic::ClassDirectSuperclass => RuntimeOp::ClassDirectSuperclass,
@@ -9760,7 +9991,7 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> RuntimeOp {
         sem::Intrinsic::LimitedIntegerMax => RuntimeOp::LimitedIntegerMax,
         sem::Intrinsic::SubclassTypeClass => RuntimeOp::SubclassTypeClass,
         sem::Intrinsic::TypeName => RuntimeOp::TypeName,
-    }
+    })
 }
 
 fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
@@ -9828,6 +10059,7 @@ fn dispatcher_param_kind(
         Some(sem::ValueKind::U32) => ValueKind::U32,
         Some(sem::ValueKind::F32) => ValueKind::F32,
         Some(sem::ValueKind::Bool) => ValueKind::Bool,
+        Some(sem::ValueKind::Char) => ValueKind::Char,
         Some(sem::ValueKind::Callable) => ValueKind::Closure(None),
         None if object_handle => ValueKind::Object(None),
         None => ValueKind::Any,
@@ -9860,7 +10092,10 @@ const fn num32_compare(kind: sem::NumericKind, op: sem::CompareOp) -> Num32Binar
 /// Returns whether `kind` is an unboxed number, boolean or callable, whose
 /// class is known statically: a callable is a `<function>`.
 const fn is_unboxed(kind: ValueKind) -> bool {
-    matches!(kind, ValueKind::Bool | ValueKind::Closure(_)) || is_unboxed_number(kind)
+    matches!(
+        kind,
+        ValueKind::Bool | ValueKind::Char | ValueKind::Closure(_)
+    ) || is_unboxed_number(kind)
 }
 
 /// Returns whether `kind` is an unboxed number, whose class is known
@@ -9890,6 +10125,9 @@ fn scalar_kind_for_class(module: &sem::Module, class: sem::ClassId) -> Option<Va
             kind: sem::BuiltinValueClass::Boolean,
         } => Some(ValueKind::Bool),
         sem::ClassOrigin::BuiltinValue {
+            kind: sem::BuiltinValueClass::Character,
+        } => Some(ValueKind::Char),
+        sem::ClassOrigin::BuiltinValue {
             kind: sem::BuiltinValueClass::Function,
         } => Some(ValueKind::Closure(None)),
         _ => None,
@@ -9907,6 +10145,7 @@ fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         ValueKind::F64 => builtin_class(module, sem::BuiltinValueClass::DoubleFloat),
         ValueKind::F32 => builtin_class(module, sem::BuiltinValueClass::SingleFloat),
         ValueKind::Bool => builtin_class(module, sem::BuiltinValueClass::Boolean),
+        ValueKind::Char => builtin_class(module, sem::BuiltinValueClass::Character),
         ValueKind::Closure(_) => builtin_class(module, sem::BuiltinValueClass::Function),
         _ => None,
     }
@@ -9923,6 +10162,7 @@ fn is_scalar_value_class(module: &sem::Module, kind: ValueKind, class: sem::Clas
         ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat,
         ValueKind::F32 => sem::BuiltinValueClass::SingleFloat,
         ValueKind::Bool => sem::BuiltinValueClass::Boolean,
+        ValueKind::Char => sem::BuiltinValueClass::Character,
         ValueKind::Closure(_) => sem::BuiltinValueClass::Function,
         _ => return false,
     };
@@ -9948,6 +10188,7 @@ fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         | ValueKind::F32
         | ValueKind::U64
         | ValueKind::Bool
+        | ValueKind::Char
         | ValueKind::Function(_)
         | ValueKind::Closure(_)
         | ValueKind::Entry
@@ -10071,6 +10312,7 @@ fn kind_expected(module: &sem::Module, kind: ValueKind) -> TypeObject {
         ValueKind::F64 => sem::BuiltinValueClass::DoubleFloat,
         ValueKind::F32 => sem::BuiltinValueClass::SingleFloat,
         ValueKind::Bool => sem::BuiltinValueClass::Boolean,
+        ValueKind::Char => sem::BuiltinValueClass::Character,
         _ => sem::BuiltinValueClass::Integer,
     };
     module
@@ -10259,6 +10501,7 @@ fn shape_text(signatures: &[CallableSignature], kind: ValueKind, full: bool, tex
         ValueKind::F32 => "s",
         ValueKind::U64 => "q",
         ValueKind::Bool => "b",
+        ValueKind::Char => "c",
         ValueKind::Object(_)
         | ValueKind::ClassObject(_)
         | ValueKind::GenericFunctionObject(_)
@@ -10299,7 +10542,9 @@ fn signature_label(
         ValueKind::I64 => String::from("<integer>"),
         ValueKind::Closure(Some(inner)) => signature_label(module, signatures, inner),
         ValueKind::Closure(None) => String::from("<callable>"),
-        ValueKind::Bool => format!("{}", kind_expected(module, *kind).display(module)),
+        ValueKind::Bool | ValueKind::Char => {
+            format!("{}", kind_expected(module, *kind).display(module))
+        }
         ValueKind::Object(Some(class)) => format!("{}", class_expected(class).display(module)),
         ValueKind::ClassObject(Some(class)) => {
             format!("{}", class_object_expected(class).display(module))
@@ -10917,6 +11162,18 @@ impl Module {
                 self.fmt_arg_list(f, args)?;
                 fmt_span(f, *span)
             }
+            Instr::TextCall {
+                dst,
+                function,
+                args,
+                check,
+                span,
+            } => {
+                let checked = if check.is_some() { ".checked" } else { "" };
+                write!(f, "  %{dst} = text.call{checked} {}", function.symbol())?;
+                self.fmt_arg_list(f, args)?;
+                fmt_span(f, *span)
+            }
             Instr::F64NotEqual {
                 dst,
                 lhs,
@@ -11349,6 +11606,7 @@ impl Module {
             ValueKind::F32 => write!(f, "f32"),
             ValueKind::U64 => write!(f, "u64"),
             ValueKind::Bool => write!(f, "bool"),
+            ValueKind::Char => write!(f, "char"),
             ValueKind::Aggregate => write!(f, "agg"),
             ValueKind::Exn => write!(f, "exn"),
             ValueKind::Function(Some(sig)) => {

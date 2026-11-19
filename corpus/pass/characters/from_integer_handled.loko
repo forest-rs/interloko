@@ -1,0 +1,16 @@
+// expect: run '?'
+// expect: diagnostics 0
+
+// A handler can stand in for an integer that is not a scalar value.
+
+define function decode(n :: <integer>) => <character>
+  handle
+    as(<character>, n)
+  with restart e :: <type-error>
+    '?'
+  end
+end;
+
+define function main() => <character>
+  decode(1114112)
+end;

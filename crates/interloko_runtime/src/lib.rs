@@ -18,6 +18,7 @@ mod evacuate;
 mod no_applicable_method;
 mod region;
 mod send;
+mod text;
 mod turn;
 mod type_error;
 mod type_object;
@@ -53,11 +54,23 @@ pub const INTERLOKO_OBJECT_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f4f_424a);
 pub const INTERLOKO_VALUE_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f56_414c);
 
 use boxed::BoxedHandle;
+
+/// What a boxed `<object>` holds.
+#[derive(Clone, Debug, PartialEq)]
+enum Unboxed {
+    /// A value with an `execution_tape` representation of its own: a
+    /// number, a boolean, a callable or a runtime object.
+    Value(Value),
+    /// A `<character>`, which a `u32` register holds unboxed. It is kept
+    /// apart because a `u32` value is otherwise a `<u32>` integer.
+    Character(char),
+}
 pub use boxed::{IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
 pub use census::{HeapStats, TurnStats};
 pub use no_applicable_method::NoApplicableMethodReport;
 use region::{NurserySerials, ObjectRef, OpenTurn, Region, Space};
 pub use send::SendCacheReport;
+pub use text::{TextFunction, TextKind, character_literal, string_literal};
 pub use turn::ImageRootId;
 pub use type_error::TypeErrorReport;
 
@@ -81,6 +94,23 @@ pub const BOX_VALUE: &str = "interloko.box_value";
 /// Host-call symbol for unboxing an integer, float or boolean from a boxed
 /// top `<object>` value after checking its class.
 pub const UNBOX_VALUE: &str = "interloko.unbox_value";
+/// Host-call symbol for boxing a `<character>`, held unboxed in a `u32`
+/// register, as the top `<object>` value. It takes
+/// [`box_character_signature`]. A `<u32>` integer boxes through
+/// [`BOX_VALUE`] after widening, so the two never meet.
+pub const BOX_CHARACTER: &str = "interloko.box_character";
+/// Host-call symbol for checking that a `use-value` replacement for a failed
+/// unboxing to `<character>` is a scalar value. It takes
+/// [`check_character_signature`]: the replacement and the class the
+/// unboxing checked, which it does not need, and returns the replacement,
+/// or fails with the check-failed tag.
+pub const CHECK_CHARACTER: &str = "interloko.check_character";
+/// Host-call symbol for boxing a rejected character argument for the
+/// `<type-error>` that reports it. It takes [`box_character_signature`].
+/// A scalar value boxes as the `<character>` it is; any other value a
+/// `u32` register can hold, such as a `use-value` replacement that was not
+/// a scalar value, boxes as the `<integer>` it is, so the report shows it.
+pub const BOX_REJECTED_CHARACTER: &str = "interloko.box_rejected_character";
 /// Host-call symbol for testing whether a value is an instance of a class.
 pub const INSTANCE_OF: &str = "interloko.instance_of";
 /// Host-call symbol for casting a value to a known runtime object class.
@@ -344,6 +374,24 @@ pub fn integer_to_string_signature() -> HostSig {
     }
 }
 
+/// Returns the host signature for [`BOX_CHARACTER`].
+#[must_use]
+pub fn box_character_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::U32],
+        rets: vec![any_type()],
+    }
+}
+
+/// Returns the host signature for [`CHECK_CHARACTER`].
+#[must_use]
+pub fn check_character_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::U32, ValueType::U64],
+        rets: vec![ValueType::U32],
+    }
+}
+
 /// Returns the host signature for [`STRING_CONCATENATE`].
 #[must_use]
 pub fn string_concatenate_signature() -> HostSig {
@@ -382,6 +430,8 @@ pub enum ValueKind {
     F32,
     /// Boolean value.
     Bool,
+    /// `<character>` value: a Unicode scalar value in a `u32` register.
+    Character,
     /// String object value.
     String(ClassId),
     /// Symbol object value.
@@ -2062,22 +2112,24 @@ impl InterlokoHost {
             })
     }
 
-    fn boxed_value(&self, obj: Obj) -> Result<Value, RuntimeError> {
+    /// Decodes a boxed `<object>` value.
+    fn unbox(&self, obj: Obj) -> Result<Unboxed, RuntimeError> {
         if obj.host_type != INTERLOKO_VALUE_TYPE {
             return Err(RuntimeError::ValueHostTypeMismatch {
                 object: obj,
                 expected: INTERLOKO_VALUE_TYPE,
             });
         }
-        match BoxedHandle::decode(obj.handle, self.nursery_serials) {
-            BoxedHandle::Float(value) => Ok(Value::F64(value)),
-            BoxedHandle::SingleFloat(value) => Ok(Value::F32(value)),
-            BoxedHandle::Integer(value) => Ok(Value::I64(value)),
-            BoxedHandle::Bool(value) => Ok(Value::Bool(value)),
-            BoxedHandle::Object(handle) => Ok(Value::Obj(Obj {
+        let value = match BoxedHandle::decode(obj.handle, self.nursery_serials) {
+            BoxedHandle::Float(value) => Value::F64(value),
+            BoxedHandle::SingleFloat(value) => Value::F32(value),
+            BoxedHandle::Integer(value) => Value::I64(value),
+            BoxedHandle::Bool(value) => Value::Bool(value),
+            BoxedHandle::Character(value) => return Ok(Unboxed::Character(value)),
+            BoxedHandle::Object(handle) => Value::Obj(Obj {
                 host_type: INTERLOKO_OBJECT_TYPE,
                 handle,
-            })),
+            }),
             BoxedHandle::Heap(space, index) => self
                 .region(space)
                 .values
@@ -2089,8 +2141,21 @@ impl InterlokoHost {
                         obj,
                         RuntimeError::InvalidBoxedValueHandle { object: obj },
                     )
-                }),
-            BoxedHandle::Invalid => Err(RuntimeError::InvalidBoxedValueHandle { object: obj }),
+                })?,
+            BoxedHandle::Invalid => {
+                return Err(RuntimeError::InvalidBoxedValueHandle { object: obj });
+            }
+        };
+        Ok(Unboxed::Value(value))
+    }
+
+    /// Decodes a boxed `<object>` value that has an `execution_tape` value
+    /// of its own: anything but a `<character>`, whose register type, `u32`,
+    /// would read as a `<u32>` integer.
+    fn boxed_value(&self, obj: Obj) -> Result<Value, RuntimeError> {
+        match self.unbox(obj)? {
+            Unboxed::Value(value) => Ok(value),
+            Unboxed::Character(_) => Err(RuntimeError::InvalidBoxedValueHandle { object: obj }),
         }
     }
 
@@ -2174,6 +2239,19 @@ impl Host for InterlokoHost {
                 return Err(HostError::Failed);
             };
             *ret = Value::Func(target);
+            return Ok(0);
+        }
+        if let Some(function) = TextFunction::from_symbol(symbol) {
+            let [ret] = rets else {
+                return Err(HostError::Failed);
+            };
+            *ret = match function.apply(args) {
+                Some(value) => value,
+                None if function.checked_arg().is_some() => {
+                    return Err(type_error::check_failed(&ctx));
+                }
+                None => return Err(HostError::Failed),
+            };
             return Ok(0);
         }
         if let Some(function) = FloatFunction::from_symbol(symbol) {
@@ -2633,13 +2711,16 @@ impl Host for InterlokoHost {
                 if !self.value_is_instance(ValueRef::Obj(*obj), class) {
                     return Err(type_error::check_failed(&ctx));
                 }
-                rets[0] = match self.boxed_value(*obj)? {
-                    value @ (Value::I64(_)
-                    | Value::F64(_)
-                    | Value::F32(_)
-                    | Value::Bool(_)
-                    | Value::Agg(_)) => value,
-                    _ => return Err(HostError::Failed),
+                rets[0] = match self.unbox(*obj)? {
+                    Unboxed::Value(
+                        value @ (Value::I64(_)
+                        | Value::F64(_)
+                        | Value::F32(_)
+                        | Value::Bool(_)
+                        | Value::Agg(_)),
+                    ) => value,
+                    Unboxed::Character(value) => Value::U32(u32::from(value)),
+                    Unboxed::Value(_) => return Err(HostError::Failed),
                 };
                 Ok(0)
             }
@@ -2678,6 +2759,32 @@ impl Host for InterlokoHost {
                     return Err(HostError::Failed);
                 };
                 self.write_cell(*cell, value.to_value())?;
+                Ok(0)
+            }
+            CHECK_CHARACTER => {
+                let [ValueRef::U32(value), ValueRef::U64(_)] = args else {
+                    return Err(HostError::Failed);
+                };
+                if char::from_u32(*value).is_none() {
+                    return Err(type_error::check_failed(&ctx));
+                }
+                rets[0] = Value::U32(*value);
+                Ok(0)
+            }
+            BOX_CHARACTER | BOX_REJECTED_CHARACTER => {
+                let [ValueRef::U32(value)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = match char::from_u32(*value) {
+                    Some(value) => Value::Obj(Obj {
+                        host_type: INTERLOKO_VALUE_TYPE,
+                        handle: BoxedHandle::immediate_character(value),
+                    }),
+                    None if symbol == BOX_REJECTED_CHARACTER => {
+                        self.push_boxed_value(Value::I64(i64::from(*value)))
+                    }
+                    None => return Err(HostError::Failed),
+                };
                 Ok(0)
             }
             BOX_VALUE => {
@@ -2904,7 +3011,13 @@ impl InterlokoHost {
                 Ok(self.object(obj)?.class)
             }
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
-                match self.boxed_value(obj)? {
+                let value = match self.unbox(obj)? {
+                    Unboxed::Value(value) => value,
+                    Unboxed::Character(_) => {
+                        return self.builtin_class(BuiltinValueClass::Character);
+                    }
+                };
+                match value {
                     Value::I64(_) | Value::I32(_) | Value::U32(_) => {
                         self.builtin_class(BuiltinValueClass::Integer)
                     }
@@ -2981,7 +3094,7 @@ impl InterlokoHost {
         let ValueRef::Obj(obj) = value else {
             return Err(HostError::Failed);
         };
-        let _ = self.boxed_value(obj)?;
+        let _ = self.unbox(obj)?;
         Ok(Value::Obj(obj))
     }
 
@@ -3018,8 +3131,11 @@ impl InterlokoHost {
         if lhs == rhs {
             return Ok(true);
         }
-        let lhs = self.boxed_value(lhs)?;
-        let rhs = self.boxed_value(rhs)?;
+        let (lhs, rhs) = match (self.unbox(lhs)?, self.unbox(rhs)?) {
+            (Unboxed::Value(lhs), Unboxed::Value(rhs)) => (lhs, rhs),
+            (Unboxed::Character(lhs), Unboxed::Character(rhs)) => return Ok(lhs == rhs),
+            _ => return Ok(false),
+        };
         Ok(match (lhs, rhs) {
             (Value::I64(left), Value::I64(right)) => left == right,
             (Value::F64(left), Value::F64(right)) => left.to_bits() == right.to_bits(),
@@ -3061,7 +3177,7 @@ impl InterlokoHost {
     fn value_for_slot(&self, value: ValueRef<'_>, kind: ValueKind) -> Result<Value, RuntimeError> {
         match (kind, value) {
             (ValueKind::Any, ValueRef::Obj(obj)) => {
-                let _ = self.boxed_value(obj)?;
+                let _ = self.unbox(obj)?;
                 Ok(Value::Obj(obj))
             }
             (ValueKind::I64, ValueRef::I64(value)) => Ok(Value::I64(value)),
@@ -3070,6 +3186,11 @@ impl InterlokoHost {
             (ValueKind::U32, ValueRef::U32(value)) => Ok(Value::U32(value)),
             (ValueKind::F32, ValueRef::F32(value)) => Ok(Value::F32(value)),
             (ValueKind::Bool, ValueRef::Bool(value)) => Ok(Value::Bool(value)),
+            // A `u32` register can hold any value; a character slot holds
+            // only scalar values.
+            (ValueKind::Character, ValueRef::U32(value)) if char::from_u32(value).is_some() => {
+                Ok(Value::U32(value))
+            }
             (ValueKind::Callable, ValueRef::Agg(callable)) => Ok(Value::Agg(callable)),
             (
                 ValueKind::Object(expected_class)
@@ -3456,6 +3577,7 @@ fn value_type(kind: ValueKind) -> Option<ValueType> {
         ValueKind::U32 => Some(ValueType::U32),
         ValueKind::F32 => Some(ValueType::F32),
         ValueKind::Bool => Some(ValueType::Bool),
+        ValueKind::Character => Some(ValueType::U32),
         ValueKind::String(_)
         | ValueKind::Symbol(_)
         | ValueKind::Vector(_)

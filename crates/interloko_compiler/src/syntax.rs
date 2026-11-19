@@ -102,6 +102,8 @@ pub enum TokenKind {
     Bool,
     /// String literal.
     String,
+    /// Character literal such as `'a'` or `'\n'`.
+    Character,
     /// Symbol literal such as `#name`.
     Symbol,
     /// Legacy keyword-style symbol literal such as `#:name`.
@@ -224,6 +226,7 @@ impl TokenKind {
             | Self::Number
             | Self::Bool
             | Self::String
+            | Self::Character
             | Self::Symbol
             | Self::Keyword
             | Self::VectorStart
@@ -378,6 +381,8 @@ pub enum CstKind {
     BoolExpr,
     /// String literal expression.
     StringExpr,
+    /// Character literal expression.
+    CharacterExpr,
     /// Symbol literal expression.
     SymbolExpr,
     /// Keyword symbol literal expression.
@@ -590,6 +595,7 @@ fn syntax_node_id(
         | CstKind::NumberExpr
         | CstKind::BoolExpr
         | CstKind::StringExpr
+        | CstKind::CharacterExpr
         | CstKind::SymbolExpr
         | CstKind::KeywordExpr
         | CstKind::RestartClause
@@ -680,6 +686,7 @@ fn mix_first_named_token(
                     | TokenKind::TypeName
                     | TokenKind::Bool
                     | TokenKind::String
+                    | TokenKind::Character
                     | TokenKind::Symbol
                     | TokenKind::Keyword
             ) {
@@ -756,6 +763,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::SelectTest => 61,
         CstKind::SelectClause => 62,
         CstKind::IndexExpr => 63,
+        CstKind::CharacterExpr => 65,
     }
 }
 
@@ -807,6 +815,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Restart => 37,
         TokenKind::Constant => 38,
         TokenKind::String => 39,
+        TokenKind::Character => 63,
         TokenKind::Symbol => 40,
         TokenKind::Keyword => 41,
         TokenKind::LBracket => 42,
@@ -838,6 +847,26 @@ pub struct SyntaxTree {
     pub root: CstNode,
     /// Syntax diagnostics.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Returns the end of the character literal starting at `start`: the
+/// closing quote after one character or one escape, which runs to the next
+/// quote. An unclosed literal ends at the line's end, and the literal's
+/// decoding reports it.
+fn lex_character_end(bytes: &[u8], start: usize) -> usize {
+    let mut pos = start + 1;
+    if bytes.get(pos) == Some(&b'\\') {
+        pos += 2;
+    } else if pos < bytes.len() && bytes[pos] != b'\n' {
+        pos += 1;
+    }
+    while pos < bytes.len() && !matches!(bytes[pos], b'\'' | b'\n') {
+        pos += 1;
+    }
+    if bytes.get(pos) == Some(&b'\'') {
+        pos += 1;
+    }
+    pos.min(bytes.len())
 }
 
 /// Lexes `source` into a token stream that includes trivia.
@@ -969,6 +998,10 @@ pub fn lex(source: &str) -> Vec<Token> {
                     }
                 }
                 TokenKind::String
+            }
+            b'\'' => {
+                pos = lex_character_end(bytes, pos);
+                TokenKind::Character
             }
             b'#' if bytes.get(pos + 1) == Some(&b'[') => {
                 pos += 2;

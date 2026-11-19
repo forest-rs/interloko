@@ -1,0 +1,20 @@
+// expect: run '\''
+// expect: diagnostics 0
+
+// A character literal is one character or one escape between single
+// quotes; the escapes are the ones string literals take.
+
+define function pick(n :: <integer>) => <character>
+  select (n)
+    0 => 'a';
+    1 => '\n';
+    2 => '\0';
+    3 => '\u{1F600}';
+    4 => '"';
+    otherwise => '\'';
+  end
+end;
+
+define function main() => <character>
+  if (pick(3) = '😀') pick(5) else pick(0) end
+end;

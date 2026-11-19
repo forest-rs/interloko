@@ -136,10 +136,11 @@ The current slices include:
 - `select (target) key, key => …; otherwise => … end`, and `select (target
   by test) …` to match with `test(target, key)` instead of `==`. The target
   is evaluated once, and a `by` test once after it. Integer keys against an
-  integer target compare inline and boolean keys against a `<boolean>`
-  without boxing; matching with `==` never dispatches. An arm whose keys
-  are all integer literals, or all boolean ones, sees a local target as one
-  of them. Without `otherwise`, a target that matches no key signals a
+  integer target compare inline, as do character keys against a
+  `<character>`, and boolean keys against a `<boolean>` without boxing;
+  matching with `==` never dispatches. An arm whose keys are all integer
+  literals, all character ones or all boolean ones, sees a local target as
+  one of them. Without `otherwise`, a target that matches no key signals a
   `<select-error>` holding it, so unlike `if` and `case` the arms keep
   their values;
 - Dylan-style names, where a hyphen is always a name character: `x-1` and
@@ -210,6 +211,23 @@ The current slices include:
 - booleans: `#t` and `#f` are the instances of the concrete `<boolean>`
   class, so methods may specialize on it, `instance?` and `class-of` see it,
   and a boolean boxes to `<object>` and back like a number;
+- characters: `<character>` is a concrete class of Unicode scalar values,
+  written `'a'`, `'\n'`, `'\t'`, `'\r'`, `'\0'`, `'\\'`, `'\''` or
+  `'\u{1F600}'` (string literals take the same escapes). A character is an
+  unboxed scalar, never an `<integer>`: `=`, `<` and the other comparisons
+  and `==` compare scalar values inline, `as(<integer>, c)` gives the
+  value, and `as(<character>, i)` checks that `i` is a scalar value (in
+  range and not a surrogate), signalling `type-error.range` with
+  `use-value` otherwise. Methods may specialize on `<character>`, and a
+  character boxes to `<object>` and back without allocating. The
+  predicates `digit?` and `digit-value` are ASCII only; `alphabetic?`,
+  `alphanumeric?`, `whitespace?`, `uppercase?` and `lowercase?` use
+  Unicode properties, with ASCII-only `ascii?`, `ascii-alphabetic?`,
+  `ascii-alphanumeric?`, `ascii-whitespace?`, `ascii-uppercase?` and
+  `ascii-lowercase?`; `as-uppercase` and `as-lowercase` map one scalar to
+  one, leaving a character whose mapping is longer (`ß`) unchanged.
+  `digit-value` of anything but an ASCII digit signals `type-error.range`
+  with `use-value`. User definitions may shadow these names;
 - callables as objects: functions, closures and generic functions used as
   values are instances of the concrete `<function>` class, and every
   callable type, `<callable>` or `callable(...) => ...` with a signature,
@@ -225,10 +243,10 @@ The current slices include:
   only for the invocation that made it;
 - identity: `a == b` is Dylan's `==`, defined on any two objects, never
   dispatching and not user-definable; `=` stays the equality of numbers,
-  strings, symbols and types. Heap objects are `==` when they are the same
-  object (two strings with the same text need not be). Numbers and booleans
-  have no identity apart from their value, so they are `==` when they are
-  the same class and value: integers by value whatever limited type holds
+  characters, strings, symbols and types. Heap objects are `==` when they
+  are the same object (two strings with the same text need not be).
+  Numbers, booleans and characters have no identity apart from their
+  value, so they are `==` when they are the same class and value: integers by value whatever limited type holds
   them (`1 == 1i32`), floats by class and IEEE 754 bit pattern, so a NaN is
   `==` itself, `0.0 == -0.0` is false and `1 == 1.0` and
   `1.5f32 == 1.5` are false. Symbols, classes and other metaobjects are
@@ -468,7 +486,7 @@ results use an explicit owned output vector and remain readable after the run
 that produced them ends.
 
 Boxed `<object>` values are VM objects of one host type. Floats (both
-formats), booleans, integers within 47 bits and references to runtime
+formats), booleans, characters, integers within 47 bits and references to runtime
 objects travel inside the object handle and never allocate a box; wider
 integers live in the runtime host's heap.
 

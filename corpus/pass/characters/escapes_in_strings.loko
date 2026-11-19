@@ -1,0 +1,9 @@
+// expect: run "tab\tnul\0e\u{301} \u{1}"
+// expect: diagnostics 0
+
+// String literals take the character escapes too: `\r`, `\0`, `\'` and
+// `\u{...}`. A result writes control characters back as escapes.
+
+define function main() => <string>
+  "tab\tnul\0e\u{301} \u{1}"
+end;

@@ -106,6 +106,11 @@ pub enum BuiltinValueClass {
     /// it. It comes after `<boolean>` so that no other built-in class's id
     /// moved.
     Function,
+    /// The concrete built-in `<character>` class of Unicode scalar values,
+    /// written `'a'`. A character is an unboxed scalar, never an
+    /// `<integer>`; `as` converts between the two. It comes after
+    /// `<function>` so that no other built-in class's id moved.
+    Character,
 }
 
 impl BuiltinValueClass {
@@ -130,6 +135,7 @@ impl BuiltinValueClass {
         (Self::SubclassType, "<subclass-type>"),
         (Self::Boolean, "<boolean>"),
         (Self::Function, "<function>"),
+        (Self::Character, "<character>"),
     ];
 
     /// Returns the Loko-visible class name for this built-in value class.
@@ -155,6 +161,7 @@ impl BuiltinValueClass {
             Self::SubclassType => "<subclass-type>",
             Self::Boolean => "<boolean>",
             Self::Function => "<function>",
+            Self::Character => "<character>",
         }
     }
 
@@ -181,6 +188,7 @@ impl BuiltinValueClass {
             b"<subclass-type>" => Some(Self::SubclassType),
             b"<boolean>" => Some(Self::Boolean),
             b"<function>" => Some(Self::Function),
+            b"<character>" => Some(Self::Character),
             _ => None,
         }
     }
@@ -208,6 +216,7 @@ impl BuiltinValueClass {
             Self::SubclassType => 16,
             Self::Boolean => 17,
             Self::Function => 18,
+            Self::Character => 19,
         }
     }
 
@@ -242,12 +251,12 @@ impl BuiltinValueClass {
         )
     }
 
-    /// Returns whether this class's instances are unboxed scalars: numbers
-    /// and booleans. They are boxed rather than referenced when they travel
-    /// as `<object>`.
+    /// Returns whether this class's instances are unboxed scalars: numbers,
+    /// booleans and characters. They are boxed rather than referenced when
+    /// they travel as `<object>`.
     #[must_use]
     pub const fn is_scalar(self) -> bool {
-        matches!(self, Self::Boolean) || self.is_numeric()
+        matches!(self, Self::Boolean | Self::Character) || self.is_numeric()
     }
 
     /// Returns whether this class's instances are unboxed values rather than
@@ -547,7 +556,7 @@ mod tests {
         assert!(!BuiltinValueClass::Boolean.is_numeric());
         assert_eq!(
             BuiltinValueClass::Boolean.index(),
-            BuiltinValueClass::ALL.len() - 2
+            BuiltinValueClass::ALL.len() - 3
         );
         assert_eq!(chain(BuiltinValueClass::Function), ["<function>"]);
         assert!(!BuiltinValueClass::Function.is_abstract());
@@ -557,6 +566,14 @@ mod tests {
         assert!(!BuiltinValueClass::String.is_unboxed());
         assert_eq!(
             BuiltinValueClass::Function.index(),
+            BuiltinValueClass::ALL.len() - 2
+        );
+        assert_eq!(chain(BuiltinValueClass::Character), ["<character>"]);
+        assert!(!BuiltinValueClass::Character.is_abstract());
+        assert!(BuiltinValueClass::Character.is_scalar());
+        assert!(!BuiltinValueClass::Character.is_numeric());
+        assert_eq!(
+            BuiltinValueClass::Character.index(),
             BuiltinValueClass::ALL.len() - 1
         );
     }

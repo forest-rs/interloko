@@ -57,6 +57,9 @@ pub enum DiagnosticCode {
     AstLiteralSuffixMismatch,
     /// A string literal is unterminated or contains an unsupported escape.
     AstMalformedStringLiteral,
+    /// A character literal is unterminated, holds other than one character
+    /// or escape, or uses an unsupported escape.
+    AstMalformedCharacterLiteral,
     /// A slot option is missing its keyword value.
     AstSlotOptionRequiresKeyword,
     /// A slot `init-value:` option is missing its expression.
@@ -362,6 +365,7 @@ impl DiagnosticCode {
         Self::AstFloatLiteralOutOfRange,
         Self::AstLiteralSuffixMismatch,
         Self::AstMalformedStringLiteral,
+        Self::AstMalformedCharacterLiteral,
         Self::AstSlotOptionRequiresKeyword,
         Self::AstSlotInitValueRequiresExpression,
         Self::AstUnsupportedSlotOption,
@@ -509,6 +513,7 @@ impl DiagnosticCode {
             Self::AstFloatLiteralOutOfRange => "ast.float-literal-out-of-range",
             Self::AstLiteralSuffixMismatch => "ast.literal-suffix-mismatch",
             Self::AstMalformedStringLiteral => "ast.malformed-string-literal",
+            Self::AstMalformedCharacterLiteral => "ast.malformed-character-literal",
             Self::AstSlotOptionRequiresKeyword => "ast.slot-option-requires-keyword",
             Self::AstSlotInitValueRequiresExpression => "ast.slot-init-value-requires-expression",
             Self::AstUnsupportedSlotOption => "ast.unsupported-slot-option",
@@ -659,6 +664,7 @@ impl DiagnosticCode {
             "ast.float-literal-out-of-range" => Self::AstFloatLiteralOutOfRange,
             "ast.literal-suffix-mismatch" => Self::AstLiteralSuffixMismatch,
             "ast.malformed-string-literal" => Self::AstMalformedStringLiteral,
+            "ast.malformed-character-literal" => Self::AstMalformedCharacterLiteral,
             "ast.slot-option-requires-keyword" => Self::AstSlotOptionRequiresKeyword,
             "ast.slot-init-value-requires-expression" => Self::AstSlotInitValueRequiresExpression,
             "ast.unsupported-slot-option" => Self::AstUnsupportedSlotOption,

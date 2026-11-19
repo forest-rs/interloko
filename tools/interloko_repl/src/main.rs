@@ -3622,6 +3622,7 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         TokenKind::Number
         | TokenKind::Bool
         | TokenKind::String
+        | TokenKind::Character
         | TokenKind::Symbol
         | TokenKind::Keyword => literal_highlight_style(),
         TokenKind::Comment | TokenKind::DocComment => comment_highlight_style(),

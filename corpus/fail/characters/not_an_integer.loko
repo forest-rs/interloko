@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic contains <character>
+
+// A character is not an `<integer>`: arithmetic takes `as(<integer>, c)`.
+
+define function main() => <integer>
+  'a' + 1
+end;

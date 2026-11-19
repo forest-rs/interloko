@@ -1,0 +1,20 @@
+// expect: run '+'
+// expect: diagnostics 0
+
+// A character lives in a `<character>` slot unboxed and in an `<object>`
+// slot boxed, without allocating; `==` compares scalar values whether
+// boxed or not, and `as` takes one back out of a box.
+
+define class <token> (<object>)
+  slot op :: <character>;
+  slot payload :: <object>;
+end;
+
+define function main() => <character>
+  let t = make(<token>, op: '+', payload: '+');
+  if (t.payload == t.op)
+    if (t.payload == '-') 'x' else as(<character>, t.payload) end
+  else
+    'y'
+  end
+end;

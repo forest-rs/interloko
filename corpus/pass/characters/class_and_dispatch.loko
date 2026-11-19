@@ -1,0 +1,28 @@
+// expect: run 321
+// expect: diagnostics 0
+
+// `<character>` is a concrete class: `class-of`, `object-class` and
+// `instance?` see it, and methods specialize on it whether the character
+// arrives unboxed or boxed.
+
+define generic describe(x) => <integer>;
+define method describe(x :: <character>) => <integer> 1 end;
+define method describe(x :: <integer>) => <integer> 20 end;
+define method describe(x :: <object>) => <integer> 300 end;
+
+define function boxed(x :: <object>) => <object>
+  x
+end;
+
+define function main() => <integer>
+  let total = describe('x') + describe(boxed(7)) + describe(boxed(#t));
+  if (class-name(class-of('x')) = "<character>")
+    if (class-name(object-class(boxed('x'))) = "<character>")
+      if (instance?(boxed('x'), <character>)) total else 0 end
+    else
+      0
+    end
+  else
+    0
+  end
+end;

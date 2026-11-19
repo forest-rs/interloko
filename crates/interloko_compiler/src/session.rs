@@ -338,6 +338,8 @@ pub enum FunctionValue {
     SingleFloat(f32),
     /// Boolean value.
     Boolean(bool),
+    /// `<character>` value: a Unicode scalar value.
+    Character(char),
     /// Runtime string value copied out of the execution host.
     String(String),
 }
@@ -347,7 +349,7 @@ impl fmt::Display for FunctionValue {
     /// as their shortest round-trip literal (`1.0`, `2.5e-7`; `inf`, `-inf`,
     /// and `nan` for non-finite values), 32-bit values with their type
     /// suffix (`7i32`, `7u32`, `1.5f32`), booleans as `#t`/`#f`, and
-    /// strings quoted with Loko escapes.
+    /// characters and strings quoted with Loko escapes, such as `'\n'`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Integer(value) => write!(formatter, "{value}"),
@@ -361,19 +363,10 @@ impl fmt::Display for FunctionValue {
             ),
             Self::Boolean(true) => formatter.write_str("#t"),
             Self::Boolean(false) => formatter.write_str("#f"),
-            Self::String(value) => {
-                formatter.write_char('"')?;
-                for ch in value.chars() {
-                    match ch {
-                        '"' => formatter.write_str("\\\"")?,
-                        '\\' => formatter.write_str("\\\\")?,
-                        '\n' => formatter.write_str("\\n")?,
-                        '\t' => formatter.write_str("\\t")?,
-                        ch => formatter.write_char(ch)?,
-                    }
-                }
-                formatter.write_char('"')
+            Self::Character(value) => {
+                formatter.write_str(&interloko_runtime::character_literal(*value))
             }
+            Self::String(value) => formatter.write_str(&interloko_runtime::string_literal(value)),
         }
     }
 }
@@ -389,6 +382,7 @@ impl FunctionValue {
             Self::U32(_) => FunctionValueKind::U32,
             Self::SingleFloat(_) => FunctionValueKind::SingleFloat,
             Self::Boolean(_) => FunctionValueKind::Boolean,
+            Self::Character(_) => FunctionValueKind::Character,
             Self::String(_) => FunctionValueKind::String,
         }
     }
@@ -409,6 +403,8 @@ pub enum FunctionValueKind {
     SingleFloat,
     /// Boolean value.
     Boolean,
+    /// `<character>` value.
+    Character,
     /// Runtime string value.
     String,
 }
@@ -422,6 +418,7 @@ impl fmt::Display for FunctionValueKind {
             Self::U32 => formatter.write_str("u32"),
             Self::SingleFloat => formatter.write_str("single-float"),
             Self::Boolean => formatter.write_str("boolean"),
+            Self::Character => formatter.write_str("character"),
             Self::String => formatter.write_str("string"),
         }
     }
@@ -5922,6 +5919,7 @@ fn collect_dispatch_sites_in_expr(
         | sem::Expr::ConstF64 { .. }
         | sem::Expr::Const32 { .. }
         | sem::Expr::ConstBool { .. }
+        | sem::Expr::ConstChar { .. }
         | sem::Expr::StringLiteral { .. }
         | sem::Expr::SymbolLiteral { .. }
         | sem::Expr::Local { .. }
@@ -6992,6 +6990,9 @@ fn run_turn_body<'a>(
             (FunctionValue::U32(value), sem::ValueKind::U32) => Value::U32(*value),
             (FunctionValue::SingleFloat(value), sem::ValueKind::F32) => Value::F32(*value),
             (FunctionValue::Boolean(value), sem::ValueKind::Bool) => Value::Bool(*value),
+            (FunctionValue::Character(value), sem::ValueKind::Char) => {
+                Value::U32(u32::from(*value))
+            }
             (FunctionValue::String(value), sem::ValueKind::String(_)) => host
                 .make_string(value)
                 .map_err(|_| FunctionCallError::ArgumentMaterializationFailed {
@@ -7099,6 +7100,15 @@ fn run_turn_body<'a>(
         ([sem::ValueKind::U32], [Value::U32(value)]) => FunctionValue::U32(*value),
         ([sem::ValueKind::F32], [Value::F32(value)]) => FunctionValue::SingleFloat(*value),
         ([sem::ValueKind::Bool], [Value::Bool(value)]) => FunctionValue::Boolean(*value),
+        // A character register holds only scalar values; anything else
+        // fails to materialize rather than pass as one.
+        ([sem::ValueKind::Char], [Value::U32(value)]) => {
+            FunctionValue::Character(char::from_u32(*value).ok_or_else(|| {
+                FunctionCallError::ResultMaterializationFailed {
+                    name: function_name.to_string(),
+                }
+            })?)
+        }
         ([sem::ValueKind::String(_)], [value]) => {
             FunctionValue::String(host.string_text(value).map_err(|_| {
                 FunctionCallError::ResultMaterializationFailed {
@@ -7961,6 +7971,9 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
         }
         ast::Expr::String { id, value, .. } => {
             let _ = writeln!(out, "{id} string {:?}", value);
+        }
+        ast::Expr::Character { id, value, .. } => {
+            let _ = writeln!(out, "{id} character {:?}", value);
         }
         ast::Expr::Symbol { id, name, .. } => {
             let _ = writeln!(out, "{id} symbol #{name}");
@@ -13461,6 +13474,7 @@ fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::U32 => "u32".into(),
         sem::ValueKind::F32 => "single-float".into(),
         sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::Char => "character".into(),
         sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => value_class_label(module, "string", class),
         sem::ValueKind::Symbol(class) => value_class_label(module, "symbol", class),
@@ -13514,6 +13528,7 @@ fn runtime_kind_label(module: &sem::Module, kind: runtime::ValueKind) -> String 
         runtime::ValueKind::U32 => "u32".into(),
         runtime::ValueKind::F32 => "single-float".into(),
         runtime::ValueKind::Bool => "boolean".into(),
+        runtime::ValueKind::Character => "character".into(),
         runtime::ValueKind::String(class) => value_class_label(module, "string", class),
         runtime::ValueKind::Symbol(class) => value_class_label(module, "symbol", class),
         runtime::ValueKind::Vector(class) => value_class_label(module, "vector", class),
@@ -13558,6 +13573,7 @@ fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
         sem::ValueKind::U32 => "u32".into(),
         sem::ValueKind::F32 => "single-float".into(),
         sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::Char => "character".into(),
         sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => format!("string(c{})", class.0),
         sem::ValueKind::Symbol(class) => format!("symbol(c{})", class.0),
@@ -13602,6 +13618,7 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::U32 => "u32".into(),
         sem::ValueKind::F32 => "single-float".into(),
         sem::ValueKind::Bool => "boolean".into(),
+        sem::ValueKind::Char => "character".into(),
         sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => value_class_fingerprint(module, "string", class),
         sem::ValueKind::Symbol(class) => value_class_fingerprint(module, "symbol", class),
@@ -13661,6 +13678,7 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         sem::ValueKind::U32 => "u32",
         sem::ValueKind::F32 => "f32",
         sem::ValueKind::Bool => "bool",
+        sem::ValueKind::Char => "character",
         sem::ValueKind::String(_)
         | sem::ValueKind::Symbol(_)
         | sem::ValueKind::Vector(_)
@@ -13684,6 +13702,7 @@ fn runtime_repr(kind: runtime::ValueKind) -> &'static str {
         runtime::ValueKind::U32 => "u32",
         runtime::ValueKind::F32 => "f32",
         runtime::ValueKind::Bool => "bool",
+        runtime::ValueKind::Character => "character",
         runtime::ValueKind::String(_)
         | runtime::ValueKind::Symbol(_)
         | runtime::ValueKind::Vector(_)
@@ -13727,6 +13746,15 @@ fn sem_slot_mutability_label(mutability: sem::SlotMutability) -> &'static str {
 
 fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
     match intrinsic {
+        sem::Intrinsic::Text(function) => sem::text_function_name(function),
+        sem::Intrinsic::CharCompare(op) => match op {
+            sem::CompareOp::Eq => "character=",
+            sem::CompareOp::Lt => "character<",
+            sem::CompareOp::Le => "character<=",
+            sem::CompareOp::Gt => "character>",
+            sem::CompareOp::Ge => "character>=",
+        },
+        sem::Intrinsic::CharToInteger => "as(<integer>, <character>)",
         sem::Intrinsic::ObjectClass => "object-class",
         sem::Intrinsic::ClassName => "class-name",
         sem::Intrinsic::ClassDirectSuperclass => "class-direct-superclass",
@@ -13907,6 +13935,9 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         }
         sem::Expr::ConstBool { value, .. } => {
             let _ = writeln!(out, "const.bool {value}");
+        }
+        sem::Expr::ConstChar { value, .. } => {
+            let _ = writeln!(out, "const.char {value:?}");
         }
         sem::Expr::StringLiteral { value, class, .. } => {
             let _ = writeln!(out, "literal.string {:?} class=c{}", value, class.0);
@@ -15302,6 +15333,9 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         }
         sem::Expr::ConstBool { value, .. } => {
             let _ = write!(out, "bool({value})");
+        }
+        sem::Expr::ConstChar { value, .. } => {
+            let _ = write!(out, "char({:x})", u32::from(*value));
         }
         sem::Expr::StringLiteral { value, class, .. } => {
             let definition = module
@@ -22894,6 +22928,48 @@ end;
     }
 
     #[test]
+    fn rejected_character_arguments_signal_and_retry_with_the_replacement() {
+        // `as(<character>, i)` rejects a surrogate and `digit-value` a
+        // letter. Each replacement is checked again: an invalid one signals
+        // again, and a valid one finishes the call.
+        let artifacts = CompilerSession::compile_source(
+            "chars.loko",
+            "define function main() => <integer>\n  \
+             let c = as(<character>, 55296);\n  \
+             as(<integer>, c) * 10 + digit-value('x')\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut seen = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                let report = condition.type_error().expect("a type error");
+                assert_eq!(report.kind(), Some(TypeErrorKind::Range));
+                assert_eq!(report.expected, "<character>");
+                seen.push(report.value.clone());
+                match seen.len() {
+                    1 => {
+                        assert_eq!(use_value_types(condition), [ValueType::I64]);
+                        Choice::UseValue(vec![Value::I64(0x11_0000)])
+                    }
+                    2 => Choice::UseValue(vec![Value::I64(7)]),
+                    3 => {
+                        assert_eq!(use_value_types(condition), [ValueType::U32]);
+                        Choice::UseValue(vec![Value::U32(0xD800)])
+                    }
+                    _ => Choice::UseValue(vec![Value::U32(u32::from('4'))]),
+                }
+            });
+            assert_eq!(
+                call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes"),
+                FunctionValue::Integer(74)
+            );
+            assert_eq!(seen, ["55296", "1114112", "'x'", "55296"], "{policy:?}");
+        }
+    }
+
+    #[test]
     fn failed_range_and_overflow_checks_resume_with_the_supplied_result() {
         let artifacts = CompilerSession::compile_source(
             "scalar.loko",
@@ -23463,6 +23539,12 @@ end;
             ),
             ("<object>", "41", "<integer>", FunctionValue::Integer(41)),
             ("<boolean>", "#t", "<boolean>", FunctionValue::Boolean(true)),
+            (
+                "<character>",
+                "'a'",
+                "<character>",
+                FunctionValue::Character('a'),
+            ),
         ] {
             let source = through_a_callable(parameter, argument, result);
             let runs = breaks_under_each_policy(&source, |_, condition| {
@@ -23471,6 +23553,119 @@ end;
             for (_, actual) in runs {
                 assert_eq!(actual, value, "{parameter}");
             }
+        }
+    }
+
+    #[test]
+    fn a_non_character_signals_at_a_character_callable_entry() {
+        // `take` wants a `<character>`; the `<integer>` 3 arrives boxed and
+        // its entry signals. A `use-value` replacement arrives boxed too and
+        // is checked again, so a `u32` that is not a scalar value never
+        // reaches the character register.
+        let source = through_a_callable("<character>", "3", "<character>");
+        let runs = breaks_under_each_policy(&source, |_, condition| {
+            let report = condition.type_error().expect("a type error");
+            assert_eq!(report.kind(), Some(TypeErrorKind::Entry));
+            assert_eq!(report.value, "3");
+            assert_eq!(use_value_types(condition), [ValueType::U32]);
+            Choice::UseValue(vec![Value::U32(u32::from('z'))])
+        });
+        for (_, value) in runs {
+            assert_eq!(value, FunctionValue::Character('z'));
+        }
+    }
+
+    #[test]
+    fn a_failed_unboxing_to_a_character_checks_its_replacement() {
+        let artifacts = CompilerSession::compile_source(
+            "unbox.loko",
+            "define function take(x :: <object>) => <character>\n  as(<character>, x)\nend;\n\
+             define function main() => <character>\n  take(7)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut values = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                let report = condition.type_error().expect("a type error");
+                values.push(report.value);
+                assert_eq!(use_value_types(condition), [ValueType::U32]);
+                Choice::UseValue(vec![Value::U32(if values.len() == 1 {
+                    0x11_0000
+                } else {
+                    u32::from('k')
+                })])
+            });
+            assert_eq!(
+                call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes"),
+                FunctionValue::Character('k')
+            );
+            // The first replacement is not a scalar value, so the unboxing
+            // signals again for it.
+            assert_eq!(values.len(), 2, "{policy:?}");
+            assert_eq!(values[0], "7");
+        }
+    }
+
+    #[test]
+    fn a_send_without_a_method_resumes_with_a_checked_character() {
+        let artifacts = CompilerSession::compile_source(
+            "send.loko",
+            "define generic pick(x) => <character>;\n\
+             define method pick(x :: <integer>) => <character>\n  'i'\nend;\n\
+             define function main() => <character>\n  pick(#t)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert!(
+            artifacts
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code
+                    == DiagnosticCode::TypingDispatchNoApplicableMethod),
+            "{:?}",
+            artifacts.diagnostics
+        );
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut breaks = 0;
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                breaks += 1;
+                if breaks == 2 {
+                    let report = condition.type_error().expect("a type error");
+                    assert_eq!(report.kind(), Some(TypeErrorKind::Entry));
+                    assert_eq!(report.value, "55296");
+                }
+                let types = use_value_types(condition);
+                match breaks {
+                    // A replacement that is not a scalar value is refused.
+                    1 => Choice::UseValue(
+                        types
+                            .iter()
+                            .map(|ty| match ty {
+                                ValueType::U32 => Value::U32(0xD800),
+                                _ => Value::Bool(true),
+                            })
+                            .collect(),
+                    ),
+                    _ => Choice::UseValue(
+                        types
+                            .iter()
+                            .map(|ty| match ty {
+                                ValueType::U32 => Value::U32(u32::from('r')),
+                                _ => Value::Bool(true),
+                            })
+                            .collect(),
+                    ),
+                }
+            });
+            let result = call_with_chooser(&artifacts, &mut chooser);
+            assert!(
+                matches!(result, Ok(FunctionValue::Character('r'))),
+                "{policy:?}: {result:?}"
+            );
+            // The surrogate signalled a type error of its own.
+            assert_eq!(breaks, 2, "{policy:?}");
         }
     }
 

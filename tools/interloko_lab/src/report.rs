@@ -1822,6 +1822,7 @@ fn value_kind_label(module: &sem::Module, kind: ValueKind) -> String {
         ValueKind::U32 => "<u32>".into(),
         ValueKind::F32 => "<single-float>".into(),
         ValueKind::Bool => "<boolean>".into(),
+        ValueKind::Char => "<character>".into(),
         ValueKind::String(id) | ValueKind::Symbol(id) | ValueKind::Vector(id) => {
             class_name(module, id)
                 .unwrap_or("<unknown value class>")

@@ -18,8 +18,10 @@ use interloko_model::type_object::TypeObject;
 use interloko_model::{ClassId, FloatBits, SingleFloatBits, SlotId};
 
 use crate::control::{CHECK_FAILED_TAG, TypeErrorSite};
+use crate::text::{character_literal, string_literal};
 use crate::{
     INTERLOKO_OBJECT_TYPE, INTERLOKO_VALUE_TYPE, InterlokoHost, RuntimeError, RuntimeObjectStorage,
+    Unboxed,
 };
 
 /// What a `<type-error>` condition reports, read from its slots.
@@ -172,12 +174,11 @@ impl InterlokoHost {
             ValueRef::F32(value) => format!("{}", SingleFloatBits::from_f32(value)),
             ValueRef::Bool(true) => "#t".into(),
             ValueRef::Bool(false) => "#f".into(),
-            ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => {
-                match self.boxed_value(obj) {
-                    Ok(inner) => self.describe_value(ValueRef::from_value(&inner)),
-                    Err(_) => "{invalid}".into(),
-                }
-            }
+            ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => match self.unbox(obj) {
+                Ok(Unboxed::Value(inner)) => self.describe_value(ValueRef::from_value(&inner)),
+                Ok(Unboxed::Character(value)) => character_literal(value),
+                Err(_) => "{invalid}".into(),
+            },
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
                 self.describe_object(obj)
             }
@@ -227,23 +228,6 @@ pub(crate) fn check_failed(ctx: &HostContext<'_, '_>) -> HostError {
         .find(|tag| program.tag_name(*tag) == Some(CHECK_FAILED_TAG))
         .and_then(|tag| ctx.tag(tag))
         .map_or(HostError::Failed, |tag| HostError::throw(tag, Vec::new()))
-}
-
-/// Writes `text` as a Loko string literal.
-fn string_literal(text: &str) -> String {
-    let mut literal = String::with_capacity(text.len() + 2);
-    literal.push('"');
-    for character in text.chars() {
-        match character {
-            '"' => literal.push_str("\\\""),
-            '\\' => literal.push_str("\\\\"),
-            '\n' => literal.push_str("\\n"),
-            '\t' => literal.push_str("\\t"),
-            character => literal.push(character),
-        }
-    }
-    literal.push('"');
-    literal
 }
 
 #[cfg(test)]

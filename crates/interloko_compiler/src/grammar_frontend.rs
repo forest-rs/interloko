@@ -3291,7 +3291,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "primary-expression",
-            "function-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | symbol-literal | number-literal | type-expression | name-expression",
+            "function-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | name-expression",
             "syntax.rs:Parser::parse_primary",
         ),
         (
@@ -3940,6 +3940,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         | CstKind::NumberExpr
         | CstKind::BoolExpr
         | CstKind::StringExpr
+        | CstKind::CharacterExpr
         | CstKind::SymbolExpr
         | CstKind::TypeExpr => Some("primary-expression"),
         CstKind::KeywordExpr => Some("keyword-symbol"),

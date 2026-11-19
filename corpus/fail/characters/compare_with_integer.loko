@@ -1,0 +1,6 @@
+// expect: diagnostics 1
+// expect: diagnostic contains <character>
+
+define function main() => <boolean>
+  'a' < 98
+end;
