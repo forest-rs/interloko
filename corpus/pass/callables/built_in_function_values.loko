@@ -1,0 +1,41 @@
+// expect: run 21311113
+// expect: diagnostics 0
+
+// Built-in functions are values, as in Dylan. One with a single overload,
+// such as `digit?` or `floor/`, is one hidden kernel function, so every
+// mention is the same value; one with several, such as `sqrt` or
+// `as-uppercase`, is a built-in generic whose kernel methods are its
+// overloads. A typed call of either name still runs the built-in inline.
+
+define function count-if (test? :: callable(<character>) => <boolean>, s :: <string>) => <integer>
+  let n = 0;
+  for (c :: <character> in s) if (test?(c)) n := n + 1 end end;
+  n
+end;
+
+define function apply-to (f :: <function>, x :: <object>) => <object>
+  f(x)
+end;
+
+define function main() => <integer>
+  let up = as-uppercase;
+  let root = sqrt;
+  let t = make(<table>);
+  t["digit"] := digit?;
+  let r1 :: <double-float> = apply-to(sqrt, 16.0);
+  let r2 :: <string> = apply-to(as-uppercase, "abc");
+  let r3 :: <character> = up('q');
+  let r4 :: <double-float> = root(9.0);
+  let o :: <object> = 2.25;
+  let r5 :: <double-float> = sqrt(o);
+  let d? :: callable(<character>) => <boolean> = digit?;
+  let (q, r) = floor/(7, 2);
+  let fl = floor/;
+  let (q2, r2b) = fl(9, 4);
+  count-if(digit?, "a1b22c")
+    + (if (digit? == digit?) 10 else 0 end)
+    + (if (t["digit"] == digit?) 100 else 0 end)
+    + (if (r1 = 4.0 & r2 = "ABC" & r3 = 'Q' & r4 = 3.0 & r5 = 1.5) 1000 else 0 end)
+    + (if (d?('7')) 10000 else 0 end)
+    + q * 100000 + r2b * 1000000 + q2 * 10000000
+end;

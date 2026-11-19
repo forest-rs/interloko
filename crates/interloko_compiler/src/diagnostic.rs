@@ -121,9 +121,9 @@ pub enum DiagnosticCode {
     /// operands that do resolve, such as `x-1` with `x` bound. A hyphen is a
     /// name character, so the likely intent is the spaced form, `x - 1`.
     UnresolvedHyphenatedLocal,
-    /// A built-in function, such as `digit?` or `sqrt`, was named as a
-    /// value. Calls resolve it by name; it has no value to pass.
-    BuiltInFunctionValue,
+    /// A built-in form whose arguments no callable signature describes,
+    /// such as `apply` or `make`, was named as a value.
+    BuiltInFormValue,
     /// A parameter, local, or restart binding duplicates an existing local.
     DuplicateLocal,
     /// A callable value is ambiguous.
@@ -271,8 +271,9 @@ pub enum DiagnosticCode {
     /// A method declares a keyword parameter with a type other than its
     /// generic's.
     MethodKeywordTypeMismatch,
-    /// A method of a built-in collection generic specializes on a kernel
-    /// class the generic already has a kernel method for.
+    /// A method of a built-in collection generic, or of the generic a
+    /// built-in function with several overloads is, specializes on a
+    /// kernel class the generic already has a kernel method for.
     CollectionMethodOverridesKernel,
     /// A numeric `for` clause's start, bound or step is not an `<integer>`.
     ForClauseTypeMismatch,
@@ -425,7 +426,7 @@ impl DiagnosticCode {
         Self::UnresolvedFunctionOrGeneric,
         Self::UnresolvedLocal,
         Self::UnresolvedHyphenatedLocal,
-        Self::BuiltInFunctionValue,
+        Self::BuiltInFormValue,
         Self::DuplicateLocal,
         Self::AmbiguousCallable,
         Self::FunctionArityMismatch,
@@ -584,7 +585,7 @@ impl DiagnosticCode {
             Self::UnresolvedFunctionOrGeneric => "sem.unresolved-function-or-generic",
             Self::UnresolvedLocal => "sem.unresolved-local",
             Self::UnresolvedHyphenatedLocal => "sem.unresolved-hyphenated-local",
-            Self::BuiltInFunctionValue => "sem.built-in-function-value",
+            Self::BuiltInFormValue => "sem.built-in-form-value",
             Self::DuplicateLocal => "sem.duplicate-local",
             Self::AmbiguousCallable => "sem.ambiguous-callable",
             Self::FunctionArityMismatch => "sem.function-arity-mismatch",
@@ -746,7 +747,7 @@ impl DiagnosticCode {
             "sem.unresolved-function-or-generic" => Self::UnresolvedFunctionOrGeneric,
             "sem.unresolved-local" => Self::UnresolvedLocal,
             "sem.unresolved-hyphenated-local" => Self::UnresolvedHyphenatedLocal,
-            "sem.built-in-function-value" => Self::BuiltInFunctionValue,
+            "sem.built-in-form-value" => Self::BuiltInFormValue,
             "sem.duplicate-local" => Self::DuplicateLocal,
             "sem.ambiguous-callable" => Self::AmbiguousCallable,
             "sem.function-arity-mismatch" => Self::FunctionArityMismatch,

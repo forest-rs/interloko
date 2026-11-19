@@ -436,7 +436,21 @@ The current slices include:
   the arguments, and call its value, typed when its signature is known.
   An `<object>` operand is checked to be a `<function>` as a declaration
   would check it (`type-error.cast`) and called through its boxed entry,
-  and an operand whose type can never be a function is an error;
+  and an operand whose type can never be a function is an error.
+  Built-in functions are values as well: one with a single overload, such
+  as `digit?`, `floor/` or `class-name`, is a hidden kernel function made
+  once per program, so `digit? == digit?`, and one with several, such as
+  `sqrt` (a `<double-float>` or a `<single-float>`), `floor` or
+  `as-uppercase` (a `<character>` or a `<string>`), is a built-in generic
+  whose kernel methods are its overloads. That generic is sealed over its
+  methods' classes as `size` is, so a program's `define method sqrt` joins
+  it for a class of its own, and a call no overload takes as typing sees
+  it, an `<object>` or such a class among its arguments, sends to it.
+  `shift-left` and `shift-right` as values shift a `<u32>`. A typed call
+  of a built-in's name, or of a binding that holds one, still runs it
+  inline. `apply`, `values`, `make`, `as`, `limited`, `signal`,
+  `copy-sequence` and `starts-with?` are forms whose arguments or results
+  no callable type describes yet, and naming one as a value is an error;
 - identity: `a == b` is Dylan's `==`, defined on any two objects, never
   dispatching and not user-definable; `=` stays the equality of numbers,
   characters, strings, symbols and types. Heap objects are `==` when they

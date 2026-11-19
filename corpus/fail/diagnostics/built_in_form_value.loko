@@ -1,0 +1,13 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.built-in-form-value
+// expect: diagnostic contains `apply` is a form
+// expect: diagnostic contains method (…) apply(…) end
+
+// Built-in functions are values, but `apply` takes any number of
+// arguments, which no callable type describes, so it is a form of the
+// language rather than a value. A method that calls it is a value.
+
+define function main() => <integer>
+  let call = apply;
+  0
+end;

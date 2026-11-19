@@ -1,0 +1,13 @@
+// expect: diagnostic code sem.collection-method-overrides-kernel
+// expect: diagnostic contains `sqrt` already has the kernel's method for <double-float>
+
+// The built-in generic `sqrt` is sealed over the classes of its kernel
+// methods, so a program's method for `<double-float>` would override one.
+
+define method sqrt (s :: <double-float>) => <double-float>
+  s
+end;
+
+define function main() => <double-float>
+  sqrt(4.0)
+end;
