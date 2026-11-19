@@ -1,0 +1,18 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// An inner block's exit can be handed on: `outer` reaches the callee
+// through the inner block's body, and calling it there skips the rest of
+// both blocks.
+
+define function give-up(out :: <callable>) => <integer>
+  out(42)
+end;
+
+define function main() => <integer>
+  block (outer)
+    (block (inner)
+       give-up(outer) + inner(1)
+     end) + 1000
+  end
+end;

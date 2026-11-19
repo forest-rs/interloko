@@ -225,7 +225,7 @@ impl BaseLokoCstProjector<'_> {
             .find(|child| child.is_rule("expression"))
             .map(|expr| self.build_expr(expr));
         let mut roles = Vec::new();
-        self.collect_role_nodes(
+        self.collect_child_roles(
             node,
             "value-definition-name",
             CstKind::ValueDefinitionName,
@@ -245,13 +245,24 @@ impl BaseLokoCstProjector<'_> {
 
     fn build_class(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let mut roles = Vec::new();
-        self.collect_role_nodes(
+        self.collect_child_roles(
             node,
             "type-definition-name",
             CstKind::TypeDefinitionName,
             &mut roles,
         );
-        self.collect_role_nodes(node, "superclass-type", CstKind::SuperclassType, &mut roles);
+        for superclass in node
+            .children
+            .iter()
+            .filter(|child| child.is_rule("superclass"))
+        {
+            self.collect_child_roles(
+                superclass,
+                "superclass-type",
+                CstKind::SuperclassType,
+                &mut roles,
+            );
+        }
         let slots = node
             .children
             .iter()
@@ -288,7 +299,7 @@ impl BaseLokoCstProjector<'_> {
             .map(|option| self.build_slot_option(option))
             .collect::<Vec<_>>();
         let mut roles = Vec::new();
-        self.collect_role_nodes(inner, "slot-name", CstKind::SlotName, &mut roles);
+        self.collect_child_roles(inner, "slot-name", CstKind::SlotName, &mut roles);
         self.collect_type_roles_from_rule_children(inner, &["type-annotation"], &mut roles);
         let excluded = options.iter().map(|option| option.span).collect::<Vec<_>>();
         let mut children = self.direct_tokens(inner.span, &excluded);
@@ -345,7 +356,7 @@ impl BaseLokoCstProjector<'_> {
             .find(|child| child.is_rule("parameter-list"))
             .map(|params| self.build_parameter_list(params));
         let mut roles = Vec::new();
-        self.collect_role_nodes(
+        self.collect_child_roles(
             node,
             "value-definition-name",
             CstKind::ValueDefinitionName,
@@ -375,7 +386,7 @@ impl BaseLokoCstProjector<'_> {
             .find(|child| child.is_rule("body"))
             .map(|body| self.build_body(body));
         let mut roles = Vec::new();
-        self.collect_role_nodes(
+        self.collect_child_roles(
             node,
             "value-definition-name",
             CstKind::ValueDefinitionName,
@@ -535,7 +546,7 @@ impl BaseLokoCstProjector<'_> {
 
     fn build_type_expr(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let mut roles = Vec::new();
-        self.collect_role_nodes(
+        self.collect_child_roles(
             node,
             "expression-type-name",
             CstKind::ExpressionTypeName,
@@ -571,8 +582,10 @@ impl BaseLokoCstProjector<'_> {
                 nested.push(self.node_with_nested(CstKind::CleanupClause, child, body));
             }
         }
+        // Only this block's own exit name: a block nested in the body
+        // binds its own.
         let mut roles = Vec::new();
-        self.collect_role_nodes(node, "block-exit-name", CstKind::BlockExitName, &mut roles);
+        self.collect_child_roles(node, "block-exit-name", CstKind::BlockExitName, &mut roles);
         self.node_with_nested_and_roles(CstKind::BlockExpr, node, nested, roles)
     }
 
@@ -965,7 +978,9 @@ impl BaseLokoCstProjector<'_> {
             .find(|child| child.is_rule("argument-list"))
             .map(|args| self.build_argument_list(args));
         let mut roles = Vec::new();
-        self.collect_role_nodes(node, "call-name", CstKind::CallName, &mut roles);
+        // Only this call's own name: a call among its arguments names its
+        // own callee.
+        self.collect_child_roles(node, "call-name", CstKind::CallName, &mut roles);
         let excluded = arg_list
             .as_ref()
             .map_or_else(Vec::new, |args| vec![args.span]);
@@ -1033,6 +1048,27 @@ impl BaseLokoCstProjector<'_> {
         self.node(CstKind::KeywordArg, self.sorted(children), node.span)
     }
 
+    /// Collects a role leaf for each direct child of `node` matching
+    /// `rule_name`. Unlike [`Self::collect_role_nodes`], it does not look
+    /// into nested forms, which carry roles of their own.
+    fn collect_child_roles(
+        &self,
+        node: &InterpretedRuleNode<'_>,
+        rule_name: &str,
+        kind: CstKind,
+        out: &mut Vec<CstNode>,
+    ) {
+        out.extend(
+            node.children
+                .iter()
+                .filter(|child| child.is_rule(rule_name))
+                .map(|child| self.leaf(kind, child)),
+        );
+    }
+
+    /// Collects a role leaf for every node matching `rule_name` anywhere
+    /// under `node`, for a role nested within the form's own syntax (a let
+    /// pattern's names, a parameter list's names).
     fn collect_role_nodes(
         &self,
         node: &InterpretedRuleNode<'_>,
@@ -1258,6 +1294,33 @@ mod tests {
         let source = "define function main()\n  let x-1 = #t-1;\n  let y = end-2;\n  \
                       f(foo-1: #:k-2, 7i32-1, <z-3?>, x-)\nend;";
         assert!(disagreements_with(source, &syntax::lex(source)).is_empty());
+    }
+
+    /// The source text of each `kind` role of every `CallExpr` in `node`,
+    /// outermost call first.
+    fn call_roles(source: &str, node: &CstNode, out: &mut Vec<Vec<String>>) {
+        if node.kind == CstKind::CallExpr {
+            out.push(
+                node.child_nodes(CstKind::CallName)
+                    .map(|name| source[name.span.start..name.span.end].to_string())
+                    .collect(),
+            );
+        }
+        for child in &node.children {
+            if let CstElement::Node(child) = child {
+                call_roles(source, child, out);
+            }
+        }
+    }
+
+    #[test]
+    fn a_form_takes_only_its_own_name_roles() {
+        let source = "define function main()\n  f(g(1))\nend;";
+        let tree = crate::grammar_frontend::parse_file(SourceFileId::ANONYMOUS, source).syntax;
+        assert_eq!(tree.diagnostics, Vec::new());
+        let mut calls = Vec::new();
+        call_roles(source, &tree.root, &mut calls);
+        assert_eq!(calls, [vec!["f".to_string()], vec!["g".to_string()]]);
     }
 
     #[test]
