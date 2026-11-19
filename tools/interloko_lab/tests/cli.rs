@@ -1344,7 +1344,7 @@ fn soft_typing_warns_runs_and_explains_decisions() {
     assert!(explanation.contains("owner: function measure"));
     assert!(explanation.contains("verdict: checked"));
     assert!(explanation.contains("dispatch-site: dispatch:d0"));
-    assert!(explanation.contains("contract: advisory; the runtime still performs this check"));
+    assert!(explanation.contains("contract: advisory; the send is guarded (observed)"));
 }
 
 /// The id of the object whose presentation title is `title`.
@@ -1407,11 +1407,11 @@ fn show_types_and_contract_dependents_explain_flow_types() {
         "{explanation}"
     );
     assert!(
-        explanation.contains("codegen: kept (policy proved)\n"),
+        explanation.contains("codegen: guarded (policy proved)\n"),
         "{explanation}"
     );
     let record = run_lab(&["inspect", path, &decision]);
-    assert!(record.contains("codegen=kept"), "{record}");
+    assert!(record.contains("codegen=guarded"), "{record}");
 }
 
 #[test]
@@ -1455,9 +1455,9 @@ fn codegen_option_selects_the_policy_for_every_command() {
     // The option may come before the command or among its arguments, and
     // the session's typing configuration object reports it.
     let lowered = run_lab(&["--codegen", "off", "dump", path, "--stage", "lowered"]);
-    assert!(lowered.contains("select-method"), "{lowered}");
+    assert!(lowered.contains("guarded-send"), "{lowered}");
     let lowered = run_lab(&["dump", path, "--stage", "lowered", "--codegen", "proved"]);
-    assert!(!lowered.contains("select-method"), "{lowered}");
+    assert!(!lowered.contains("guarded-send"), "{lowered}");
     // `proved` is the default.
     assert_eq!(run_lab(&["dump", path, "--stage", "lowered"]), lowered);
     for policy in ["off", "proved"] {
@@ -1552,7 +1552,7 @@ fn annotate_reports_the_verdict_delta_it_buys() {
         "{preview}"
     );
     assert!(
-        preview.contains("dispatch verdict=checked->proved codegen=kept"),
+        preview.contains("dispatch verdict=checked->proved codegen=guarded"),
         "{preview}"
     );
 
@@ -1626,7 +1626,7 @@ fn typing_config_affordances_report_policy_deltas() {
         "{stdout}"
     );
     assert!(
-        stdout.contains("dispatch verdict=checked codegen=kept severity=silent->warning"),
+        stdout.contains("dispatch verdict=checked codegen=guarded severity=silent->warning"),
         "{stdout}"
     );
     assert!(
@@ -1658,7 +1658,8 @@ fn typing_config_affordances_report_policy_deltas() {
         stdout.starts_with("codegen policy proved -> off"),
         "{stdout}"
     );
-    assert!(stdout.contains("codegen=inlined->kept"), "{stdout}");
+    // Off, the numeric send is no longer inlined; it sends through a guard.
+    assert!(stdout.contains("codegen=inlined->guarded"), "{stdout}");
 }
 
 #[test]

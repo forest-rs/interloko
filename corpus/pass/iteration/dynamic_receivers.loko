@@ -1,6 +1,6 @@
 // expect: run 1113
 // expect: diagnostics 0
-// expect: dump lowered contains select-method
+// expect: dump lowered contains guarded-send
 
 // A collection typing knows nothing about pays one send at loop entry:
 // `forward-iteration-protocol` answers the iteration's states and the

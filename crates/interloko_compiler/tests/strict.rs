@@ -292,7 +292,7 @@ fn the_typing_policy_switches_strictness_for_every_definition() {
     assert!(
         delta
             .render()
-            .contains("dispatch verdict=checked codegen=kept severity=silent->error"),
+            .contains("dispatch verdict=checked codegen=guarded severity=silent->error"),
         "{}",
         delta.render()
     );

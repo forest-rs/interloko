@@ -121,7 +121,7 @@ fn annotating_a_parameter_proves_its_dispatch_and_elides_its_test() {
     assert!(annotation.delta.after.elided >= 1);
     let rendered = annotation.delta.render();
     assert!(
-        rendered.contains("dispatch verdict=checked->proved codegen=kept"),
+        rendered.contains("dispatch verdict=checked->proved codegen=guarded"),
         "{rendered}"
     );
     assert!(

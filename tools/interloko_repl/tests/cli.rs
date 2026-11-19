@@ -1017,9 +1017,9 @@ fn codegen_command_shows_and_sets_the_policy() {
     // `off` keeps the numeric send; `proved` runs the method typing chose
     // inline, without selecting it.
     assert!(sections[1].starts_with("off\n"), "{stdout}");
-    assert!(sections[1].contains("select-method"), "{stdout}");
+    assert!(sections[1].contains("guarded-send"), "{stdout}");
     assert!(sections[2].starts_with("proved\n"), "{stdout}");
-    assert!(!sections[2].contains("select-method"), "{stdout}");
+    assert!(!sections[2].contains("guarded-send"), "{stdout}");
     // `:reset` clears source but keeps the policy.
     assert!(sections[3].starts_with("off\nreset\n"), "{stdout}");
     assert_eq!(sections[4], "off\n", "{stdout}");
@@ -1173,7 +1173,7 @@ fn typing_command_shows_and_sets_the_policy_and_survives_reset() {
     assert!(stdout.contains("typing soft\n"), "{stdout}");
     assert!(stdout.contains("typing strict\n"), "{stdout}");
     assert!(
-        stdout.contains("dispatch verdict=checked codegen=kept severity=silent->error"),
+        stdout.contains("dispatch verdict=checked codegen=guarded severity=silent->error"),
         "{stdout}"
     );
     assert!(stdout.contains("reset\ntyping strict\n"), "{stdout}");

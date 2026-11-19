@@ -17,7 +17,7 @@ use execution_tape::asm::{
 use execution_tape::contract::{Contract, ContractId};
 use execution_tape::host::HostSig;
 use execution_tape::program::{
-    CallSigId, ConstId, ElemTypeId, HostSigId, SpanId, TagId, ValueType,
+    CallSigId, ConstId, ElemTypeId, HostSigId, LinkId, SpanId, TagId, ValueType,
 };
 use execution_tape::value::FuncId;
 use execution_tape::verifier::VerifiedProgram;
@@ -184,6 +184,11 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         builder.define_function(func, asm).map_err(build_error)?;
     }
 
+    // After the bodies, so nothing the sends need is interned before what
+    // the bodies intern: a send added anywhere moves no other function's
+    // host or call signature ids. Bodies name the links by generic alone.
+    let (sites, miss_stubs) = declare_sites(module, &ids, &mut builder, &abi)?;
+
     let program = builder.build_verified().map_err(build_error)?;
     let mut code = CodeUnit {
         program: Arc::new(program),
@@ -204,6 +209,8 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         links: linked_methods(module),
         contracts: module.contracts.clone(),
         assumptions: module.assumptions.clone(),
+        sites,
+        miss_stubs,
     };
     for (function, func) in module.functions.iter().zip(&ids.functions) {
         let slot = match function.kind {
@@ -384,6 +391,197 @@ fn declare_links(
         }
     }
     Ok(())
+}
+
+/// Declares one link per generic of the runtime layout, after the method
+/// links, so `LinkId(methods + g)` is generic `g`'s
+/// ([`CodeUnit::send_link`]), and returns the [`runtime::code::SendSite`]s of
+/// the generics `module` sends to through them, with the miss stubs.
+///
+/// Like method links, these depend on the layout alone, so a send added or
+/// dropped anywhere renumbers no link and unchanged functions keep their
+/// bytecode. Every guarded send to a generic shares its link, an inline
+/// cache for the unit's sends to it. A generic whose dispatched arguments
+/// are objects, and which the program sends to, gets a guarded link over its
+/// dispatcher, whose fallback, its miss stub, takes the link index and keys
+/// before the send's arguments, asks the driver for the method they select
+/// ([`runtime::code::CODE_FILL`]), which also fills the guard, and calls it;
+/// any other gets a plain link nothing calls.
+fn declare_sites(
+    module: &lower::Module,
+    ids: &TapeIds,
+    builder: &mut ProgramBuilder,
+    abi: &AbiTables,
+) -> Result<(Vec<runtime::code::SendSite>, Vec<FuncId>), TapeError> {
+    let methods = module.runtime.methods.len();
+    let mut sites = Vec::new();
+    let mut stubs = Vec::new();
+    for index in 0..module.runtime.generics.len() {
+        let generic = sem::GenericFunctionId(
+            u32::try_from(index).map_err(|_| invalid_lowered("too many generics to link"))?,
+        );
+        let dispatcher = module
+            .functions
+            .iter()
+            .find(|function| function.kind == lower::FunctionKind::Dispatcher(generic))
+            .ok_or_else(|| invalid_lowered("a layout generic has no dispatcher"))?;
+        let target = ids.functions[dispatcher.id.0 as usize];
+        // Only generics the program sends to need a guard and a miss stub;
+        // a plain link keeps every other generic's id in place.
+        let sent = module.functions.iter().any(|function| {
+            function.instructions.iter().any(|instr| {
+                matches!(instr, lower::Instr::GuardedSend { generic: sent, .. } if *sent == generic)
+            })
+        });
+        let keys = guard_key_count(module, dispatcher, generic).filter(|_| sent);
+        let name = format!("{}#send", dispatcher.name);
+        let link = match keys {
+            Some(keys) => {
+                let stub = declare_miss_stub(builder, abi, dispatcher, generic, keys)?;
+                stubs.push(stub);
+                builder
+                    .declare_guarded_link(&name, target, keys, stub)
+                    .map_err(build_error)?
+            }
+            None => builder.declare_link(&name, target).map_err(build_error)?,
+        };
+        if link.0 as usize != methods + index {
+            return Err(invalid_lowered("send links are not in generic order"));
+        }
+        // The guesses of the unit's sends to the generic, if they agree.
+        let mut sends = module
+            .functions
+            .iter()
+            .flat_map(|function| &function.instructions)
+            .filter_map(|instr| match instr {
+                lower::Instr::GuardedSend {
+                    generic: sent,
+                    keys: sent_keys,
+                    guess,
+                    ..
+                } if *sent == generic => Some((sent_keys.len(), guess)),
+                _ => None,
+            })
+            .peekable();
+        let Some(&(_, first)) = sends.peek() else {
+            continue;
+        };
+        let first = first.clone();
+        let mut guess = first.clone();
+        for (count, sent) in sends {
+            if Some(count) != keys {
+                return Err(invalid_lowered("a guarded send's keys are not its link's"));
+            }
+            if *sent != first {
+                guess = None;
+            }
+        }
+        sites.push(runtime::code::SendSite {
+            link,
+            generic,
+            guess,
+        });
+    }
+    Ok((sites, stubs))
+}
+
+/// How many keys a guarded send to `generic` passes: one per argument its
+/// dispatch plan selects by, when there are 1 to
+/// [`execution_tape::program::MAX_GUARD_KEYS`] and each is an object or a
+/// boxed `<object>`, as lowering's guarded sends require.
+fn guard_key_count(
+    module: &lower::Module,
+    dispatcher: &lower::Function,
+    generic: sem::GenericFunctionId,
+) -> Option<usize> {
+    let plan = module.dispatch.get(generic.0 as usize)?.as_ref()?;
+    let keyable = (1..=execution_tape::program::MAX_GUARD_KEYS).contains(&plan.positions.len())
+        && plan.positions.iter().all(|&position| {
+            matches!(
+                dispatcher.params.get(position).map(|param| param.kind),
+                Some(lower::ValueKind::Object(_) | lower::ValueKind::Any)
+            )
+        });
+    keyable.then_some(plan.positions.len())
+}
+
+/// Declares and defines `generic`'s miss stub for sends keyed by `keys`
+/// classes: `(link, keys..., args...) -> results`, which asks
+/// [`runtime::code::CODE_FILL`] for the function to call and calls it.
+fn declare_miss_stub(
+    builder: &mut ProgramBuilder,
+    abi: &AbiTables,
+    dispatcher: &lower::Function,
+    generic: sem::GenericFunctionId,
+    keys: usize,
+) -> Result<FuncId, TapeError> {
+    let params = dispatcher
+        .params
+        .iter()
+        .map(|param| param.kind)
+        .collect::<Vec<_>>();
+    let mut args = vec![ContractRef::Kind(ValueType::U64); 1 + keys];
+    args.extend(params.iter().map(|kind| abi_ref(*kind, abi.callable)));
+    let rets = dispatcher
+        .rets
+        .iter()
+        .map(|kind| abi_ref(*kind, abi.callable))
+        .collect::<Vec<_>>();
+    let stub = builder
+        .declare_function(FunctionAbi {
+            args,
+            rets: rets.clone(),
+        })
+        .map_err(build_error)?;
+    builder
+        .set_function_name(stub, &format!("{}#miss", dispatcher.name))
+        .map_err(build_error)?;
+    let call_sig = builder
+        .call_sig(FunctionAbi {
+            args: params
+                .iter()
+                .map(|kind| abi_ref(*kind, abi.callable))
+                .collect(),
+            rets,
+        })
+        .map_err(build_error)?;
+    let param_types = params
+        .iter()
+        .map(|kind| value_type(*kind))
+        .collect::<Vec<_>>();
+    let fill = builder.host_sig_for(
+        runtime::code::CODE_FILL,
+        runtime::code::fill_signature(keys, &param_types),
+    );
+    let mut asm = builder.function_asm(stub).map_err(build_error)?;
+    let generic_reg = asm.alloc_register(ValueType::U64);
+    let callee = asm.alloc_register(ValueType::Func);
+    let results = dispatcher
+        .rets
+        .iter()
+        .map(|kind| asm.alloc_register(value_type(*kind)))
+        .collect::<Vec<_>>();
+    let link_reg = Reg(1);
+    let key_regs = (0..keys).map(|index| Reg(u32::try_from(index + 2).unwrap_or(u32::MAX)));
+    let arg_regs = (0..params.len())
+        .map(|index| Reg(u32::try_from(index + 2 + keys).unwrap_or(u32::MAX)))
+        .collect::<Vec<_>>();
+    let mut fill_args = vec![link_reg, generic_reg];
+    fill_args.extend(key_regs);
+    fill_args.extend(&arg_regs);
+    asm.const_u64(generic_reg, u64::from(generic.0))
+        .host_call(Reg::EFFECT, fill, Reg::EFFECT, &fill_args, &[callee])
+        .call_indirect(
+            Reg::EFFECT,
+            call_sig,
+            callee,
+            Reg::EFFECT,
+            &arg_regs,
+            &results,
+        )
+        .ret(Reg::EFFECT, &results);
+    builder.define_function(stub, asm).map_err(build_error)?;
+    Ok(stub)
 }
 
 /// The methods whose links `module`'s sends call, ascending.
@@ -2189,6 +2387,23 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm
                     .call_link(Reg::EFFECT, method_link(*method), Reg::EFFECT, args, dsts);
             }
+            lower::Instr::GuardedSend {
+                dsts,
+                generic,
+                keys,
+                args,
+                span,
+                ..
+            } => {
+                let link = self
+                    .layout
+                    .and_then(|layout| u32::try_from(layout.methods.len()).ok())
+                    .map(|methods| LinkId(methods + generic.0))
+                    .ok_or_else(|| invalid_lowered("a guarded send has no layout"))?;
+                self.set_span(*span);
+                self.asm
+                    .call_link_guard(Reg::EFFECT, link, Reg::EFFECT, keys, args, dsts);
+            }
             lower::Instr::CallIndirect {
                 dsts,
                 callee,
@@ -3252,7 +3467,8 @@ mod tests {
              define function main()\n  area(make(<circle>, radius: 10))\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
-        assert_eq!(tape.program().program().functions.len(), 5);
+        // The four lowered functions and the generic's miss stub.
+        assert_eq!(tape.program().program().functions.len(), 6);
         assert_eq!(tape.main, Some(FuncId(0)));
         let circle = runtime_class(&tape, "<circle>");
         assert_eq!(circle.slots[0].name, "radius");
