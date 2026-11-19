@@ -65,8 +65,8 @@ pub(super) fn parse_file(
     }
 }
 
-/// Reports every name or number that the lexer split differently from the
-/// grammar.
+/// Reports every name, type-name word, or number that the lexer split
+/// differently from the grammar.
 ///
 /// The grammar decides what source each `name` and `number` node covers, but
 /// the CST and AST read that text from lexer tokens. Were the two ever to
@@ -84,7 +84,7 @@ fn lexer_disagreements(
             let span = Span::from(node.span);
             let token = token_at(tokens, span.start);
             let lexed = match node.name()? {
-                "name" => token.and_then(Token::name_span),
+                "name" | "type-name-word" => token.and_then(Token::name_span),
                 "number" => token
                     .filter(|token| token.kind == TokenKind::Number)
                     .map(|token| token.span),
