@@ -241,7 +241,7 @@ impl KernelTree {
 
     /// `values(...)`, the built-in one whatever the program defines.
     fn values(&mut self, values: Vec<Expr>) -> Expr {
-        self.call(super::KERNEL_VALUES, values)
+        self.call(crate::ast::KERNEL_VALUES, values)
     }
 
     /// The body of the kernel's `forward-iteration-protocol` method for

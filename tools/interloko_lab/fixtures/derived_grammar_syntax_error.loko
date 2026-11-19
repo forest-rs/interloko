@@ -1,4 +1,5 @@
 // grammar: derived-host
 
 define function main()
+  1 +
 end

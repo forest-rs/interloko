@@ -1413,6 +1413,12 @@ pub struct KeywordArg {
     pub span: Span,
 }
 
+/// The kernel-only name of the built-in `values`, which the compiler
+/// writes for an empty body, a division or the iteration protocol's calls.
+/// A `%` cannot appear in a source name, so no binding or definition of
+/// the program's own `values` can capture it.
+pub(crate) const KERNEL_VALUES: &str = "%values";
+
 /// Lowers a syntax tree to a surface AST.
 #[must_use]
 pub fn lower(tree: &SyntaxTree) -> Module {
@@ -2121,20 +2127,20 @@ impl<'tree> Lowering<'tree> {
             result = Some(last);
         }
 
-        if result.is_none() {
-            self.diagnostics.push(Diagnostic::error(
-                node.span,
-                DiagnosticCode::SyntaxExpectedExpression,
-            ));
-        }
+        // As in an `if` without `else`, a body with no expression to end it,
+        // empty or ending in a `let`, produces no values.
+        let result = result.unwrap_or_else(|| Expr::Call {
+            id: self.ast_id(node),
+            callee: KERNEL_VALUES.into(),
+            args: Vec::new(),
+            keywords: Vec::new(),
+            span: node.span,
+        });
 
         Block {
             id: self.ast_id(node),
             statements,
-            result: result.unwrap_or(Expr::Error {
-                id: self.ast_id(node),
-                span: node.span,
-            }),
+            result,
             span: node.span,
         }
     }

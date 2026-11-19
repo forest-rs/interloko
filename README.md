@@ -122,7 +122,9 @@ The current slices include:
   restart, run for their effects and need not agree;
 - bodies of `let`s and `expression;` statements, where, as in Dylan, `;`
   separates expressions, so a body's last expression is its value with or
-  without one;
+  without one. A body with no expression to end it, empty (`while (#f)
+  end`, `method () => () end`, `begin end`, an empty arm) or ending in a
+  `let`, produces no values, as an `if` without `else` does;
 - assignable `let` locals: `x := v` is an expression whose value is the new
   value. A local keeps the type it declares, or its initializer's when it
   declares none, so `let n = 0; n := "s"` is an error, and a limited local
