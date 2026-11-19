@@ -208,7 +208,7 @@ fn strictness_measures_the_corpus_under_strict_typing() {
     ]);
     assert!(out.contains("pass sealed_dispatch.loko"), "{out}");
     assert!(
-        out.contains("strictness: 7/7 typed cases pass, 24/24 definitions; 0 untyped; errors "),
+        out.contains("strictness: 8/8 typed cases pass, 26/26 definitions; 0 untyped; errors "),
         "{out}"
     );
 

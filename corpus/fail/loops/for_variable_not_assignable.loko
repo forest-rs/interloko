@@ -1,0 +1,16 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.assignment-target-not-assignable
+// expect: diagnostic contains `i` is a `for` loop variable and cannot be assigned
+
+// The loop variable is bound afresh for each iteration but cannot be
+// assigned: which iterations run is the clause's business. A `let` in the
+// body holds a value to change.
+
+define function main() => <integer>
+  let total = 0;
+  for (i from 0 below 3)
+    i := i + 1;
+    total := total + i
+  end;
+  total
+end;

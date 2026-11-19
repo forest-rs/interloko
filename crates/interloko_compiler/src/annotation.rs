@@ -574,6 +574,17 @@ fn collect_expr(expr: &ast::Expr, binders: &mut Vec<Binder>) {
             collect_expr(test, binders);
             collect_block(body, binders);
         }
+        Expr::For { clause, body, .. } => {
+            collect_expr(&clause.start, binders);
+            if let Some((_, bound)) = &clause.bound {
+                collect_expr(bound, binders);
+            }
+            if let Some(step) = &clause.step {
+                collect_expr(step, binders);
+            }
+            binders.push(Binder::from_let(&clause.binding));
+            collect_block(body, binders);
+        }
         Expr::Binary { lhs, rhs, .. }
         | Expr::Compare { lhs, rhs, .. }
         | Expr::Identical { lhs, rhs, .. } => {

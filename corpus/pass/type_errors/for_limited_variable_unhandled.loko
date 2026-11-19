@@ -1,0 +1,14 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 10 is not of type limited(<integer>, min: 0, max: 9)
+
+// A `for` variable with a limited type checks each iteration's value, as
+// a limited `let` checks its initializer: the eleventh iteration's 10 does
+// not fit.
+
+define function main() => <integer>
+  let total = 0;
+  for (digit :: limited(<integer>, min: 0, max: 9) from 0 to 10)
+    total := total + digit
+  end;
+  total
+end;

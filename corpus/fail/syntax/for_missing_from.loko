@@ -1,0 +1,11 @@
+// expect: diagnostic code syntax.expected-token
+
+// A numeric `for` clause starts its variable with `from`.
+
+define function main() => <integer>
+  let total = 0;
+  for (i below 3)
+    total := total + 1
+  end;
+  total
+end;

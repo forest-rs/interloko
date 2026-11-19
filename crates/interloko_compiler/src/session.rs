@@ -8088,6 +8088,25 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             dump_ast_expr(out, test, indent + 2);
             dump_ast_block(out, body, indent + 2);
         }
+        ast::Expr::For {
+            id, clause, body, ..
+        } => {
+            let _ = writeln!(out, "{id} for {}", clause.binding.name);
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "from");
+            dump_ast_expr(out, &clause.start, indent + 4);
+            if let Some((bound, value)) = &clause.bound {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "{}", bound.word());
+                dump_ast_expr(out, value, indent + 4);
+            }
+            if let Some(step) = &clause.step {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "by");
+                dump_ast_expr(out, step, indent + 4);
+            }
+            dump_ast_block(out, body, indent + 2);
+        }
         ast::Expr::Binary {
             id, op, lhs, rhs, ..
         } => {

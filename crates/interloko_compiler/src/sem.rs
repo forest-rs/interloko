@@ -4693,6 +4693,9 @@ struct FunctionContext {
     shared_names: Vec<String>,
     /// Shared enclosing locals a closure body assigns through its captures.
     assigned_captures: Vec<LocalId>,
+    /// Definitions of the `for` loop variables whose bodies are being
+    /// lowered, which are bound as `let`s but which `:=` may not assign.
+    loop_variables: Vec<DefinitionId>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -4729,6 +4732,7 @@ impl FunctionContext {
             assignable: Vec::new(),
             shared_names: Vec::new(),
             assigned_captures: Vec::new(),
+            loop_variables: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -4744,6 +4748,7 @@ impl FunctionContext {
             assignable: Vec::new(),
             shared_names: Vec::new(),
             assigned_captures: Vec::new(),
+            loop_variables: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -4801,9 +4806,17 @@ impl FunctionContext {
         }
     }
 
-    /// Lets `:=` assign `local`, a `let` local, which lives in a shared
-    /// cell when its name is one of [`Self::shared_names`].
+    /// Lets `:=` assign `local`, a `let` local, unless it is a `for` loop
+    /// variable, which lives in a shared cell when its name is one of
+    /// [`Self::shared_names`].
     fn allow_assignment(&mut self, local: LocalId) {
+        let loop_variable = self
+            .locals
+            .get(local.0 as usize)
+            .is_some_and(|binding| self.loop_variables.contains(&binding.definition));
+        if loop_variable {
+            return;
+        }
         self.assignable.push(local);
         let shared = self
             .locals
@@ -8128,6 +8141,9 @@ impl Lowering {
                 span,
                 ..
             } => self.lower_loop(ctx, *kind, test, body, *span),
+            ast::Expr::For {
+                clause, body, span, ..
+            } => self.lower_for(ctx, clause, body, *span),
             ast::Expr::Handle {
                 body,
                 restart,
@@ -11705,11 +11721,17 @@ impl Lowering {
         };
         if !ctx.assignable.contains(&local) {
             let _ = self.lower_expr(ctx, value);
-            let exit = ctx
+            let definition = ctx
                 .locals
                 .get(local.0 as usize)
-                .is_some_and(|local| ctx.exit_definitions.contains(&local.definition));
-            let kind = if exit {
+                .map(|local| local.definition);
+            let exit =
+                definition.is_some_and(|definition| ctx.exit_definitions.contains(&definition));
+            let loop_variable =
+                definition.is_some_and(|definition| ctx.loop_variables.contains(&definition));
+            let kind = if loop_variable {
+                "`for` loop variable"
+            } else if exit {
                 "block exit procedure"
             } else {
                 "parameter"
@@ -11864,6 +11886,244 @@ impl Lowering {
             test: Box::new(test),
             body: Box::new(body),
             span,
+        }
+    }
+
+    /// Lowers `for (name from start (to|below|above bound)? (by step)?) body
+    /// end` to a `while` loop over a counter only the loop can name.
+    ///
+    /// `start`, `bound` and `step` are evaluated once, in that order, into
+    /// hidden locals (a constant bound or step is used directly). Each
+    /// iteration binds `name` afresh to the counter, as `let name =
+    /// counter;` at the top of the body would, except that `:=` may not
+    /// assign it, so a closure may always capture it, capturing that
+    /// iteration's value. The counter then steps with checked `<integer>`
+    /// arithmetic. The loop produces no values.
+    fn lower_for(
+        &mut self,
+        ctx: &mut FunctionContext,
+        clause: &ast::NumericFor,
+        body: &ast::Block,
+        span: Span,
+    ) -> Expr {
+        let scope = ctx.scope_start();
+        let name = &clause.binding.name;
+        let mut statements = Vec::new();
+        let start = self.lower_for_integer(ctx, "from", &clause.start);
+        let counter = self.hidden_for_local(ctx, clause, "counter", start, &mut statements);
+        let bound = clause.bound.as_ref().map(|(kind, bound)| {
+            let value = self.lower_for_integer(ctx, kind.word(), bound);
+            (
+                *kind,
+                self.hidden_for_operand(ctx, clause, "bound", value, &mut statements),
+            )
+        });
+        let step = match &clause.step {
+            Some(step) => {
+                let value = self.lower_for_integer(ctx, "by", step);
+                self.hidden_for_operand(ctx, clause, "step", value, &mut statements)
+            }
+            None => Expr::ConstI64 {
+                value: 1,
+                span: clause.span,
+            },
+        };
+        let local = |local: LocalId| Expr::Local {
+            local,
+            result_kind: ValueKind::I64,
+            callable_signature: None,
+            span: clause.span,
+        };
+        let compare =
+            |lowering: &mut Self, ctx: &mut FunctionContext, op: ast::CompareOp, bound: &Expr| {
+                lowering.lower_compare(ctx, op, local(counter), bound.clone(), clause.span)
+            };
+        let test = match &bound {
+            None => Expr::ConstBool {
+                value: true,
+                span: clause.span,
+            },
+            Some((ast::ForBound::Below, bound)) => compare(self, ctx, ast::CompareOp::Lt, bound),
+            Some((ast::ForBound::Above, bound)) => compare(self, ctx, ast::CompareOp::Gt, bound),
+            Some((ast::ForBound::To, bound)) => match step {
+                Expr::ConstI64 { value, .. } if value < 0 => {
+                    compare(self, ctx, ast::CompareOp::Ge, bound)
+                }
+                Expr::ConstI64 { .. } => compare(self, ctx, ast::CompareOp::Le, bound),
+                // A step known only at run time picks the direction then.
+                _ => {
+                    let zero = Expr::ConstI64 {
+                        value: 0,
+                        span: clause.span,
+                    };
+                    let down = self.lower_compare(
+                        ctx,
+                        ast::CompareOp::Lt,
+                        step.clone(),
+                        zero,
+                        clause.span,
+                    );
+                    Expr::If {
+                        condition: Box::new(down),
+                        refinement: None,
+                        then_branch: Box::new(compare(self, ctx, ast::CompareOp::Ge, bound)),
+                        else_branch: Box::new(compare(self, ctx, ast::CompareOp::Le, bound)),
+                        span: clause.span,
+                    }
+                }
+            },
+        };
+        // The body is lowered as if it began `let name = counter;`, so the
+        // variable's annotation and range check are a `let`'s; only its
+        // assignability differs.
+        // Every local of one name shares a definition, so the variable is a
+        // loop variable only while its body is lowered: a later `let` of
+        // the same name is assignable.
+        let loop_variables = ctx.loop_variables.len();
+        ctx.loop_variables
+            .push(self.local_definition(clause.binding.definition, name));
+        let binding = ast::Let {
+            id: body.id,
+            definition: clause.binding.definition,
+            name: name.clone(),
+            type_annotation: clause.binding.type_annotation.clone(),
+            pattern: ast::LetPattern::Name(clause.binding.clone()),
+            value: ast::Expr::Name {
+                id: body.id,
+                name: self.hidden_for_name(clause, "counter"),
+                span: clause.binding.span,
+            },
+            span: clause.binding.span,
+        };
+        let mut iteration = body.clone();
+        iteration
+            .statements
+            .insert(0, ast::Statement::Let(Box::new(binding)));
+        let body_scope = ctx.scope_start();
+        let mut lowered = self.lower_block(ctx, &iteration, None);
+        ctx.hide_locals_from(body_scope);
+        ctx.loop_variables.truncate(loop_variables);
+        let result = core::mem::replace(
+            &mut lowered.result,
+            Expr::AssignLocal {
+                local: counter,
+                result_kind: ValueKind::I64,
+                callable_signature: None,
+                value: Box::new(Expr::Binary {
+                    site: None,
+                    op: BinaryOp::Add,
+                    kind: NumericKind::Integer,
+                    lhs: Box::new(local(counter)),
+                    rhs: Box::new(step),
+                    span: clause.span,
+                }),
+                span: clause.span,
+            },
+        );
+        lowered.statements.push(Statement::Expr(result));
+        ctx.note_assignment(counter);
+        ctx.hide_locals_from(scope);
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements,
+                result: Expr::Loop {
+                    kind: LoopKind::While,
+                    test: Box::new(test),
+                    body: Box::new(lowered),
+                    span,
+                },
+                span,
+            }),
+            cleanup: None,
+            span,
+        }
+    }
+
+    /// Lowers a numeric `for` clause's `start`, `bound` or `step`, which
+    /// must be an `<integer>` (an `<i32>` or `<u32>` widens).
+    fn lower_for_integer(
+        &mut self,
+        ctx: &mut FunctionContext,
+        word: &str,
+        expr: &ast::Expr,
+    ) -> Expr {
+        let value = self.lower_expr_expected(ctx, expr, Some(ValueKind::I64));
+        let kinds = self.expr_kinds(&value);
+        let kind = self.expr_kind(&value);
+        let single = kinds.len() == 1 || result_kinds_contain_error(&kinds);
+        if !single || !self.kinds_match(ValueKind::I64, kind) {
+            let actual = if single {
+                self.kind_name(kind)
+            } else {
+                self.result_kinds_name(&kinds)
+            };
+            ctx.diagnostics.push(
+                Diagnostic::error(expr.span(), DiagnosticCode::ForClauseTypeMismatch)
+                    .with_arg(DiagnosticArg::text("word", word))
+                    .with_arg(DiagnosticArg::text("expected", "<integer>"))
+                    .with_arg(DiagnosticArg::text("actual", actual)),
+            );
+            return Expr::Error { span: expr.span() };
+        }
+        match NumericKind::of(kind) {
+            Some(from) => promote_operand(value, from, NumericKind::Integer),
+            None => value,
+        }
+    }
+
+    /// The name of one of a `for` loop's hidden locals. A `#` cannot appear
+    /// in a source name, so no source can name it.
+    fn hidden_for_name(&self, clause: &ast::NumericFor, role: &str) -> String {
+        format!("{}#for-{role}", clause.binding.name)
+    }
+
+    /// Binds `value` to a new hidden `<integer>` local of the `for` loop
+    /// `clause`, evaluated once before the loop.
+    fn hidden_for_local(
+        &mut self,
+        ctx: &mut FunctionContext,
+        clause: &ast::NumericFor,
+        role: &str,
+        value: Expr,
+        statements: &mut Vec<Statement>,
+    ) -> LocalId {
+        let name = self.hidden_for_name(clause, role);
+        let local = ctx.add_local(
+            self.local_definition(clause.binding.definition, &name),
+            name,
+            ValueKind::I64,
+            None,
+            clause.span,
+        );
+        statements.push(Statement::Let(Let {
+            local,
+            locals: vec![local],
+            value,
+            span: clause.span,
+        }));
+        local
+    }
+
+    /// A `for` loop's bound or step as the loop reads it: a constant as it
+    /// is, anything else from a hidden local evaluated once.
+    fn hidden_for_operand(
+        &mut self,
+        ctx: &mut FunctionContext,
+        clause: &ast::NumericFor,
+        role: &str,
+        value: Expr,
+        statements: &mut Vec<Statement>,
+    ) -> Expr {
+        if matches!(value, Expr::ConstI64 { .. } | Expr::Error { .. }) {
+            return value;
+        }
+        let local = self.hidden_for_local(ctx, clause, role, value, statements);
+        Expr::Local {
+            local,
+            result_kind: ValueKind::I64,
+            callable_signature: None,
+            span: clause.span,
         }
     }
 

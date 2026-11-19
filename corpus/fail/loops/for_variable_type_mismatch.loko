@@ -1,0 +1,13 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.local-type-mismatch
+
+// The variable holds the counter, an `<integer>`; an annotation that does
+// not hold `<integer>`s is an error, as it is for a `let`.
+
+define function main() => <integer>
+  let total = 0;
+  for (i :: <string> from 0 below 3)
+    total := total + 1
+  end;
+  total
+end;

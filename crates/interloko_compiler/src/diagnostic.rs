@@ -249,6 +249,8 @@ pub enum DiagnosticCode {
     /// A method of a built-in collection generic specializes on a kernel
     /// class the generic already has a kernel method for.
     CollectionMethodOverridesKernel,
+    /// A numeric `for` clause's start, bound or step is not an `<integer>`.
+    ForClauseTypeMismatch,
     /// A slot default `init-value:` has the wrong type.
     SlotDefaultTypeMismatch,
     /// A slot's `init-value` binds locals, which slot defaults cannot hold yet.
@@ -454,6 +456,7 @@ impl DiagnosticCode {
         Self::DuplicateKeywordArgument,
         Self::CollectionDefaultUnsupported,
         Self::CollectionMethodOverridesKernel,
+        Self::ForClauseTypeMismatch,
         Self::SlotDefaultTypeMismatch,
         Self::SlotDefaultBindsLocals,
         Self::MissingRequiredInitKeyword,
@@ -604,6 +607,7 @@ impl DiagnosticCode {
             Self::DuplicateKeywordArgument => "sem.duplicate-keyword-argument",
             Self::CollectionDefaultUnsupported => "sem.collection-default-unsupported",
             Self::CollectionMethodOverridesKernel => "sem.collection-method-overrides-kernel",
+            Self::ForClauseTypeMismatch => "sem.for-clause-type-mismatch",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
             Self::SlotDefaultBindsLocals => "sem.slot-default-binds-locals",
             Self::MissingRequiredInitKeyword => "sem.missing-required-init-keyword",
@@ -755,6 +759,7 @@ impl DiagnosticCode {
             "sem.duplicate-keyword-argument" => Self::DuplicateKeywordArgument,
             "sem.collection-default-unsupported" => Self::CollectionDefaultUnsupported,
             "sem.collection-method-overrides-kernel" => Self::CollectionMethodOverridesKernel,
+            "sem.for-clause-type-mismatch" => Self::ForClauseTypeMismatch,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,
             "sem.slot-default-binds-locals" => Self::SlotDefaultBindsLocals,
             "sem.missing-required-init-keyword" => Self::MissingRequiredInitKeyword,
