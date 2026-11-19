@@ -399,6 +399,32 @@ fn slot_setter_name(slot_name: &str) -> String {
     format!("{slot_name}-setter")
 }
 
+/// Whether `name` is a built-in function that a call resolves by name and
+/// that has no value of its own: the float library, the text functions,
+/// the integer divisions and bitwise functions, the other intrinsics, and
+/// the forms written as calls, such as `apply` and `make`. The built-in
+/// collection generics, such as `size`, are values and are not among them.
+fn names_built_in_function(name: &str) -> bool {
+    !name.starts_with('%')
+        && (FloatBuiltin::from_name(name).is_some()
+            || text_functions_for_name(name).is_some()
+            || Rounding::from_name(name).is_some()
+            || BinaryOp::bitwise_function(name).is_some()
+            || intrinsic_for_name(name).is_some()
+            || matches!(
+                name,
+                "apply"
+                    | "values"
+                    | "class-of"
+                    | "copy-sequence"
+                    | "starts-with?"
+                    | "make"
+                    | "signal"
+                    | "as"
+                    | "limited"
+            ))
+}
+
 fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
     Some(match name {
         "object-class" => Intrinsic::ObjectClass,
@@ -9515,6 +9541,10 @@ impl Lowering {
             }
             AccessorResolution::None => {
                 let diagnostic = match self.spaced_hyphen_suggestion(ctx, name) {
+                    _ if names_built_in_function(name) => {
+                        Diagnostic::error(span, DiagnosticCode::BuiltInFunctionValue)
+                            .with_arg(DiagnosticArg::text("function", name))
+                    }
                     Some(spaced) => {
                         Diagnostic::error(span, DiagnosticCode::UnresolvedHyphenatedLocal)
                             .with_arg(DiagnosticArg::text("local", name))

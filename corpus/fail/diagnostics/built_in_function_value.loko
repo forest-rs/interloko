@@ -1,0 +1,13 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.built-in-function-value
+// expect: diagnostic contains `digit?` is a built-in function, which is not a value
+// expect: diagnostic contains method (…) digit?(…) end
+
+// A call resolves a built-in function such as `digit?` by name, but it has
+// no value to pass, so naming it as a value says so rather than reporting
+// an unresolved local. A method that calls it is a value.
+
+define function main() => <integer>
+  let test? = digit?;
+  0
+end;

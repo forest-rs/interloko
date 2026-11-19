@@ -36,6 +36,7 @@
 "sem.unresolved-function-or-generic" = "unresolved function or generic `{ $callee }`"
 "sem.unresolved-local" = "unresolved local `{ $local }`"
 "sem.unresolved-hyphenated-local" = "unresolved local `{ $local }`; a hyphen is part of a name, so did you mean `{ $spaced }`?"
+"sem.built-in-function-value" = "`{ $function }` is a built-in function, which is not a value; wrap a call of it in a method, as in `method (…) { $function }(…) end`"
 "sem.duplicate-local" = "duplicate local `{ $local }`"
 "sem.ambiguous-callable" = "accessor `{ $accessor }` is ambiguous as a value"
 "sem.function-arity-mismatch" = "function `{ $callee }` expects { $expected_count } arguments but got { $actual_count }"
