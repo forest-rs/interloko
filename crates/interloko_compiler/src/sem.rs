@@ -2005,6 +2005,25 @@ fn generic_param_boxes_scalars_in<'a>(
         .any(|class| class == OBJECT_CLASS_ID || is_unboxed_value_class_in(classes, class))
 }
 
+/// Makes `block` produce no values, as a `=> ()` body does in Dylan: its
+/// result expression still runs, for its effects, and what it produces is
+/// discarded.
+fn discard_results(block: &mut Block) {
+    if matches!(&block.result, Expr::Values { values, .. } if values.is_empty()) {
+        return;
+    }
+    let span = block.result.span();
+    let result = core::mem::replace(
+        &mut block.result,
+        Expr::Values {
+            values: Vec::new(),
+            result_kinds: Vec::new(),
+            span,
+        },
+    );
+    block.statements.push(Statement::Expr(result));
+}
+
 /// Returns the result category of a float builtin call: `<boolean>` for
 /// predicates, otherwise the arguments' shared float format.
 fn float_call_kind(
@@ -7439,6 +7458,9 @@ impl Lowering {
             None => (None, None, Vec::new()),
         };
         let mut body = self.lower_block(&mut ctx, &method.body, return_annotation.as_deref());
+        if return_annotation.as_deref() == Some(&[]) {
+            discard_results(&mut body);
+        }
         let body_kinds = self.expr_kinds(&body.result);
         let body_callable_sigs = self.expr_result_callable_signatures(&body.result);
         let result_kinds = return_annotation
@@ -7607,6 +7629,9 @@ impl Lowering {
             .as_ref()
             .map_or_else(Vec::new, |symbol| symbol.return_callable_sigs.clone());
         let mut body = self.lower_block(&mut ctx, &function.body, return_annotation.as_deref());
+        if return_annotation.as_deref() == Some(&[]) {
+            discard_results(&mut body);
+        }
         let body_kinds = self.expr_kinds(&body.result);
         let body_callable_sigs = self.expr_result_callable_signatures(&body.result);
         let result_kinds = return_annotation
@@ -8838,6 +8863,9 @@ impl Lowering {
             };
         let mut lowered_body =
             self.lower_block(&mut closure_ctx, body, return_annotation.as_deref());
+        if return_annotation.as_deref() == Some(&[]) {
+            discard_results(&mut lowered_body);
+        }
         let body_kinds = self.expr_kinds(&lowered_body.result);
         let body_callable_sigs = self.expr_result_callable_signatures(&lowered_body.result);
         let result_kinds = return_annotation

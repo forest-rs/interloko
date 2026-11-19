@@ -1,0 +1,29 @@
+// expect: run 23
+// expect: diagnostics 0
+
+// A function, method or closure declared `=> ()` returns no values: as in
+// Dylan, its body's last expression still runs, and what it produces, here
+// the value of an assignment, is discarded.
+
+define class <counter> (<object>)
+  slot n :: <integer>;
+end;
+
+define function bump(c :: <counter>) => ()
+  c.n := c.n + 1
+end;
+
+define generic scale(c :: <counter>) => ();
+
+define method scale(c :: <counter>) => ()
+  c.n := c.n * 10
+end;
+
+define function main() => <integer>
+  let c = make(<counter>, n: 1);
+  bump(c);
+  scale(c);
+  let add-three = function (x :: <counter>) => () x.n := x.n + 3 end;
+  add-three(c);
+  c.n
+end;
