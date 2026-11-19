@@ -1,0 +1,20 @@
+// typing: strict strict.overflow=proved
+// expect: run blocked
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-overflow
+
+// With overflow held to proof, a `for` whose bound typing cannot limit
+// leaves its counter's step unproved, as the same `while` loop would; a
+// limited bound proves it (see `pass/strict/for_ranges.loko`).
+
+define function last-to(limit :: <integer>) => <integer>
+  let last = 0;
+  for (i from 0 to limit)
+    last := i
+  end;
+  last
+end;
+
+define function main() => <integer>
+  last-to(3)
+end;

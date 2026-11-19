@@ -1,0 +1,17 @@
+// expect: runtime code type-error.overflow
+// expect: run reports type-error.overflow: <integer> arithmetic on #[9223372036854775807, 1] overflows
+
+// The counter steps with checked `<integer>` arithmetic after each
+// iteration, before the bound is tested, so a loop through the largest
+// `<integer>` signals an overflow after its last iteration instead of
+// wrapping around and running forever.
+
+define constant $largest :: <integer> = 9223372036854775807;
+
+define function main() => <integer>
+  let iterations = 0;
+  for (i from $largest - 1 to $largest)
+    iterations := iterations + 1
+  end;
+  iterations
+end;

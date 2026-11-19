@@ -1,0 +1,29 @@
+// expect: run 12334
+// expect: diagnostics 0
+
+// The start, bound and step are each evaluated once, before the first
+// iteration and in that order; changing what they were computed from
+// during the loop changes nothing.
+
+define class <tally> (<object>)
+  slot calls :: <integer>, init-value: 0;
+  slot order :: <integer>, init-value: 0;
+end;
+
+define function note(t :: <tally>, digit :: <integer>, value :: <integer>) => <integer>
+  t.calls := t.calls + 1;
+  t.order := t.order * 10 + digit;
+  value
+end;
+
+define function main() => <integer>
+  let t = make(<tally>);
+  let limit = 4;
+  let iterations = 0;
+  for (i from note(t, 1, 0) below note(t, 2, limit) by note(t, 3, 1))
+    limit := 100;
+    iterations := iterations + 1
+  end;
+  // Called in the order 1, 2, 3, three calls in all, and four iterations.
+  t.order * 100 + t.calls * 10 + iterations
+end;

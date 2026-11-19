@@ -89,6 +89,8 @@ pub enum TokenKind {
     While,
     /// `until`.
     Until,
+    /// `for`.
+    For,
     /// `end`.
     End,
     /// User identifier.
@@ -221,6 +223,7 @@ impl TokenKind {
             | Self::Cleanup
             | Self::While
             | Self::Until
+            | Self::For
             | Self::End
             | Self::Ident
             | Self::Number
@@ -299,6 +302,7 @@ impl Token {
             | TokenKind::Cleanup
             | TokenKind::While
             | TokenKind::Until
+            | TokenKind::For
             | TokenKind::End => Some(self.span),
             TokenKind::Symbol => Some(Span::new(start + 1, end)),
             TokenKind::Keyword => Some(Span::new(start + 2, end)),
@@ -425,6 +429,10 @@ pub enum CstKind {
     WhileExpr,
     /// `until (test) body end` loop.
     UntilExpr,
+    /// `for (clause) body end` loop.
+    ForExpr,
+    /// Numeric clause of a `for` loop: `i from a to b by s`.
+    NumericForClause,
     /// Exit procedure name bound by a `block` expression.
     BlockExitName,
     /// `when … =>` guard of a restart clause.
@@ -764,6 +772,8 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::SelectClause => 62,
         CstKind::IndexExpr => 63,
         CstKind::CharacterExpr => 65,
+        CstKind::ForExpr => 66,
+        CstKind::NumericForClause => 67,
     }
 }
 
@@ -831,6 +841,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Otherwise => 57,
         TokenKind::While => 60,
         TokenKind::Until => 59,
+        TokenKind::For => 64,
     }
 }
 
@@ -1075,6 +1086,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "cleanup" => TokenKind::Cleanup,
                     "while" => TokenKind::While,
                     "until" => TokenKind::Until,
+                    "for" => TokenKind::For,
                     "end" => TokenKind::End,
                     _ => TokenKind::Ident,
                 }

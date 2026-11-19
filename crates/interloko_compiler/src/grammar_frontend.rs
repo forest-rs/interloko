@@ -3126,7 +3126,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "expression",
-            "handle-expression | block-expression | begin-expression | while-expression | until-expression | if-expression | unless-expression | case-expression | select-expression | assignment-expression",
+            "handle-expression | block-expression | begin-expression | while-expression | until-expression | for-expression | if-expression | unless-expression | case-expression | select-expression | assignment-expression",
             "syntax.rs:Parser::parse_expr",
         ),
         (
@@ -3183,6 +3183,31 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "until-expression",
             "`until` `(` expression `)` body `end`",
             "base_loko_primary::BaseLokoCstBuilder::build_loop",
+        ),
+        (
+            "for-expression",
+            "`for` `(` numeric-for-clause `)` body `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_for",
+        ),
+        (
+            "numeric-for-clause",
+            "let-name-binding `from` expression for-bound? for-step?",
+            "base_loko_primary::BaseLokoCstBuilder::build_for",
+        ),
+        (
+            "for-bound",
+            "for-bound-word expression",
+            "base_loko_primary::BaseLokoCstBuilder::build_for",
+        ),
+        (
+            "for-bound-word",
+            "`to` | `below` | `above`",
+            "base_loko_primary::BaseLokoCstBuilder::build_for",
+        ),
+        (
+            "for-step",
+            "`by` expression",
+            "base_loko_primary::BaseLokoCstBuilder::build_for",
         ),
         (
             "if-expression",
@@ -3962,6 +3987,8 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::BeginExpr => Some("begin-expression"),
         CstKind::WhileExpr => Some("while-expression"),
         CstKind::UntilExpr => Some("until-expression"),
+        CstKind::ForExpr => Some("for-expression"),
+        CstKind::NumericForClause => Some("numeric-for-clause"),
         CstKind::BlockExitName => Some("block-exit-name"),
         CstKind::RestartGuard => Some("restart-guard"),
         CstKind::CleanupClause => Some("cleanup-clause"),
@@ -4402,7 +4429,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 73);
+        assert_eq!(grammar.effective_rules.len(), 78);
 
         assert!(
             !records

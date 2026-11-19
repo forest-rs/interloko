@@ -456,6 +456,47 @@ pub enum LoopKind {
     Until,
 }
 
+/// Where a numeric `for` clause stops, and which way it counts.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ForBound {
+    /// `to bound`: through `bound`, counting up for a step of zero or more
+    /// and down for a negative one.
+    To,
+    /// `below bound`: while the variable is less than `bound`.
+    Below,
+    /// `above bound`: while the variable is greater than `bound`.
+    Above,
+}
+
+impl ForBound {
+    /// The word that introduces the bound.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::To => "to",
+            Self::Below => "below",
+            Self::Above => "above",
+        }
+    }
+}
+
+/// The clause of a numeric `for` loop:
+/// `name from start (to|below|above bound)? (by step)?`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NumericFor {
+    /// The iteration variable, bound afresh for each iteration.
+    pub binding: LetBinding,
+    /// First value, evaluated once.
+    pub start: Box<Expr>,
+    /// Where counting stops, evaluated once; without one the loop counts
+    /// until something exits it.
+    pub bound: Option<(ForBound, Box<Expr>)>,
+    /// Amount added after each iteration, evaluated once; `1` when absent.
+    pub step: Option<Box<Expr>>,
+    /// Source span of the clause.
+    pub span: Span,
+}
+
 /// Local binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Let {
@@ -761,6 +802,19 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Numeric loop, `for (i from a below b by s) body end`. It produces no
+    /// values.
+    For {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// The loop's clause.
+        clause: NumericFor,
+        /// Loop body; its locals, the iteration variable's binding among
+        /// them, are scoped to one iteration.
+        body: Box<Block>,
+        /// Source span.
+        span: Span,
+    },
     /// Binary expression.
     Binary {
         /// Stable-ish AST node identity.
@@ -1014,6 +1068,16 @@ impl Expr {
                 visit(test);
                 body.for_each_expr(visit);
             }
+            Self::For { clause, body, .. } => {
+                visit(&clause.start);
+                if let Some((_, bound)) = &clause.bound {
+                    visit(bound);
+                }
+                if let Some(step) = &clause.step {
+                    visit(step);
+                }
+                body.for_each_expr(visit);
+            }
             Self::Vector { elements, .. } => elements.iter().for_each(visit),
             Self::Call { args, keywords, .. } => {
                 args.iter().for_each(&mut visit);
@@ -1148,6 +1212,7 @@ impl Expr {
             | Self::SlotAssign { id, .. }
             | Self::Assign { id, .. }
             | Self::Loop { id, .. }
+            | Self::For { id, .. }
             | Self::Binary { id, .. }
             | Self::UnaryMinus { id, .. }
             | Self::Compare { id, .. }
@@ -1187,6 +1252,7 @@ impl Expr {
             | Self::SlotAssign { span, .. }
             | Self::Assign { span, .. }
             | Self::Loop { span, .. }
+            | Self::For { span, .. }
             | Self::Binary { span, .. }
             | Self::UnaryMinus { span, .. }
             | Self::Compare { span, .. }
@@ -2099,6 +2165,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::BlockExpr | CstKind::BeginExpr => self.lower_block_expr(node),
             CstKind::WhileExpr => self.lower_loop(node, LoopKind::While),
             CstKind::UntilExpr => self.lower_loop(node, LoopKind::Until),
+            CstKind::ForExpr => self.lower_for(node),
             _ => Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -3297,6 +3364,93 @@ impl<'tree> Lowering<'tree> {
         }
     }
 
+    fn lower_for(&mut self, node: &CstNode) -> Expr {
+        let error = |lowering: &Self| Expr::Error {
+            id: lowering.ast_id(node),
+            span: node.span,
+        };
+        let mut clause = None;
+        let mut body = None;
+        for child in &node.children {
+            let CstElement::Node(child_node) = child else {
+                continue;
+            };
+            match child_node.kind {
+                CstKind::NumericForClause => clause = self.lower_numeric_for(child_node),
+                CstKind::Body => body = Some(self.lower_block(child_node)),
+                _ => {}
+            }
+        }
+        let (Some(clause), Some(body)) = (clause, body) else {
+            return error(self);
+        };
+        Expr::For {
+            id: self.ast_id(node),
+            clause,
+            body: Box::new(body),
+            span: node.span,
+        }
+    }
+
+    /// Lowers `name from start (to|below|above bound)? (by step)?`. The
+    /// words stay direct tokens of the clause, so each expression belongs
+    /// to the word before it.
+    fn lower_numeric_for(&mut self, node: &CstNode) -> Option<NumericFor> {
+        let mut binding = None;
+        let mut word = None;
+        let (mut start, mut bound, mut step) = (None, None, None);
+        for child in &node.children {
+            match child {
+                CstElement::Token(index) => {
+                    let token = self.tree.tokens[*index];
+                    if token.kind == TokenKind::DoubleColon {
+                        if let Some(LetBinding {
+                            type_annotation: annotation @ None,
+                            ..
+                        }) = &mut binding
+                        {
+                            *annotation = self.type_annotation_after(node, *index);
+                        }
+                        continue;
+                    }
+                    if token.kind != TokenKind::Ident {
+                        continue;
+                    }
+                    let text = token.text(&self.tree.source);
+                    if binding.is_none() {
+                        binding = Some(LetBinding {
+                            definition: self.definition(DefinitionKind::Local, text, ""),
+                            name: text.to_string(),
+                            type_annotation: None,
+                            span: token.span,
+                        });
+                    } else if matches!(text, "from" | "to" | "below" | "above" | "by") {
+                        word = Some(text);
+                    }
+                }
+                CstElement::Node(expr) if !expr.kind.is_role() => {
+                    let value = Box::new(self.lower_expr(expr));
+                    match word.take() {
+                        Some("from") => start = Some(value),
+                        Some("to") => bound = Some((ForBound::To, value)),
+                        Some("below") => bound = Some((ForBound::Below, value)),
+                        Some("above") => bound = Some((ForBound::Above, value)),
+                        Some("by") => step = Some(value),
+                        _ => {}
+                    }
+                }
+                CstElement::Node(_) => {}
+            }
+        }
+        Some(NumericFor {
+            binding: binding?,
+            start: start?,
+            bound,
+            step,
+            span: node.span,
+        })
+    }
+
     fn lower_block_expr(&mut self, node: &CstNode) -> Expr {
         let mut body = None;
         let mut cleanup = None;
@@ -4127,6 +4281,56 @@ mod tests {
         assert!(matches!(&until_body.result, Expr::Assign { .. }));
         assert!(body.assigns("n"));
         assert!(!body.assigns("m"));
+    }
+
+    #[test]
+    fn numeric_for_clauses_keep_each_expression_with_its_word() {
+        let tree = parse(
+            "define function main() => <integer>\n  \
+             let n = 0;\n  \
+             for (i :: <integer> from 1 to n + 2 by -1) n := n + i end;\n  \
+             for (from from to above by) n := from end;\n  \
+             for (k from 0) n := k end;\n  \
+             n\nend;",
+        );
+        assert_eq!(tree.diagnostics, Vec::new());
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        let statements = &module.functions[0].body.statements;
+        let [
+            Statement::Let(_),
+            Statement::Expr(Expr::For { clause: first, .. }),
+            Statement::Expr(Expr::For { clause: second, .. }),
+            Statement::Expr(Expr::For { clause: third, .. }),
+        ] = statements.as_slice()
+        else {
+            panic!("unexpected statements {statements:?}");
+        };
+        assert_eq!(first.binding.name, "i");
+        assert!(first.binding.type_annotation.is_some());
+        assert!(matches!(*first.start, Expr::Number { value: 1, .. }));
+        assert!(matches!(
+            first
+                .bound
+                .as_ref()
+                .map(|(bound, value)| (*bound, &**value)),
+            Some((ForBound::To, Expr::Binary { .. }))
+        ));
+        assert!(matches!(
+            first.step.as_deref(),
+            Some(Expr::Number { value: -1, .. } | Expr::UnaryMinus { .. })
+        ));
+        // The words are not reserved: they name locals too, and an
+        // expression after a word belongs to that word.
+        assert_eq!(second.binding.name, "from");
+        assert!(matches!(&*second.start, Expr::Name { name, .. } if name == "to"));
+        assert!(matches!(
+            second.bound.as_ref().map(|(bound, value)| (*bound, &**value)),
+            Some((ForBound::Above, Expr::Name { name, .. })) if name == "by"
+        ));
+        assert!(second.step.is_none());
+        assert_eq!(third.binding.name, "k");
+        assert!(third.bound.is_none() && third.step.is_none());
     }
 
     #[test]

@@ -1,0 +1,21 @@
+// expect: run 500000500000
+// expect: diagnostics 0
+// expect: dump ast contains for i
+// expect: dump sem contains loop while
+// expect: dump lowered contains jmp
+
+// A numeric `for` counts from its start while the variable is below the
+// bound, adding 1 after each iteration. It lowers to a `while` loop over a
+// counter the body cannot name, so it runs in one frame like any loop.
+
+define function sum-to(n :: <integer>) => <integer>
+  let total = 0;
+  for (i from 1 below n + 1)
+    total := total + i
+  end;
+  total
+end;
+
+define function main() => <integer>
+  sum-to(1000000)
+end;

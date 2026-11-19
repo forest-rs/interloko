@@ -96,6 +96,7 @@
 "sem.duplicate-keyword-argument" = "`{ $keyword }:` is given more than once"
 "sem.collection-default-unsupported" = "`{ $function }` with `default:` needs a collection known to be one of { $expected }, not { $actual }, until methods can take keyword parameters"
 "sem.collection-method-overrides-kernel" = "`{ $function }` already has the kernel's method for { $class }; a method for it or a subclass would override it"
+"sem.for-clause-type-mismatch" = "`for` clause `{ $word }` expects { $expected } but has { $actual }; a numeric `for` counts in <integer>s"
 "sem.slot-default-type-mismatch" = "slot `{ $slot }` expects { $expected } but default init-value has { $actual }"
 "sem.slot-default-binds-locals" = "slot `{ $slot }`'s init-value binds the local `{ $local }`; slot defaults cannot bind locals yet, so define a function and call it"
 "sem.missing-required-init-keyword" = "missing required init keyword `{ $keyword }` for slot `{ $slot }`"

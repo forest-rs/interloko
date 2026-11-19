@@ -1,0 +1,33 @@
+// expect: run 1129
+// expect: diagnostics 0
+
+// Each iteration binds the variable afresh, as a `let` at the top of the
+// body would, but one `:=` cannot assign, so a closure may always capture
+// it, capturing that iteration's value.
+
+define function main() => <integer>
+  let total = 0;
+  // Each closure adds the `j` of the iteration that made it.
+  for (j from 1 to 3)
+    let add-j = function (n :: <integer>) => <integer> n + j * 10 end;
+    total := add-j(total)
+  end;
+  // 60 so far. A `for` variable may be annotated like a `let`.
+  for (k :: limited(<integer>, min: 0, max: 99) from 0 below 10)
+    total := total + k
+  end;
+  // 105 so far. Locals bound in the body are scoped to one iteration.
+  for (m from 1 to 2)
+    let doubled = m * 2;
+    total := total + doubled
+  end;
+  // 111. Without a bound the loop runs until something exits it.
+  // 111 + 100 + 203 + 306 + 409
+  block (done)
+    for (n from 100 by 103)
+      if (n > 500) done(total) end;
+      total := total + n
+    end;
+    0
+  end
+end;

@@ -500,6 +500,7 @@ impl BaseLokoCstProjector<'_> {
             "restart-clause" => self.build_restart(node),
             "while-expression" => self.build_loop(node, CstKind::WhileExpr),
             "until-expression" => self.build_loop(node, CstKind::UntilExpr),
+            "for-expression" => self.build_for(node),
             "if-expression" => self.build_if(node),
             "unless-expression" => self.build_unless(node),
             "case-expression" => self.build_case(node),
@@ -649,6 +650,54 @@ impl BaseLokoCstProjector<'_> {
             })
             .collect::<Vec<_>>();
         self.node_with_nested(kind, node, nested)
+    }
+
+    /// Builds `for (clause) body end`: the clause, then the body.
+    fn build_for(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let nested = node
+            .children
+            .iter()
+            .filter_map(|child| {
+                if child.is_rule("numeric-for-clause") {
+                    Some(self.build_numeric_for_clause(child))
+                } else if child.is_rule("body") {
+                    Some(self.build_body(child))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        self.node_with_nested(CstKind::ForExpr, node, nested)
+    }
+
+    /// Builds `name from start (to|below|above bound)? (by step)?`: the
+    /// variable's name and type roles, and each expression after the word
+    /// that introduces it, which stays a direct token.
+    fn build_numeric_for_clause(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let mut nested = Vec::new();
+        for child in &node.children {
+            if child.is_rule("expression") {
+                nested.push(self.build_expr(child));
+            } else if child.is_rule("for-bound") || child.is_rule("for-step") {
+                nested.extend(
+                    child
+                        .children
+                        .iter()
+                        .filter(|part| part.is_rule("expression"))
+                        .map(|expr| self.build_expr(expr)),
+                );
+            }
+        }
+        let mut roles = Vec::new();
+        if let Some(binding) = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("let-name-binding"))
+        {
+            self.collect_role_nodes(binding, "let-name", CstKind::LetName, &mut roles);
+            self.collect_annotation_type_roles(binding, &mut roles);
+        }
+        self.node_with_nested_and_roles(CstKind::NumericForClause, node, nested, roles)
     }
 
     /// Builds `if (test) body elseif-clause* else-clause? end`: the test and
@@ -1230,6 +1279,7 @@ impl BaseLokoCstProjector<'_> {
                 | "begin-expression"
                 | "while-expression"
                 | "until-expression"
+                | "for-expression"
                 | "if-expression"
                 | "unless-expression"
                 | "case-expression"

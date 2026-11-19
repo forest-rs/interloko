@@ -1,0 +1,18 @@
+// expect: run 876
+// expect: diagnostics 0
+
+// Nested `for` loops each bind their own variable, and an inner loop's
+// bound may use the outer variable. Sequential loops may reuse a name.
+
+define function main() => <integer>
+  let total = 0;
+  for (i from 1 to 9)
+    for (j :: <integer> from 0 below i)
+      total := total + i * j
+    end
+  end;
+  // The sum over i of i * i * (i - 1) / 2 for 1..9 is 870.
+  for (i from 1 to 3) total := total + i end;
+  for (i from 10 to 1 by -1) total := total + i * 0 end;
+  total
+end;

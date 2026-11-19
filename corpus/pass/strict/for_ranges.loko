@@ -1,0 +1,22 @@
+// typing: strict strict.overflow=proved
+// expect: run 99
+// expect: diagnostics 0
+// expect: dump typing contains range proved rule=range-within
+// expect: dump typing contains overflow proved rule=overflow-impossible
+
+// Typing sees through a numeric `for` as through the `while` it lowers
+// to: the variable is below `limit`, at most 100, on every iteration, so
+// storing it in `last` is proved, and so is the counter's step not
+// overflowing, even with overflow held to proof.
+
+define function last-below(limit :: limited(<integer>, min: 0, max: 100)) => <integer>
+  let last :: limited(<integer>, min: 0, max: 100) = 0;
+  for (i from 0 below limit)
+    last := i
+  end;
+  last
+end;
+
+define function main() => <integer>
+  last-below(100)
+end;

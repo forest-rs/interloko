@@ -143,6 +143,19 @@ The current slices include:
   one of them. Without `otherwise`, a target that matches no key signals a
   `<select-error>` holding it, so unlike `if` and `case` the arms keep
   their values;
+- numeric `for` loops: `for (i from a below b) body end`, with `to b`
+  (through `b`, counting down when the step is negative) or `above b`
+  instead of `below`, an optional `by step` (1 by default), and no bound
+  at all for a loop something else exits. `a`, `b` and the step are
+  `<integer>`s, each evaluated once before the first iteration. The loop
+  lowers to a `while` over a counter the body cannot name, so typing and
+  code generation treat it as that loop, and it produces no values. Each
+  iteration binds `i` afresh as a `let` would, `i :: type` included, but
+  `:=` cannot assign it, so a closure may always capture it (that
+  iteration's value). The counter steps with checked arithmetic after each iteration, so
+  a loop through the largest `<integer>` signals `type-error.overflow`
+  after its last iteration. Iterating collections, `for (x in c)`, waits
+  for the iteration protocol;
 - Dylan-style names, where a hyphen is always a name character: `x-1` and
   `a-b` are single names, so subtraction is spaced (`x - 1`, `a -% b`),
   and `?` and `!` may end one (`digit?`, `add!`);

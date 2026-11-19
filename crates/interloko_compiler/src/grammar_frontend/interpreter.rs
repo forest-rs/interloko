@@ -41,6 +41,7 @@ const LOKO_RESERVED_WORDS: &[&str] = &[
     "begin",
     "while",
     "until",
+    "for",
     "end",
 ];
 
