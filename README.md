@@ -229,9 +229,11 @@ The current slices include:
   then the default of each keyword it does not pass in declaration order;
   a default may read the required parameters and the keywords declared
   before it. A keyword without a type is an `<object>`, and one without a
-  default is `$unsupplied`, a kernel constant tested with `==`, when a call
-  does not pass it (the name is reserved, so no definition can rebind it);
-  any other type needs a default. Each default is a
+  default is `$unsupplied` when a call does not pass it: one kernel object
+  (a direct `<object>` instance) that no other value is `==`, so passing
+  any value, the symbol `#unsupplied` included, counts as passing it, and
+  the name is reserved, so no definition can rebind it; any other type
+  needs a default. Each default is a
   hidden function, `scale #key by`, held to strict typing when its owner
   is, that callers which do not pass the keyword call, so a typed call is a direct call with every keyword in
   place, never a parse at run time, and editing a default changes only that
