@@ -6,7 +6,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::ast;
+use crate::ast::{self, KERNEL_VALUES};
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticArgValue, DiagnosticCode};
 use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
@@ -5434,12 +5434,6 @@ const SELECT_TARGET_LOCAL: &str = "select target";
 /// cannot name them.
 const DIVISION_DIVIDEND_LOCAL: &str = "division dividend";
 const DIVISION_DIVISOR_LOCAL: &str = "division divisor";
-
-/// The kernel-only name of the built-in `values`, which the code sem writes
-/// for a division or the iteration protocol calls. A `%` cannot appear in a
-/// source name, so no binding or definition of the program's own `values`
-/// can capture it.
-const KERNEL_VALUES: &str = "%values";
 
 /// The kernel-only name a division's lowering calls for one of its
 /// results, such as `%floor/-quotient`. A `%` cannot appear in a source

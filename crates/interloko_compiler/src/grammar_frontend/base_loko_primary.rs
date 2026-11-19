@@ -207,7 +207,8 @@ fn grammar_parse_diagnostic(error: InterpretedParseError) -> Diagnostic {
     if expression {
         alternatives.retain(|text| !starts_expression(text.trim_matches('`')));
         if alternatives.is_empty() {
-            return Diagnostic::error(error.span.into(), DiagnosticCode::SyntaxExpectedExpression);
+            return Diagnostic::error(error.span.into(), DiagnosticCode::SyntaxExpectedExpression)
+                .with_arg(DiagnosticArg::text("expected", "expression"));
         }
         alternatives.insert(0, "expression".to_string());
     }

@@ -708,7 +708,8 @@ fn parse_trace_reports_grammar_diagnostic_facts() {
 
     assert!(out.contains("diagnostics:"));
     assert!(err.contains("Error syntax.expected-expression"));
-    assert!(out.contains("rule-name=body"));
+    assert!(out.contains("rule-name=source-file"));
+    assert!(out.contains("unexpected=\"end\" expected=\"expression\""));
     assert!(out.contains("grammar=grm"));
 }
 

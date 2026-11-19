@@ -1,5 +1,10 @@
 // expect: diagnostics 1
 // expect: diagnostic code syntax.expected-expression
 // expect: diagnostic contains expected expression
-define function main()
+
+// A `let` needs a value. (An empty body is fine: it produces no values.)
+
+define function main() => <integer>
+  let x = ;
+  1
 end;

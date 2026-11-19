@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.function-return-type-mismatch
+
+// An empty body produces no values, so it cannot be a function's
+// `<integer>`.
+
+define function answer() => <integer>
+end;

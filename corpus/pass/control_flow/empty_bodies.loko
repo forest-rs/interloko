@@ -1,0 +1,26 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// An empty body produces no values, as an `if` without `else` does: a
+// loop or `begin` with nothing to run, a method that does nothing, an
+// empty conditional arm, and a body that ends in a `let`.
+
+define function ignore(x :: <integer>) => ()
+end;
+
+define function main() => <integer>
+  let n = 0;
+  while (#f) end;
+  until (#t) end;
+  for (i from 0 below 3) end;
+  begin end;
+  begin let unused = 1; end;
+  block () end;
+  if (n = 0) else n := 5 end;
+  case n = 1 => ; otherwise => n := n + 1; end;
+  select (n) 1 => ; otherwise => ; end;
+  let nothing = method () => () end;
+  nothing();
+  ignore(n);
+  n + 2
+end;
