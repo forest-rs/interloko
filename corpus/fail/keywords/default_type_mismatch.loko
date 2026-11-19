@@ -1,0 +1,7 @@
+// expect: diagnostic code sem.function-return-type-mismatch
+// expect: diagnostics 1
+// A default is the body of a hidden function returning the keyword's
+// type, so a default of another type is that function's result mismatch.
+
+define function f(x :: <integer>, #key n :: <integer> = "one") => <integer> x + n end;
+define function main() => <integer> f(1) end;

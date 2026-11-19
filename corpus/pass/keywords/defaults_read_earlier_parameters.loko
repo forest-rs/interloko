@@ -1,0 +1,14 @@
+// expect: run 72
+// expect: diagnostics 0
+// A keyword a call does not pass takes its default, which may read the
+// required parameters and the keywords declared before it. Keywords follow
+// the positional arguments in any order.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2, plus :: <integer> = x + by) => <integer>
+  x * by + plus
+end;
+
+define function main() => <integer>
+  // 11 + 43 + 16 + 2
+  scale(3) + scale(3, by: 10) + scale(3, plus: 1, by: 5) + scale(1, plus: 0)
+end;

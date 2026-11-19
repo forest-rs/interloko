@@ -1,0 +1,6 @@
+// expect: diagnostic code sem.duplicate-keyword-argument
+// expect: diagnostics 1
+// A call passes each keyword at most once.
+
+define function f(x :: <integer>, #key by :: <integer> = 2) => <integer> x * by end;
+define function main() => <integer> f(1, by: 3, by: 4) end;

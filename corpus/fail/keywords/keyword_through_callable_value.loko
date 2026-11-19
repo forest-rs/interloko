@@ -1,0 +1,9 @@
+// expect: diagnostic code sem.callable-keyword-argument
+// expect: diagnostics 1
+// Calls through callable values pass no keywords yet: a keyword argument
+// is an error, not dropped.
+
+define function main() => <integer>
+  let g = function (x :: <integer>) => <integer> x end;
+  g(1, by: 2)
+end;

@@ -1,0 +1,8 @@
+// expect: diagnostic code sem.keyword-parameter-needs-default
+// expect: diagnostics 1
+// Only an `<object>` keyword can go without a default, taking
+// `$unsupplied` when a call does not pass it. Once that is reported, a
+// call that leaves the keyword out reports nothing more.
+
+define function f(#key n :: <integer>) => <integer> 1 end;
+define function main() => <integer> f() end;
