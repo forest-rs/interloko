@@ -1,0 +1,68 @@
+// expect: run 1
+// expect: diagnostics 0
+// expect: dump lowered contains u64.and
+
+// A call through an untyped `<callable>` keeps as many of the value's
+// results as it wants, as Dylan does: none at the end of a `=> ()` body,
+// the first where one value is expected, and the first of a typed
+// signature's adapter. The boxed entry it calls returns every result the
+// value declares, so the call tests the count the value's shape records
+// and calls expecting that many.
+
+define class <log> (<object>)
+  slot trail :: <integer>, init-value: 0;
+end;
+
+define function note(log :: <log>, digit :: <integer>) => <integer>
+  log.trail := log.trail * 10 + digit
+end;
+
+define function pair(a :: <integer>) => (<integer>, <integer>)
+  values(a, a + 1)
+end;
+
+define function scaled(a :: <integer>, #key by :: <integer> = 1) => (<integer>, <integer>)
+  values(a * by, 0)
+end;
+
+define function run(log :: <log>, f :: <callable>) => ()
+  f(log)
+end;
+
+define function first(f :: <callable>) => <integer>
+  let x :: <integer> = f(5);
+  x
+end;
+
+define function first-scaled(f :: <callable>) => <integer>
+  let x :: <integer> = f(5, by: 3);
+  x
+end;
+
+define function both(f :: <callable>) => <integer>
+  let (a :: <integer>, b :: <integer>) = f(2);
+  a + b
+end;
+
+define function typed(f :: callable(<integer>) => <integer>) => <integer>
+  f(7)
+end;
+
+define function through(f :: <callable>, g :: <callable>) => <integer>
+  apply(f, g)
+end;
+
+define function main() => <integer>
+  let log = make(<log>);
+  let passed = 0;
+  let check = method (test :: <boolean>) => ()
+    if (test) passed := passed + 1 end
+  end;
+  run(log, method (l :: <log>) => <integer> note(l, 1) end);
+  check(log.trail = 1);
+  check(first(pair) = 5);
+  check(first-scaled(scaled) = 15);
+  check(both(pair) = 5);
+  check(through(typed, pair) = 7);
+  if (passed = 5) 1 else 0 end
+end;
