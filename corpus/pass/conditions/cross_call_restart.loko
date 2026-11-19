@@ -14,7 +14,7 @@ define class <missing-entry> (<object>)
 end;
 
 define function lookup(key :: <integer>) => <integer>
-  if key = 7 then
+  if (key = 7)
     signal(make(<missing-entry>, fallback: 41))
   else
     key * 2

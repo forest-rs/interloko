@@ -17,8 +17,8 @@ define constant $unit :: <circle> = make($circle-class, radius: 4);
 
 define function main()
   let bonus :: <integer> = $unit.radius;
-  if $truth then
-    if $label = "circle" then
+  if ($truth)
+    if ($label = "circle")
       $answer + bonus
     else
       0

@@ -5898,6 +5898,9 @@ fn collect_dispatch_sites_in_expr(
             collect_dispatch_sites_in_expr(artifacts, owner, then_branch, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, else_branch, sites);
         }
+        sem::Expr::Discard { value, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
+        }
         sem::Expr::Handle { body, restart, .. } => {
             if let Some(guard) = &restart.guard {
                 collect_dispatch_sites_in_expr(artifacts, owner, guard, sites);
@@ -7878,6 +7881,30 @@ fn dump_ast_block(out: &mut String, block: &ast::Block, indent: usize) {
     dump_ast_expr(out, &block.result, indent + 4);
 }
 
+/// Dumps a conditional's arms, each a test and a body, then its default
+/// body under `default_label` (`else` or `otherwise`).
+fn dump_ast_arms(
+    out: &mut String,
+    arms: &[ast::CondArm],
+    default: Option<&ast::Block>,
+    default_label: &str,
+    indent: usize,
+) {
+    for arm in arms {
+        indent_line(out, indent + 2);
+        let _ = writeln!(out, "test");
+        dump_ast_expr(out, &arm.test, indent + 4);
+        indent_line(out, indent + 2);
+        let _ = writeln!(out, "body");
+        dump_ast_block(out, &arm.body, indent + 4);
+    }
+    if let Some(default) = default {
+        indent_line(out, indent + 2);
+        let _ = writeln!(out, "{default_label}");
+        dump_ast_block(out, default, indent + 4);
+    }
+}
+
 fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
     indent_line(out, indent);
     match expr {
@@ -8003,21 +8030,35 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
         }
         ast::Expr::If {
             id,
-            condition,
-            then_branch,
-            else_branch,
+            arms,
+            else_body,
             ..
         } => {
             let _ = writeln!(out, "{id} if");
+            dump_ast_arms(out, arms, else_body.as_deref(), "else", indent);
+        }
+        ast::Expr::Unless {
+            id,
+            condition,
+            body,
+            ..
+        } => {
+            let _ = writeln!(out, "{id} unless");
             indent_line(out, indent + 2);
-            let _ = writeln!(out, "condition");
+            let _ = writeln!(out, "test");
             dump_ast_expr(out, condition, indent + 4);
             indent_line(out, indent + 2);
-            let _ = writeln!(out, "then");
-            dump_ast_expr(out, then_branch, indent + 4);
-            indent_line(out, indent + 2);
-            let _ = writeln!(out, "else");
-            dump_ast_expr(out, else_branch, indent + 4);
+            let _ = writeln!(out, "body");
+            dump_ast_block(out, body, indent + 4);
+        }
+        ast::Expr::Case {
+            id,
+            arms,
+            otherwise,
+            ..
+        } => {
+            let _ = writeln!(out, "{id} case");
+            dump_ast_arms(out, arms, otherwise.as_deref(), "otherwise", indent);
         }
         ast::Expr::Handle {
             id, body, restart, ..
@@ -14151,6 +14192,10 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             let _ = writeln!(out, "else");
             dump_sem_expr(out, else_branch, indent + 4);
         }
+        sem::Expr::Discard { value, .. } => {
+            let _ = writeln!(out, "discard");
+            dump_sem_expr(out, value, indent + 2);
+        }
         sem::Expr::Handle { body, restart, .. } => {
             let condition = restart
                 .condition_local
@@ -15539,6 +15584,11 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             fingerprint_sem_expr(module, else_branch, out);
             out.push(')');
         }
+        sem::Expr::Discard { value, .. } => {
+            out.push_str("discard(");
+            fingerprint_sem_expr(module, value, out);
+            out.push(')');
+        }
         sem::Expr::Handle { body, restart, .. } => {
             let definition = module
                 .classes
@@ -15615,7 +15665,7 @@ mod tests {
     fn internal_lowering_failures_reach_the_session_diagnostics() {
         let mut artifacts = CompilerSession::compile_source(
             "ice.loko",
-            "define function main()\n  if #t then 1 else 2 end\nend;",
+            "define function main()\n  if (#t) 1 else 2 end\nend;",
             RuntimeMode::CompileOnly,
         );
         assert!(!artifacts.has_errors());
@@ -16828,7 +16878,7 @@ mod tests {
         define method area(c :: <circle>)\n  7\nend;\n\
         define function measure(s :: <shape>)\n  area(s)\nend;\n\
         define function main()\n  \
-        if 1 < 2 then area(make(<circle>)) else area(make(<shape>)) end\nend;";
+        if (1 < 2) area(make(<circle>)) else area(make(<shape>)) end\nend;";
 
     #[test]
     fn soft_typing_warnings_ride_the_diagnostic_list_without_blocking() {
@@ -17460,7 +17510,7 @@ mod tests {
              define class <circle> (<shape>)\nend;\n\
              define function main() => <integer>\n  \
              let s :: <shape> = make(<circle>);\n  \
-             if instance?(s, <circle>) then 1 else 0 end\nend;\n\
+             if (instance?(s, <circle>)) 1 else 0 end\nend;\n\
              define constant $one = 1;",
             RuntimeMode::CompileOnly,
         );
@@ -17695,7 +17745,7 @@ mod tests {
         let artifacts = CompilerSession::compile_source(
             "commands.loko",
             "define function dispatch(command :: <string>) => <string>\n  \
-               if command = \"look\" then \"a glasshouse\" else \"unknown command\" end\n\
+               if (command = \"look\") \"a glasshouse\" else \"unknown command\" end\n\
              end;",
             RuntimeMode::CompileOnly,
         );
@@ -17949,17 +17999,17 @@ mod tests {
     const TURN_PROGRAM: &str = "define class <cell> (<object>)\n  \
         slot value :: <integer>, init-value: 0;\nend;\n\
         define function churn(n :: <integer>, acc :: <integer>) => <integer>\n  \
-        if n = 0 then acc else \
+        if (n = 0) acc else \
         churn(n - 1, acc + make(<cell>).value + score(concatenate(\"ab\", \"cd\"))) end\nend;\n\
         define function score(text :: <string>) => <integer>\n  \
-        if text = \"abcd\" then 4 else 0 end\nend;\n\
+        if (text = \"abcd\") 4 else 0 end\nend;\n\
         define function tag(n :: <integer>) => <boolean>\n  \
-        if n = 0 then #ready = #ready else #other = #other end\nend;\n\
+        if (n = 0) #ready = #ready else #other = #other end\nend;\n\
         define class <needy> (<cell>)\n  slot need :: <integer>;\nend;\n\
         define function twin(c :: <cell>) => <cell>\n  make(class-of(c))\nend;\n\
         define function tag-then-trap(n :: <integer>) => <integer>\n  \
-        if #fresh = #fresh then \
-        twin(if n = 0 then make(<cell>) else make(<needy>, need: n) end).value else 0 end\nend;";
+        if (#fresh = #fresh) \
+        twin(if (n = 0) make(<cell>) else make(<needy>, need: n) end).value else 0 end\nend;";
 
     #[test]
     fn runtime_turns_keep_the_heap_flat() {
@@ -18077,7 +18127,7 @@ mod tests {
              define method weigh(x :: <integer>) => <integer>\n  x\nend;\n\
              define method weigh(x :: <double-float>) => <integer>\n  1\nend;\n\
              define function spin(n :: <integer>, acc :: <integer>) => <integer>\n  \
-             if n = 0 then acc else spin(n - 1, acc + weigh(n) + weigh(0.5) + weigh(n * 2) + weigh(-1.5)) end\nend;\n\
+             if (n = 0) acc else spin(n - 1, acc + weigh(n) + weigh(0.5) + weigh(n * 2) + weigh(-1.5)) end\nend;\n\
              define function wide(n :: <integer>) => <integer>\n  weigh(n)\nend;",
             RuntimeMode::CompileOnly,
         );
@@ -18116,16 +18166,16 @@ mod tests {
              define generic keep(x);\n\
              define method keep(x :: <object>) => <object>\n  x\nend;\n\
              define function score(p :: <point>, flag :: <boolean>) => <integer>\n  \
-             if instance?(keep(p), <point>) then\n    \
-             if instance?(keep(flag), <point>) then 0 else 1 end\n  \
+             if (instance?(keep(p), <point>))\n    \
+             if (instance?(keep(flag), <point>)) 0 else 1 end\n  \
              else\n    0\n  end\nend;\n\
              define function spin(n :: <integer>, p :: <point>, acc :: <integer>) => <integer>\n  \
-             if n = 0 then acc else spin(n - 1, p, acc + score(p, n < 5) + score(p, #t)) end\nend;\n\
+             if (n = 0) acc else spin(n - 1, p, acc + score(p, n < 5) + score(p, #t)) end\nend;\n\
              define function main(n :: <integer>) => <integer>\n  spin(n, make(<point>), 0)\nend;\n\
              define function is-class(x :: <object>) => <integer>\n  \
-             if instance?(x, <string>) then 0 else 1 end\nend;\n\
+             if (instance?(x, <string>)) 0 else 1 end\nend;\n\
              define function mop(n :: <integer>, acc :: <integer>) => <integer>\n  \
-             if n = 0 then acc else \
+             if (n = 0) acc else \
              mop(n - 1, acc + is-class(class-direct-superclass(object-class(2.5)))) end\nend;",
             RuntimeMode::CompileOnly,
         );
@@ -18373,8 +18423,8 @@ mod tests {
         let artifacts = CompilerSession::compile_source_with_host_registry(
             "commands.loko",
             "define function dispatch(command :: <string>) => <string>\n  \
-               if command = \"describe\" then\n    \
-                 if propose-description(\"a luminous glasshouse\") then \
+               if (command = \"describe\")\n    \
+                 if (propose-description(\"a luminous glasshouse\")) \
                    \"accepted\" else \"rejected\" end\n  \
                else \"unknown\" end\n\
              end;",
@@ -19648,13 +19698,13 @@ mod tests {
         let before = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
                       define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
                       define generic area(x);\n\
-                      define method area(c :: <circle>)\n  if c.radius > 0 then c.radius * c.radius else 0 end\nend;\n\
+                      define method area(c :: <circle>)\n  if (c.radius > 0) c.radius * c.radius else 0 end\nend;\n\
                       define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                       define function main()\n  area(make(<circle>, radius: 10))\nend;";
         let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
                      define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
                      define generic area(x);\n\
-                     define method area(c :: <circle>)\n  if c.radius > 0 then c.radius + c.radius else 0 end\nend;\n\
+                     define method area(c :: <circle>)\n  if (c.radius > 0) c.radius + c.radius else 0 end\nend;\n\
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                      define function main()\n  area(make(<circle>, radius: 10))\nend;";
         let mut session = IncrementalCompilerSession::new();
@@ -19701,14 +19751,14 @@ mod tests {
                       define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
                       define class <invalid-radius> (<object>)\n  slot fallback :: <integer>;\nend;\n\
                       define generic area(x);\n\
-                      define method area(c :: <circle>)\n  handle if c.radius < 0 then signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart e :: <invalid-radius> e.fallback end\nend;\n\
+                      define method area(c :: <circle>)\n  handle if (c.radius < 0) signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart e :: <invalid-radius> e.fallback end\nend;\n\
                       define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                       define function main()\n  area(make(<circle>, radius: 0 - 10))\nend;";
         let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
                      define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
                      define class <invalid-radius> (<object>)\n  slot fallback :: <integer>;\nend;\n\
                      define generic area(x);\n\
-                     define method area(c :: <circle>)\n  handle if c.radius < 0 then signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart e :: <invalid-radius> e.fallback + 1 end\nend;\n\
+                     define method area(c :: <circle>)\n  handle if (c.radius < 0) signal(make(<invalid-radius>, fallback: 0)) else c.radius * c.radius end with restart e :: <invalid-radius> e.fallback + 1 end\nend;\n\
                      define method area(s :: <square>)\n  s.side * s.side\nend;\n\
                      define function main()\n  area(make(<circle>, radius: 0 - 10))\nend;";
         let mut session = IncrementalCompilerSession::new();
@@ -19753,7 +19803,7 @@ mod tests {
     fn incremental_slot_type_edit_recomputes_dependent_artifacts() {
         let before = "define class <flag> (<object>)\n  slot value :: <boolean>;\nend;\n\
                       define generic score(x);\n\
-                      define method score(f :: <flag>)\n  if f.value then 1 else 0 end\nend;\n\
+                      define method score(f :: <flag>)\n  if (f.value) 1 else 0 end\nend;\n\
                       define function main()\n  score(make(<flag>, value: #t))\nend;";
         let after = "define class <flag> (<object>)\n  slot value :: <integer>;\nend;\n\
                      define generic score(x);\n\
@@ -22410,7 +22460,7 @@ end;
 
     const UNHANDLED_SAMPLE: &str = "define class <bad-sample> (<object>)\n  slot value :: <double-float>;\nend;\n\
          define class <skip-pixel> (<object>)\nend;\n\
-         define function check(v :: <double-float>) => <double-float>\n  if v < 0.0 then signal(make(<bad-sample>, value: v)) else v end\nend;\n\
+         define function check(v :: <double-float>) => <double-float>\n  if (v < 0.0) signal(make(<bad-sample>, value: v)) else v end\nend;\n\
          define function pixel(v :: <double-float>) => <double-float>\n  handle check(v) with restart <skip-pixel> 0.5 end\nend;\n\
          define function main() => <double-float>\n  pixel(0.0 - 1.0) + 1.0\nend;";
 
@@ -22533,7 +22583,7 @@ end;
         ] {
             sources.push(format!(
                 "define function pick(n :: <integer>) => <integer>\n  \
-                 if {test} then n + 9223372036854775000 else 0 end\nend;\n\
+                 if ({test}) n + 9223372036854775000 else 0 end\nend;\n\
                  define function main() => <integer>\n  pick(4294967303)\nend;"
             ));
         }
@@ -23251,7 +23301,7 @@ end;
             "sends.loko",
             &NO_METHOD.replace(
                 "pick(s).radius + area(s)",
-                "if instance?(s, <circle>) then pick(s).radius + area(s) else 1 end",
+                "if (instance?(s, <circle>)) pick(s).radius + area(s) else 1 end",
             ),
             RuntimeMode::CompileOnly,
         );
@@ -23721,7 +23771,7 @@ end;
     const HOT_SWAP: &str = "define class <bad-sample> (<object>)\n  slot value :: <double-float>;\nend;\n\
          define class <skip-pixel> (<object>)\nend;\n\
          define class <sphere> (<object>)\n  slot radius :: <double-float>;\nend;\n\
-         define function check-sample(value :: <double-float>) => <double-float>\n  if value < 0.0 then signal(make(<bad-sample>, value: value)) else value end\nend;\n\
+         define function check-sample(value :: <double-float>) => <double-float>\n  if (value < 0.0) signal(make(<bad-sample>, value: value)) else value end\nend;\n\
          define generic shade(s :: <sphere>, distance :: <double-float>) => <double-float>;\n\
          define method shade(s :: <sphere>, distance :: <double-float>) => <double-float>\n  check-sample(1.0 - distance / s.radius)\nend;\n\
          define function pixel(s :: <sphere>, x :: <double-float>) => <double-float>\n  handle shade(s, x) with restart <skip-pixel> 0.0 end\nend;\n\
@@ -23901,10 +23951,10 @@ end;
             assert_eq!(artifacts.diagnostics, Vec::new());
             artifacts.code_unit().expect("tape")
         };
-        let before = compile("if round?(make(<circle>)) then 1 else 0 end");
+        let before = compile("if (round?(make(<circle>))) 1 else 0 end");
         let after = compile(
             "let (a :: <integer>, b :: <integer>) = signal(make(<oops>));\n  \
-             if round?(make(<circle>)) then a else b end",
+             if (round?(make(<circle>))) a else b end",
         );
         let bytecode = |code: &CodeUnit, definition: &interloko_runtime::code::Definition| {
             let func = code.function(definition).expect("function");
@@ -24277,7 +24327,7 @@ end;
          define method area(s :: <square>) => <integer>\n  s.side * s.side\nend;\n\
          define function pause() => <integer>\n  signal(make(<oops>))\nend;\n\
          define function side(s :: <shape>) => <integer>\n  \
-         if instance?(s, <circle>) then 0 else as(<square>, s).side end\nend;\n\
+         if (instance?(s, <circle>)) 0 else as(<square>, s).side end\nend;\n\
          define function main() => <integer>\n  \
          pause() + side(make(<square>, side: 3)) + area(make(<circle>, radius: 2))\nend;";
 
@@ -25223,7 +25273,7 @@ end;
          define generic weight(s :: <shape>) => <integer>;\n\
          define method weight(s :: <shape>) => <integer>\n  1\nend;\n\
          define method weight(s :: <circle>) => <integer>\n  10\nend;\n\
-         define function check(w :: <integer>) => <integer>\n  if w > 50 then signal(make(<too-heavy>)) else w end\nend;\n\
+         define function check(w :: <integer>) => <integer>\n  if (w > 50) signal(make(<too-heavy>)) else w end\nend;\n\
          define function main() => <integer>\n  let c = make(<circle>);\n  weight(c) + weight(c) + check(100) + weight(c)\nend;";
 
     #[test]
@@ -25828,7 +25878,7 @@ end;
          define class <circle> (<shape>)\nend;\n\
          define generic weight(s :: <shape>) => <object>;\n\
          define method weight(s :: <circle>) => <object>\n  10\nend;\n\
-         define function check(w :: <integer>) => <integer>\n  if w > 50 then signal(make(<too-heavy>)) else w end\nend;\n\
+         define function check(w :: <integer>) => <integer>\n  if (w > 50) signal(make(<too-heavy>)) else w end\nend;\n\
          define function main() => <integer>\n  let c = make(<circle>);\n  as(<integer>, weight(c) + check(100) + weight(c))\nend;";
 
     #[test]
@@ -25948,9 +25998,9 @@ end;
          define generic poke(x);\n\
          define method poke(x :: <integer>) => <integer>\n  x\nend;\n\
          define function no-method(n :: <integer>) => <integer>\n  \
-         poke(if n = 0 then as(<object>, n) else as(<object>, \"other\") end)\nend;\n\
+         poke(if (n = 0) as(<object>, n) else as(<object>, \"other\") end)\nend;\n\
          define function trapped(n :: <integer>) => <boolean>\n  \
-         instance?(twin(if n = 0 then make(<problem>) else make(<needy>, need: n) end), <needy>)\nend;\n\
+         instance?(twin(if (n = 0) make(<problem>) else make(<needy>, need: n) end), <needy>)\nend;\n\
          define function risky() => <integer>\n  signal(make(<problem>))\nend;\n\
          define function make-exit() => <callable>\n  block (out)\n    out\n  end\nend;\n\
          define function expired() => <integer>\n  \

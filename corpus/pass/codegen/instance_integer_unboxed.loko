@@ -13,7 +13,7 @@
 // unbox at each read. The test itself stays, since `x` may be anything.
 
 define function poly(x :: <object>) => <integer>
-  if instance?(x, <integer>) then x * x + x else 0 end
+  if (instance?(x, <integer>)) x * x + x else 0 end
 end;
 
 define function main() => <integer>

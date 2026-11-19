@@ -8,9 +8,7 @@ end;
 
 define function main() => <integer>
   let c = make(<circle>, radius: 12);
-  if class-name(object-class(c)) = "<circle>"
-  then if class-name(object-class(1)) = "<integer>"
-       then if class-name(object-class(<circle>)) = "<class>" then 3 else 0 end
+  if (class-name(object-class(c)) = "<circle>") if (class-name(object-class(1)) = "<integer>") if (class-name(object-class(<circle>)) = "<class>") 3 else 0 end
        else 0
        end
   else 0

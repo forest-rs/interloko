@@ -10,5 +10,5 @@ define class <square> (<object>)
 end;
 
 define function main()
-  if instance?(make(<square>, side: 2), <circle>) then 1 else 0 end
+  if (instance?(make(<square>, side: 2), <circle>)) 1 else 0 end
 end;

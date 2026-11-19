@@ -10,14 +10,14 @@
 // single-float is one. `float-to-string` keeps the `f32` suffix, so the
 // text reads back as the same value.
 define function flag(b :: <boolean>) => <string>
-  if b then "#t" else "#f" end
+  if (b) "#t" else "#f" end
 end;
 
 define function main() => <string>
   let root = sqrt(2.0f32);
   let low = floor(-1.5f32);
   let clamped = min(0.75f32, 0.5);
-  let ok = if nan?(root) then #f else finite?(low) end;
+  let ok = if (nan?(root)) #f else finite?(low) end;
   concatenate(
     concatenate(concatenate(float-to-string(root), " "), concatenate(float-to-string(low), " ")),
     concatenate(concatenate(float-to-string(clamped), " "), flag(ok)))

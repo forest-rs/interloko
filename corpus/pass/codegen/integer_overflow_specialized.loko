@@ -10,7 +10,7 @@
 // overflow as far as typing knows, and keeps its check.
 
 define function step(i :: <integer>) => <integer>
-  if i < 1000 then if i > 0 then i + 1 else 0 end else 0 end
+  if (i < 1000) if (i > 0) i + 1 else 0 end else 0 end
 end;
 
 define function main() => <integer>

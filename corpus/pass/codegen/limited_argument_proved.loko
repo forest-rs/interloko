@@ -13,7 +13,7 @@ define function double(n :: limited(<integer>, min: 0, max: 255)) => <integer>
 end;
 
 define function clamp(n :: <integer>) => <integer>
-  if n < 0 then 0 else if n > 100 then 100 else double(n) end end
+  if (n < 0) 0 elseif (n > 100) 100 else double(n) end
 end;
 
 define function main() => <integer>

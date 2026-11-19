@@ -6,7 +6,7 @@
 // call passes it: the boxed entry unboxes it and signals for anything else.
 
 define function flip(b :: <boolean>) => <boolean>
-  if b then #f else #t end
+  if (b) #f else #t end
 end;
 define function call(f :: <callable>, x :: <integer>) => <boolean>
   apply(f, x)

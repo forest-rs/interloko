@@ -7,7 +7,7 @@
 // expect: dump tape contains rets=[result0
 
 define function split(use_large :: <boolean>) => (<integer>, <integer>)
-  if use_large then
+  if (use_large)
     values(40, 2)
   else
     values(10, 5)

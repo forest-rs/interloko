@@ -5,13 +5,13 @@
 
 define function main() => <boolean>
   let nan = 0.0 / 0.0;
-  if nan = nan then
+  if (nan = nan)
     #f
   else
-    if nan < 1.0 then
+    if (nan < 1.0)
       #f
     else
-      if 0.0 = -0.0 then 1.5 <= 1.5 else #f end
+      if (0.0 = -0.0) 1.5 <= 1.5 else #f end
     end
   end
 end;

@@ -152,7 +152,7 @@ fn dispatches_on_host_backed_objects() {
 #[test]
 fn host_backed_objects_flow_through_object_top_tests_and_casts() {
     const GUARDED: &str = "define function guarded(x :: <object>) => <integer>\n\
-                             if instance?(x, <rust-circle>) then as(<rust-circle>, x).radius else 0 end\n\
+                             if (instance?(x, <rust-circle>)) as(<rust-circle>, x).radius else 0 end\n\
                            end;";
 
     let circle = call_with_host_object(

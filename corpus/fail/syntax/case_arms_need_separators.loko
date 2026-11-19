@@ -1,0 +1,12 @@
+// expect: diagnostic code syntax.expected-token
+
+// `case` arms are separated by `;`: without one, the next test would read
+// as part of the previous arm's body.
+
+define function main(n :: <integer>) => <integer>
+  case
+    n < 0 => 0
+    n = 0 => 1;
+    otherwise => 2;
+  end
+end;

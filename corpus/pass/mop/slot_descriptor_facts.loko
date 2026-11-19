@@ -11,11 +11,7 @@ end;
 
 define function main() => <integer>
   let descriptor = vector-ref(class-effective-slots(<circle>), 0);
-  if slot-name(descriptor) = "radius"
-  then if slot-type(descriptor) = "<integer>"
-       then if slot-init-keyword(descriptor) = "r"
-            then if slot-mutable?(descriptor)
-                 then if slot-getter(descriptor) = "radius" then 5 else 0 end
+  if (slot-name(descriptor) = "radius") if (slot-type(descriptor) = "<integer>") if (slot-init-keyword(descriptor) = "r") if (slot-mutable?(descriptor)) if (slot-getter(descriptor) = "radius") 5 else 0 end
                  else 0
                  end
             else 0

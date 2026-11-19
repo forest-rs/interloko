@@ -28,8 +28,8 @@ end;
 define function main() => <single-float>
   let pixel = make(<pixel>, alpha: 1.5, raw: 1.5f32);
   let boxed :: <object> = pixel.alpha;
-  if instance?(pixel.raw, <float>) then
-    if instance?(pixel.raw, <double-float>) then -2.0f32 else kind(boxed) end
+  if (instance?(pixel.raw, <float>))
+    if (instance?(pixel.raw, <double-float>)) -2.0f32 else kind(boxed) end
   else
     -3.0f32
   end

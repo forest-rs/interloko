@@ -21,7 +21,7 @@ define function area(c :: <circle>) => <integer>
 end;
 
 define function measure(s :: <shape>) => <integer>
-  if instance?(s, <circle>) then area(s) else 0 end
+  if (instance?(s, <circle>)) area(s) else 0 end
 end;
 
 define function main() => <integer>

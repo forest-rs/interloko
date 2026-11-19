@@ -12,9 +12,9 @@ define class <circle> (<shape>)
 end;
 
 define function main()
-  if 1 < 2 then
+  if (1 < 2)
     1
   else
-    if instance?(as(<circle>, make(<shape>)), <circle>) then 2 else 3 end
+    if (instance?(as(<circle>, make(<shape>)), <circle>)) 2 else 3 end
   end
 end;

@@ -23,8 +23,8 @@ end;
 
 // A circle would have passed the cast; the rejected square would not.
 define function judge(expected :: <type>, rejected :: <object>) => <integer>
-  if instance?(make(<circle>, radius: 1), expected) then
-    if instance?(rejected, expected) then 0 else 1000 end
+  if (instance?(make(<circle>, radius: 1), expected))
+    if (instance?(rejected, expected)) 0 else 1000 end
   else
     0
   end
@@ -32,7 +32,7 @@ end;
 
 // The largest value the failed check would have accepted.
 define function largest(expected :: <type>) => <integer>
-  if instance?(expected, <limited-integer>) then
+  if (instance?(expected, <limited-integer>))
     as(<integer>, limited-integer-max(as(<limited-integer>, expected)))
   else
     0
@@ -51,7 +51,7 @@ define function clamp(n :: <integer>) => <integer>
   handle
     byte(n)
   with restart e :: <type-error>
-    if type-name(e.type-error-expected-type) = "limited(<integer>, min: 0, max: 255)" then
+    if (type-name(e.type-error-expected-type) = "limited(<integer>, min: 0, max: 255)")
       largest(e.type-error-expected-type)
     else
       -1

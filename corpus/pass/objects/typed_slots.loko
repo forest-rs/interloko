@@ -16,5 +16,5 @@ end;
 
 define function main()
   let flag = make(<flag>, item: make(<circle>, radius: 7), valid?: #t);
-  if flag.valid? then flag.item.radius else 0 end
+  if (flag.valid?) flag.item.radius else 0 end
 end;

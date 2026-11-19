@@ -21,10 +21,10 @@ define class <square> (<shape>)
 end;
 
 define function size(s :: <shape>) => <integer>
-  if instance?(s, <circle>) then
+  if (instance?(s, <circle>))
     1
   else
-    if instance?(s, <square>) then 20 else as(<circle>, s).radius end
+    if (instance?(s, <square>)) 20 else as(<circle>, s).radius end
   end
 end;
 

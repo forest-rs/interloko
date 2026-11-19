@@ -10,7 +10,7 @@
 // bits instead of testing for values that cannot reach it.
 
 define function narrow(n :: <integer>) => <i32>
-  if n < 0 then 0i32 else if n > 100 then 100i32 else as(<i32>, n) end end
+  if (n < 0) 0i32 elseif (n > 100) 100i32 else as(<i32>, n) end
 end;
 
 define function main() => <i32>

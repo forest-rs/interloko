@@ -39,11 +39,11 @@ define function risky() => <integer>
 end;
 
 define function plain(d :: <integer>) => <integer>
-  if d = 0 then 1 else plain(d - 1) + plain(d - 1) end
+  if (d = 0) 1 else plain(d - 1) + plain(d - 1) end
 end;
 
 define function establish(d :: <integer>) => <integer>
-  if d = 0 then
+  if (d = 0)
     handle 1 with restart <problem> 2 end
   else
     establish(d - 1) + establish(d - 1)
@@ -51,7 +51,7 @@ define function establish(d :: <integer>) => <integer>
 end;
 
 define function handled(d :: <integer>) => <integer>
-  if d = 0 then
+  if (d = 0)
     handle risky() with restart <problem> 1 end
   else
     handled(d - 1) + handled(d - 1)
@@ -59,7 +59,7 @@ define function handled(d :: <integer>) => <integer>
 end;
 
 define function guarded(d :: <integer>) => <integer>
-  if d = 0 then
+  if (d = 0)
     handle risky() with restart <problem> when d = 0 => 1 end
   else
     guarded(d - 1) + guarded(d - 1)
@@ -67,11 +67,11 @@ define function guarded(d :: <integer>) => <integer>
 end;
 
 define function unhandled(d :: <integer>) => <integer>
-  if d = 0 then risky() else unhandled(d - 1) + unhandled(d - 1) end
+  if (d = 0) risky() else unhandled(d - 1) + unhandled(d - 1) end
 end;
 
 define function sends(d :: <integer>, s :: <shape>) => <integer>
-  if d = 0 then area(s) else sends(d - 1, s) + sends(d - 1, s) end
+  if (d = 0) area(s) else sends(d - 1, s) + sends(d - 1, s) end
 end;
 
 define function send(d :: <integer>) => <integer>
@@ -79,11 +79,11 @@ define function send(d :: <integer>) => <integer>
 end;
 
 define function chain(n :: <integer>) => <integer>
-  if n = 0 then 0 else 1 + chain(n - 1) end
+  if (n = 0) 0 else 1 + chain(n - 1) end
 end;
 
 define function deep(n :: <integer>) => <integer>
-  if n = 0 then 0 else (handle 1 with restart <problem> 2 end) + deep(n - 1) end
+  if (n = 0) 0 else (handle 1 with restart <problem> 2 end) + deep(n - 1) end
 end;
 ";
 

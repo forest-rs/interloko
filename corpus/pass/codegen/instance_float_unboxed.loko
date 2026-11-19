@@ -12,11 +12,11 @@
 // unboxes once and computes directly, in the float's own format.
 
 define function scale(x :: <object>) => <double-float>
-  if instance?(x, <double-float>) then x * 2.0 + x else 0.0 end
+  if (instance?(x, <double-float>)) x * 2.0 + x else 0.0 end
 end;
 
 define function scale32(x :: <object>) => <single-float>
-  if instance?(x, <single-float>) then x * 2.0f32 + 1.0f32 else 0.0f32 end
+  if (instance?(x, <single-float>)) x * 2.0f32 + 1.0f32 else 0.0f32 end
 end;
 
 define function main() => <double-float>

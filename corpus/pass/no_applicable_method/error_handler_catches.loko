@@ -28,7 +28,7 @@ define function counted(s :: <shape>) => <integer>
       1
     end
   with restart e :: <error>
-    if instance?(e, <no-applicable-method>) then 3 else 2 end
+    if (instance?(e, <no-applicable-method>)) 3 else 2 end
   end
 end;
 

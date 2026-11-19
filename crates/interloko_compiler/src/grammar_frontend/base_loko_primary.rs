@@ -462,6 +462,8 @@ impl BaseLokoCstProjector<'_> {
             "block-expression" => self.build_block(node),
             "restart-clause" => self.build_restart(node),
             "if-expression" => self.build_if(node),
+            "unless-expression" => self.build_unless(node),
+            "case-expression" => self.build_case(node),
             "assignment-expression" => self.build_assignment(node),
             "assignment-target" => self.unwrap_first_expr(node),
             "comparison-expression" => self.build_comparison(node),
@@ -587,14 +589,68 @@ impl BaseLokoCstProjector<'_> {
         self.node_with_nested_and_roles(CstKind::RestartClause, node, nested, roles)
     }
 
+    /// Builds `if (test) body elseif-clause* else-clause? end`: the test and
+    /// body, then one [`CstKind::ElseifClause`] per `elseif` and an
+    /// [`CstKind::ElseClause`] for the `else`.
     fn build_if(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
-        let nested = node
-            .children
-            .iter()
-            .filter(|child| child.is_rule("expression"))
-            .map(|expr| self.build_expr(expr))
-            .collect::<Vec<_>>();
+        let mut nested = self.test_and_body(node);
+        for child in &node.children {
+            if child.is_rule("elseif-clause") {
+                let clause = self.test_and_body(child);
+                nested.push(self.node_with_nested(CstKind::ElseifClause, child, clause));
+            } else if child.is_rule("else-clause") {
+                let body = self.bodies(child);
+                nested.push(self.node_with_nested(CstKind::ElseClause, child, body));
+            }
+        }
         self.node_with_nested(CstKind::IfExpr, node, nested)
+    }
+
+    fn build_unless(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let nested = self.test_and_body(node);
+        self.node_with_nested(CstKind::UnlessExpr, node, nested)
+    }
+
+    /// Builds `case clause* otherwise-clause? end`, one
+    /// [`CstKind::CaseClause`] per `test => body` and an
+    /// [`CstKind::OtherwiseClause`] for the `otherwise`.
+    fn build_case(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let mut nested = Vec::new();
+        for child in &node.children {
+            if child.is_rule("case-clause") {
+                let clause = self.test_and_body(child);
+                nested.push(self.node_with_nested(CstKind::CaseClause, child, clause));
+            } else if child.is_rule("otherwise-clause") {
+                let body = self.bodies(child);
+                nested.push(self.node_with_nested(CstKind::OtherwiseClause, child, body));
+            }
+        }
+        self.node_with_nested(CstKind::CaseExpr, node, nested)
+    }
+
+    /// The test expression and the body directly under a conditional rule
+    /// or clause, in source order.
+    fn test_and_body(&self, node: &InterpretedRuleNode<'_>) -> Vec<CstNode> {
+        node.children
+            .iter()
+            .filter_map(|child| {
+                if child.is_rule("expression") {
+                    Some(self.build_expr(child))
+                } else if child.is_rule("body") {
+                    Some(self.build_body(child))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn bodies(&self, node: &InterpretedRuleNode<'_>) -> Vec<CstNode> {
+        node.children
+            .iter()
+            .filter(|child| child.is_rule("body"))
+            .map(|body| self.build_body(body))
+            .collect()
     }
 
     fn build_assignment(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
@@ -1032,6 +1088,8 @@ impl BaseLokoCstProjector<'_> {
             "handle-expression"
                 | "block-expression"
                 | "if-expression"
+                | "unless-expression"
+                | "case-expression"
                 | "assignment-expression"
                 | "assignment-target"
                 | "comparison-expression"

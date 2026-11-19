@@ -169,7 +169,7 @@ fn source_replacement_keeps_host_declarations_and_requires_an_explicit_handler()
 fn codegen_policy_is_explicit_kept_by_replacement_and_changed_by_revision() {
     // `step(i) + 2` may overflow as far as typing knows; `i + 1` cannot.
     const SUM: &str = "define function step(i :: <integer>) => <integer>
-  if i < 1000 then if i > 0 then i + 1 else 0 end else 0 end
+  if (i < 1000) if (i > 0) i + 1 else 0 end else 0 end
 end;
 define function answer() => <integer> step(999) + 2 end;";
     let checked_adds = |session: &Session| {

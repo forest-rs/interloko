@@ -5,7 +5,7 @@ define function same-symbol(a :: <symbol>, b :: <symbol>) => <boolean>
 end;
 
 define function main()
-  let hash-symbol-score = if same-symbol(#ready, #ready) then 1 else 0 end;
-  let keyword-symbol-score = if same-symbol(fallback:, fallback:) then 2 else 0 end;
+  let hash-symbol-score = if (same-symbol(#ready, #ready)) 1 else 0 end;
+  let keyword-symbol-score = if (same-symbol(fallback:, fallback:)) 2 else 0 end;
   hash-symbol-score + keyword-symbol-score
 end;

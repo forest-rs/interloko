@@ -3,7 +3,7 @@
 // expect: dump lowered contains i64.lt
 
 define function abs(x)
-  if x < 0 then 0 - x else x end
+  if (x < 0) 0 - x else x end
 end;
 
 define function main()

@@ -1,0 +1,16 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.local-type-mismatch
+// expect: diagnostic contains local `size` expects 1 value but initializer has 0 values
+
+// A `case` without `otherwise` produces no values, whichever arm runs, so
+// binding its value is a type error. Dylan returns `#f` when no test is
+// true; Loko's typed `case` cannot, since `#f` is not an `<integer>`.
+
+define function main() => <integer>
+  let n = 3;
+  let size = case
+    n < 10 => 1;
+    n < 100 => 2;
+  end;
+  size
+end;

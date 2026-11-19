@@ -93,16 +93,16 @@ define class <square> (<shape>)
 end;
 
 define function plain(d :: <integer>) => <integer>
-  if d = 0 then 1 else plain(d - 1) + plain(d - 1) end
+  if (d = 0) 1 else plain(d - 1) + plain(d - 1) end
 end;
 
 define function numeric(d :: <integer>) => <integer>
-  if d = 0 then as(<integer>, as(<object>, d) + 1) else numeric(d - 1) + numeric(d - 1) end
+  if (d = 0) as(<integer>, as(<object>, d) + 1) else numeric(d - 1) + numeric(d - 1) end
 end;
 
 define function narrowed(d :: <integer>, s :: <shape>) => <integer>
-  if d = 0 then
-    if instance?(s, <circle>) then area(s) else 0 end
+  if (d = 0)
+    if (instance?(s, <circle>)) area(s) else 0 end
   else
     narrowed(d - 1, s) + narrowed(d - 1, s)
   end
@@ -127,15 +127,15 @@ define function cast-shape() => <integer>
 end;
 
 define function made(d :: <integer>) => <integer>
-  if d = 0 then make-shape() else made(d - 1) + made(d - 1) end
+  if (d = 0) make-shape() else made(d - 1) + made(d - 1) end
 end;
 
 define function cast(d :: <integer>) => <integer>
-  if d = 0 then cast-shape() else cast(d - 1) + cast(d - 1) end
+  if (d = 0) cast-shape() else cast(d - 1) + cast(d - 1) end
 end;
 
 define function poly(x :: <object>) => <integer>
-  if instance?(x, <integer>) then as(<integer>, x * x + x + 1) else 0 end
+  if (instance?(x, <integer>)) as(<integer>, x * x + x + 1) else 0 end
 end;
 
 define function ignore(x :: <object>) => <integer>
@@ -143,11 +143,11 @@ define function ignore(x :: <object>) => <integer>
 end;
 
 define function tested(d :: <integer>) => <integer>
-  if d = 0 then poly(as(<object>, d)) else tested(d - 1) + tested(d - 1) end
+  if (d = 0) poly(as(<object>, d)) else tested(d - 1) + tested(d - 1) end
 end;
 
 define function passed(d :: <integer>) => <integer>
-  if d = 0 then ignore(as(<object>, d)) else passed(d - 1) + passed(d - 1) end
+  if (d = 0) ignore(as(<object>, d)) else passed(d - 1) + passed(d - 1) end
 end;
 
 define generic weight(s :: <shape>) => <integer>;
@@ -167,19 +167,19 @@ define function call-area() => <integer>
 end;
 
 define function sent(d :: <integer>) => <integer>
-  if d = 0 then send-weight() else sent(d - 1) + sent(d - 1) end
+  if (d = 0) send-weight() else sent(d - 1) + sent(d - 1) end
 end;
 
 define function called(d :: <integer>) => <integer>
-  if d = 0 then call-area() else called(d - 1) + called(d - 1) end
+  if (d = 0) call-area() else called(d - 1) + called(d - 1) end
 end;
 
 define function convert(d :: <integer>) => <integer>
-  if d = 0 then as(<integer>, as(<i32>, d)) + 1 else convert(d - 1) + convert(d - 1) end
+  if (d = 0) as(<integer>, as(<i32>, d)) + 1 else convert(d - 1) + convert(d - 1) end
 end;
 
 define function convert-unsigned(d :: <integer>) => <integer>
-  if d = 0 then
+  if (d = 0)
     as(<integer>, as(<u32>, d)) + 1
   else
     convert-unsigned(d - 1) + convert-unsigned(d - 1)
@@ -187,7 +187,7 @@ define function convert-unsigned(d :: <integer>) => <integer>
 end;
 
 define function exact(d :: <integer>) => <integer>
-  if d = 0 then as(<integer>, as(<double-float>, d)) + 1 else exact(d - 1) + exact(d - 1) end
+  if (d = 0) as(<integer>, as(<double-float>, d)) + 1 else exact(d - 1) + exact(d - 1) end
 end;
 
 define function shift-by(x :: <i32>, n :: <i32>) => <i32>
@@ -217,11 +217,11 @@ define function take-shape(s :: <shape>) => <integer>
 end;
 
 define function shape-sent(d :: <integer>) => <integer>
-  if d = 0 then send-size(make(<circle>, radius: 1)) else shape-sent(d - 1) + shape-sent(d - 1) end
+  if (d = 0) send-size(make(<circle>, radius: 1)) else shape-sent(d - 1) + shape-sent(d - 1) end
 end;
 
 define function shape-called(d :: <integer>) => <integer>
-  if d = 0 then take-shape(make(<circle>, radius: 1)) else shape-called(d - 1) + shape-called(d - 1) end
+  if (d = 0) take-shape(make(<circle>, radius: 1)) else shape-called(d - 1) + shape-called(d - 1) end
 end;
 
 define function send-leaf(c :: <circle>) => <integer>
@@ -237,19 +237,19 @@ define function take-circle(c :: <circle>) => <integer>
 end;
 
 define function leaf-sent(d :: <integer>) => <integer>
-  if d = 0 then send-leaf(make(<circle>, radius: 1)) else leaf-sent(d - 1) + leaf-sent(d - 1) end
+  if (d = 0) send-leaf(make(<circle>, radius: 1)) else leaf-sent(d - 1) + leaf-sent(d - 1) end
 end;
 
 define function leaf-called(d :: <integer>) => <integer>
-  if d = 0 then take-circle(make(<circle>, radius: 1)) else leaf-called(d - 1) + leaf-called(d - 1) end
+  if (d = 0) take-circle(make(<circle>, radius: 1)) else leaf-called(d - 1) + leaf-called(d - 1) end
 end;
 
 define function square-side(s :: <shape>) => <integer>
-  if instance?(s, <circle>) then 0 else as(<square>, s).side end
+  if (instance?(s, <circle>)) 0 else as(<square>, s).side end
 end;
 
 define function square-test(s :: <shape>, q :: <square>) => <integer>
-  if instance?(s, <circle>) then 0 else q.side end
+  if (instance?(s, <circle>)) 0 else q.side end
 end;
 
 define function test-square(q :: <square>) => <integer>
@@ -261,19 +261,19 @@ define function side-square(q :: <square>) => <integer>
 end;
 
 define function cast-past(d :: <integer>) => <integer>
-  if d = 0 then side-square(make(<square>, side: 1)) else cast-past(d - 1) + cast-past(d - 1) end
+  if (d = 0) side-square(make(<square>, side: 1)) else cast-past(d - 1) + cast-past(d - 1) end
 end;
 
 define function test-only(d :: <integer>) => <integer>
-  if d = 0 then test-square(make(<square>, side: 1)) else test-only(d - 1) + test-only(d - 1) end
+  if (d = 0) test-square(make(<square>, side: 1)) else test-only(d - 1) + test-only(d - 1) end
 end;
 
 define function shifted(d :: <integer>) => <integer>
-  if d = 0 then as(<integer>, shift-by(1i32, 3i32)) else shifted(d - 1) + shifted(d - 1) end
+  if (d = 0) as(<integer>, shift-by(1i32, 3i32)) else shifted(d - 1) + shifted(d - 1) end
 end;
 
 define function kept(d :: <integer>) => <integer>
-  if d = 0 then as(<integer>, keep(1i32, 3i32)) else kept(d - 1) + kept(d - 1) end
+  if (d = 0) as(<integer>, keep(1i32, 3i32)) else kept(d - 1) + kept(d - 1) end
 end;
 
 define function inc(n :: <integer>) => <integer>
@@ -281,11 +281,11 @@ define function inc(n :: <integer>) => <integer>
 end;
 
 define function inc-called(d :: <integer>) => <integer>
-  if d = 0 then inc(d) else inc-called(d - 1) + inc-called(d - 1) end
+  if (d = 0) inc(d) else inc-called(d - 1) + inc-called(d - 1) end
 end;
 
 define function untyped-tree(f :: <callable>, d :: <integer>) => <integer>
-  if d = 0 then apply(f, d) else untyped-tree(f, d - 1) + untyped-tree(f, d - 1) end
+  if (d = 0) apply(f, d) else untyped-tree(f, d - 1) + untyped-tree(f, d - 1) end
 end;
 
 define function untyped(d :: <integer>) => <integer>
@@ -293,7 +293,7 @@ define function untyped(d :: <integer>) => <integer>
 end;
 
 define function typed-tree(f :: callable(<integer>) => <integer>, d :: <integer>) => <integer>
-  if d = 0 then f(d) else typed-tree(f, d - 1) + typed-tree(f, d - 1) end
+  if (d = 0) f(d) else typed-tree(f, d - 1) + typed-tree(f, d - 1) end
 end;
 
 define function typed-callable(d :: <integer>) => <integer>
@@ -301,7 +301,7 @@ define function typed-callable(d :: <integer>) => <integer>
 end;
 
 define function closure-tree(f :: <callable>, d :: <integer>) => <integer>
-  if d = 0 then apply(f, d) else closure-tree(f, d - 1) + closure-tree(f, d - 1) end
+  if (d = 0) apply(f, d) else closure-tree(f, d - 1) + closure-tree(f, d - 1) end
 end;
 
 define function closure-call(d :: <integer>) => <integer>
@@ -309,7 +309,7 @@ define function closure-call(d :: <integer>) => <integer>
 end;
 
 define function mismatched-tree(f :: <callable>, x :: <object>, d :: <integer>) => <integer>
-  if d = 0 then apply(f, x) else mismatched-tree(f, x, d - 1) + mismatched-tree(f, x, d - 1) end
+  if (d = 0) apply(f, x) else mismatched-tree(f, x, d - 1) + mismatched-tree(f, x, d - 1) end
 end;
 
 define function mismatched(d :: <integer>) => <integer>
@@ -317,7 +317,7 @@ define function mismatched(d :: <integer>) => <integer>
 end;
 
 define function typed-carry(f :: callable(<integer>) => <integer>, d :: <integer>) => <integer>
-  if d = 0 then 1 else typed-carry(f, d - 1) + typed-carry(f, d - 1) end
+  if (d = 0) 1 else typed-carry(f, d - 1) + typed-carry(f, d - 1) end
 end;
 
 define function typed-passed(d :: <integer>) => <integer>
@@ -325,7 +325,7 @@ define function typed-passed(d :: <integer>) => <integer>
 end;
 
 define function untyped-carry(f :: <callable>, d :: <integer>) => <integer>
-  if d = 0 then 1 else untyped-carry(f, d - 1) + untyped-carry(f, d - 1) end
+  if (d = 0) 1 else untyped-carry(f, d - 1) + untyped-carry(f, d - 1) end
 end;
 
 define function untyped-passed(d :: <integer>) => <integer>

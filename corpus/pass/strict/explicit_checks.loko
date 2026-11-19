@@ -22,7 +22,7 @@ define strict function radius(s :: <shape>) => <integer>
 end;
 
 define strict function radius-or(s :: <shape>, default :: <integer>) => <integer>
-  if instance?(s, <circle>) then radius(s) else default end
+  if (instance?(s, <circle>)) radius(s) else default end
 end;
 
 define function main() => <integer>

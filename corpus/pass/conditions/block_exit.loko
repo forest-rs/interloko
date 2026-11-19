@@ -11,7 +11,7 @@
 // straight to the block, skipping the rest of the scan.
 
 define function scan(limit :: <integer>, found :: <callable>) => <integer>
-  if limit > 40 then found(limit + 1) else scan(limit + 1, found) end
+  if (limit > 40) found(limit + 1) else scan(limit + 1, found) end
 end;
 
 define function find-first() => <integer>

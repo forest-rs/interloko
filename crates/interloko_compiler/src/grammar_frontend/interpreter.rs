@@ -17,8 +17,27 @@ pub(super) const DERIVED_HOST_GRAMMAR_SOURCE: &str =
     include_str!("../../grammars/derived_host.grammar");
 
 const LOKO_RESERVED_WORDS: &[&str] = &[
-    "define", "function", "class", "slot", "constant", "generic", "method", "let", "if", "then",
-    "else", "handle", "with", "restart", "when", "block", "cleanup", "end",
+    "define",
+    "function",
+    "class",
+    "slot",
+    "constant",
+    "generic",
+    "method",
+    "let",
+    "if",
+    "elseif",
+    "else",
+    "unless",
+    "case",
+    "otherwise",
+    "handle",
+    "with",
+    "restart",
+    "when",
+    "block",
+    "cleanup",
+    "end",
 ];
 
 fn apply_loko_reserved_words(rules: Vec<SourceAuthoredRule>) -> Vec<SourceAuthoredRule> {

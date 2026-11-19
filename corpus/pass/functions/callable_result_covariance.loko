@@ -22,5 +22,5 @@ end;
 
 define function main()
   let g :: callable(<integer>) => <shape> = circle-of;
-  if g(1).size = 1 then shape-size(circle-of) else 0 end
+  if (g(1).size = 1) shape-size(circle-of) else 0 end
 end;

@@ -9,5 +9,5 @@ define function main() => <boolean>
   let small :: <u32> = 3;
   let big :: <u32> = 4000000000;
   let negative = -1i32;
-  if small < big then negative < small else #f end
+  if (small < big) negative < small else #f end
 end;

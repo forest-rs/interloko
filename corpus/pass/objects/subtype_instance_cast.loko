@@ -10,5 +10,5 @@ define class <circle> (<shape>)
 end;
 
 define function main()
-  if instance?(make(<circle>), <shape>) then as(<shape>, make(<circle>)).size else 0 end
+  if (instance?(make(<circle>), <shape>)) as(<shape>, make(<circle>)).size else 0 end
 end;

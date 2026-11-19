@@ -1,0 +1,23 @@
+// expect: run 1234
+// expect: diagnostics 0
+
+// `elseif` arms are tried in order and the first true test wins; `else`
+// runs when none is. Each arm is a body: its `let`s are its own, and its
+// last expression is its value.
+
+define function grade(n :: <integer>) => <integer>
+  if (n < 0)
+    0
+  elseif (n < 10)
+    1
+  elseif (n < 100)
+    let two = n - n + 2;
+    two
+  else
+    3
+  end
+end;
+
+define function main() => <integer>
+  grade(5) * 1000 + grade(50) * 100 + grade(500) * 10 + grade(-1) + 4
+end;

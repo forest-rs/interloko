@@ -103,6 +103,13 @@ than special generic-dispatch bytecode.
 The current slices include:
 
 - function definitions, locals, arithmetic, booleans, conditionals, and calls;
+- Dylan's conditionals: `if (test) … elseif (test) … else … end`,
+  `unless (test) … end`, and `case test => …; otherwise => … end`. Each arm
+  is a body, with its own `let`s, whose last expression is its value. A
+  conditional without `else` or `otherwise` produces no values: its arms
+  run for their effects, and using it where a value is expected is a type
+  error. An `instance?` test narrows its arm, and each later `elseif`,
+  `else` or `case` arm sees what the earlier tests ruled out;
 - Dylan-style names, where a hyphen is always a name character: `x-1` and
   `a-b` are single names, so subtraction is spaced (`x - 1`, `a -% b`);
 - `<integer>` arithmetic on 64-bit fixnums that signals a `<type-error>`

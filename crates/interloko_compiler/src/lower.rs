@@ -3572,6 +3572,7 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             collect_known_callable_uses_in_expr(then_branch, uses);
             collect_known_callable_uses_in_expr(else_branch, uses);
         }
+        sem::Expr::Discard { value, .. } => collect_known_callable_uses_in_expr(value, uses),
         sem::Expr::Handle {
             body,
             restart,
@@ -6056,7 +6057,10 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
-            sem::Expr::If { .. } | sem::Expr::Handle { .. } | sem::Expr::Block { .. } => {
+            sem::Expr::If { .. }
+            | sem::Expr::Handle { .. }
+            | sem::Expr::Block { .. }
+            | sem::Expr::Discard { .. } => {
                 let mut results = self.lower_results_expr(expr)?;
                 if results.len() != 1 {
                     return Err(invalid_semantic(
@@ -6172,6 +6176,10 @@ impl<'module> BodyLowering<'module> {
                     else_branch,
                     *span,
                 )
+            }
+            sem::Expr::Discard { value, .. } => {
+                let _ = self.lower_results_expr(value)?;
+                Ok(Vec::new())
             }
             sem::Expr::Handle {
                 body,
@@ -11033,7 +11041,7 @@ mod tests {
         let module = lower_source(
             "define function deliver(f :: <callable>, n :: <integer>) => <integer>\n  apply(f, n)\nend;\n\
              define function pick(n :: <integer>) => <integer>\n  \
-               block (return)\n    if n > 3 then return(n) + 1 else deliver(return, 7) end\n  end\nend;",
+               block (return)\n    if (n > 3) return(n) + 1 else deliver(return, 7) end\n  end\nend;",
         );
         let function = |name: &str| {
             module
@@ -11199,7 +11207,7 @@ mod tests {
     fn lowers_typed_runtime_slot_reads() {
         let module = lower_source(
             "define class <flag> (<object>)\n  slot valid? :: <boolean>;\nend;\n\
-             define function main()\n  if make(<flag>, valid?: #t).valid? then 1 else 0 end\nend;",
+             define function main()\n  if (make(<flag>, valid?: #t).valid?) 1 else 0 end\nend;",
         );
 
         let dump = module.dump();
@@ -11287,7 +11295,7 @@ mod tests {
     fn lowers_instance_tests_casts_and_refined_locals() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
-             define function radius-or-zero(x :: <object>) => <integer>\n  if instance?(x, <circle>) then x.radius else 0 end\nend;\n\
+             define function radius-or-zero(x :: <object>) => <integer>\n  if (instance?(x, <circle>)) x.radius else 0 end\nend;\n\
              define function main()\n  radius-or-zero(make(<circle>, radius: 8))\nend;",
         );
 
@@ -11301,7 +11309,7 @@ mod tests {
     fn lowers_booleans_comparisons_and_if_join() {
         let module = lower_source(
             "define function check()\n  #t\nend;\n\
-             define function main()\n  if 10 < 20 then 1 else 2 end\nend;",
+             define function main()\n  if (10 < 20) 1 else 2 end\nend;",
         );
 
         let dump = module.dump();
@@ -11340,12 +11348,12 @@ mod tests {
              define class <square> (<shape>)\nend;\n\
              define class <oops> (<object>)\nend;\n\
              define function by-if(c :: <boolean>)\n  \
-               if c then as(<shape>, make(<circle>)) else as(<shape>, make(<square>)) end\nend;\n\
+               if (c) as(<shape>, make(<circle>)) else as(<shape>, make(<square>)) end\nend;\n\
              define function by-handle(c :: <boolean>)\n  \
-               handle if c then signal(make(<oops>)) else make(<circle>) end\n  \
+               handle if (c) signal(make(<oops>)) else make(<circle>) end\n  \
                with restart e :: <oops> as(<shape>, make(<square>)) end\nend;\n\
              define function by-block(c :: <boolean>) => <shape>\n  \
-               block (return) if c then return(make(<square>)) else make(<circle>) end end\nend;",
+               block (return) if (c) return(make(<square>)) else make(<circle>) end end\nend;",
         );
 
         for name in ["by-if", "by-handle", "by-block"] {
@@ -11374,7 +11382,7 @@ mod tests {
     fn internal_lowering_failures_report_the_definition_as_a_diagnostic() {
         let tree = grammar_frontend::parse_file(
             SourceFileId::ANONYMOUS,
-            "define function main()\n  if #t then 1 else 2 end\nend;",
+            "define function main()\n  if (#t) 1 else 2 end\nend;",
         )
         .syntax;
         let mut sem = sem::lower(&ast::lower(&tree));
@@ -11444,7 +11452,7 @@ mod tests {
         define function main() => <integer>\n  \
           let s :: <shape> = make(<circle>);\n  \
           let n :: <integer> = 4;\n  \
-          if instance?(s, <circle>) then (n + 1) + area(as(<circle>, s)) else 0 end\nend;";
+          if (instance?(s, <circle>)) (n + 1) + area(as(<circle>, s)) else 0 end\nend;";
 
     #[test]
     fn off_lowering_reads_no_typing_fact() {
@@ -11507,13 +11515,13 @@ mod tests {
         // neither. The same closure written in one body is specialized.
         let source = "define class <box> (<object>)\n  \
               slot f :: <callable>, init-value: function (x :: <integer>) => <integer>\n    \
-                if x < 10 then if x > 0 then x + 1 else 0 end else 0 end\n  end;\n\
+                if (x < 10) if (x > 0) x + 1 else 0 end else 0 end\n  end;\n\
             end;\n\
             define function one() => <box>\n  make(<box>)\nend;\n\
             define function two() => <box>\n  make(<box>)\nend;\n\
             define function own() => <callable>\n  \
               function (x :: <integer>) => <integer>\n    \
-                if x < 10 then if x > 0 then x + 1 else 0 end else 0 end\n  end\nend;";
+                if (x < 10) if (x > 0) x + 1 else 0 end else 0 end\n  end\nend;";
         let proved = lower_with_policy(source, CodegenPolicy::Proved);
         let closures = proved
             .functions
@@ -11551,7 +11559,7 @@ mod tests {
     #[test]
     fn a_scalar_instance_test_unboxes_its_local_once() {
         let source = "define function poly(x :: <object>) => <integer>\n  \
-            if instance?(x, <integer>) then x * x + x else 0 end\nend;\n\
+            if (instance?(x, <integer>)) x * x + x else 0 end\nend;\n\
             define function main() => <integer>\n  poly(6)\nend;";
         for policy in [CodegenPolicy::Off, CodegenPolicy::Proved] {
             let poly = function_dump(&lower_with_policy(source, policy), "poly");
@@ -11567,9 +11575,9 @@ mod tests {
     fn a_refined_local_unboxes_only_where_it_is_read_and_reboxes_to_its_box() {
         let source = "define function keep(y :: <object>) => <object>\n  y\nend;\n\
             define function unread(x :: <object>) => <integer>\n  \
-            if instance?(x, <integer>) then 1 else 0 end\nend;\n\
+            if (instance?(x, <integer>)) 1 else 0 end\nend;\n\
             define function both(x :: <object>) => <object>\n  \
-            if instance?(x, <double-float>) then keep(x + 1.0) + keep(x) else x end\nend;\n\
+            if (instance?(x, <double-float>)) keep(x + 1.0) + keep(x) else x end\nend;\n\
             define function main() => <integer>\n  unread(2)\nend;";
         let module = lower_with_policy(source, CodegenPolicy::Proved);
         let unread = function_dump(&module, "unread");

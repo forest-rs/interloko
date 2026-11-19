@@ -1,0 +1,29 @@
+// codegen: proved
+// expect: run 15
+// expect: diagnostics 0
+// expect: dump sem contains refinement l0 => integer
+// expect: dump lowered contains unbox <integer>, %r1
+
+// An `elseif` arm unboxes its narrowed local once, at the test, even when
+// the arm is a body with `let`s whose values the `if` discards (it has no
+// `else`): the arm's reads of `x`, inside the `let` and after it, use the
+// unboxed value.
+
+define class <k> (<object>)
+  slot n :: <integer>, init-value: 0;
+end;
+
+define function f(x :: <object>, k :: <k>) => ()
+  if (instance?(x, <double-float>))
+    k.n := 1
+  elseif (instance?(x, <integer>))
+    let y = x * 2;
+    k.n := y + x
+  end
+end;
+
+define function main() => <integer>
+  let k = make(<k>);
+  let done = block () #t cleanup f(5, k) end;
+  k.n
+end;

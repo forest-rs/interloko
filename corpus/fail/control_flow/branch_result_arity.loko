@@ -3,5 +3,5 @@
 // expect: diagnostic contains if branches must produce the same types, not 2 values (<integer>, <integer>) and <integer>
 
 define function main()
-  if #t then values(1, 2) else 3 end
+  if (#t) values(1, 2) else 3 end
 end;

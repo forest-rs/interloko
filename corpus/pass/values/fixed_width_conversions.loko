@@ -19,8 +19,8 @@ define function main() => <u32>
   let narrow = as(<i32>, big);
   let from-float = as(<i32>, 40000.0);
   let unsigned = as(<u32>, narrow);
-  if as(<integer>, unsigned) = big then
-    if from-float = narrow then frames(40000) else 1u32 end
+  if (as(<integer>, unsigned) = big)
+    if (from-float = narrow) frames(40000) else 1u32 end
   else
     0u32
   end

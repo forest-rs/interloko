@@ -12,8 +12,8 @@ end;
 define function main() => <double-float>
   let small = as(<integer>, keep(70368744177663));
   let wide = as(<integer>, keep(-9223372036854775808));
-  if small = 70368744177663 then
-    if wide = -9223372036854775808 then as(<double-float>, keep(-0.0)) else 1.0 end
+  if (small = 70368744177663)
+    if (wide = -9223372036854775808) as(<double-float>, keep(-0.0)) else 1.0 end
   else
     2.0
   end

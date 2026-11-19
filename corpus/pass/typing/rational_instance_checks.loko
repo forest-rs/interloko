@@ -8,7 +8,7 @@
 // typing decides every remaining test too, even through the `<object>`
 // upcast, so each one warns.
 define function bit(flag :: <boolean>, weight :: <integer>) => <integer>
-  if flag then weight else 0 end
+  if (flag) weight else 0 end
 end;
 
 define function main() => <integer>

@@ -14,7 +14,7 @@ define class <circle> (<shape>)
 end;
 
 define function round?(c :: <circle>) => <integer>
-  if instance?(c, <shape>) then 1 else 0 end
+  if (instance?(c, <shape>)) 1 else 0 end
 end;
 
 define function main() => <integer>

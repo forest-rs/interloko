@@ -91,7 +91,7 @@ fn dispatch_on_a_superclass_is_runtime_checked_and_silent_by_default() {
 fn dispatch_with_no_possible_method_is_refuted_and_warns() {
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}define function main()\n  \
-         if 1 < 2 then area(make(<circle>)) else area(make(<shape>)) end\nend;"
+         if (1 < 2) area(make(<circle>)) else area(make(<shape>)) end\nend;"
     ));
     let decisions = main_decisions(&module, &artifact);
     let verdicts = decisions
@@ -209,7 +209,7 @@ fn casts_are_classified_as_upcast_narrowing_or_disjoint() {
 fn checking_distributes_over_conditional_operands() {
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}define function pick(s :: <shape>)\n  \
-         as(<circle>, if 1 < 2 then make(<shape>) else s end)\nend;\n\
+         as(<circle>, if (1 < 2) make(<shape>) else s end)\nend;\n\
          define function main()\n  0\nend;"
     ));
     let pick = &module.functions[0];
@@ -283,7 +283,7 @@ fn verdicts_of(module: &sem::Module, artifact: &TypingArtifact, name: &str) -> V
 fn float_values_have_exact_double_float_class_under_abstract_float() {
     let (module, artifact) = decisions_for(&format!(
         "{FLOATS}define function main()\n  \
-         if 1 < 2 then size-of(2.5) + magnitude(2.5) else whole(2.5) end\nend;"
+         if (1 < 2) size-of(2.5) + magnitude(2.5) else whole(2.5) end\nend;"
     ));
     let double_float = module
         .builtin_value_class(sem::BuiltinValueClass::DoubleFloat)
@@ -422,7 +422,7 @@ fn a_cast_that_may_fail_forgets_its_operand() {
     // exact class.
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}define function pick(s :: <shape>)\n  \
-         area(as(<circle>, if instance?(s, <circle>) then as(<shape>, make(<circle>)) \
+         area(as(<circle>, if (instance?(s, <circle>)) as(<shape>, make(<circle>)) \
          else as(<shape>, make(<square>)) end))\nend;\n\
          define function main()\n  0\nend;"
     ));
@@ -437,10 +437,10 @@ fn a_cast_that_may_fail_forgets_its_operand() {
 fn synthesis_joins_branches_and_stays_within_sem() {
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}define function pick(s :: <shape>)\n  \
-         as(<shape>, if 1 < 2 then as(<shape>, make(<circle>)) \
+         as(<shape>, if (1 < 2) as(<shape>, make(<circle>)) \
          else as(<shape>, make(<square>)) end)\nend;\n\
          define function same()\n  \
-         as(<shape>, if 1 < 2 then make(<circle>) else make(<circle>) end)\nend;\n\
+         as(<shape>, if (1 < 2) make(<circle>) else make(<circle>) end)\nend;\n\
          define function main()\n  0\nend;"
     ));
     let actual = |name: &str| {
@@ -595,7 +595,7 @@ fn instance_then_branch_meets_the_tested_class() {
     // read sem gives as an unboxed `<integer>` has that type here too.
     let (module, artifact) = decisions_for(&format!(
         "{WHOLE}define function f(x :: <object>) => <integer>\n  \
-         if instance?(x, <integer>) then whole(x) else 0 end\nend;"
+         if (instance?(x, <integer>)) whole(x) else 0 end\nend;"
     ));
     let [dispatch] = checks_of(&module, &artifact, "f", TypingCheck::Dispatch)
         .try_into()
@@ -614,8 +614,8 @@ fn instance_else_branch_removes_the_tested_class() {
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}define function f(round? :: <boolean>) => <integer>\n  \
          let c :: <shape> = make(<circle>);\n  let s :: <shape> = make(<square>);\n  \
-         let shape = if round? then c else s end;\n  \
-         if instance?(shape, <circle>) then 0 else area(shape) end\nend;"
+         let shape = if (round?) c else s end;\n  \
+         if (instance?(shape, <circle>)) 0 else area(shape) end\nend;"
     ));
     let [dispatch] = checks_of(&module, &artifact, "f", TypingCheck::Dispatch)
         .try_into()
@@ -634,7 +634,7 @@ fn instance_else_branch_removes_the_tested_class() {
 fn limited_instance_tests_narrow_ranges_in_both_branches() {
     let (module, artifact) = decisions_for(
         "define function f(x :: <integer>) => <u32>\n  \
-         if instance?(x, <i32>) then as(<u32>, as(<i32>, x)) else as(<u32>, x) end\nend;",
+         if (instance?(x, <i32>)) as(<u32>, as(<i32>, x)) else as(<u32>, x) end\nend;",
     );
     let ranges = checks_of(&module, &artifact, "f", TypingCheck::Range);
     let summary = ranges
@@ -663,7 +663,7 @@ fn a_limited_test_bounds_arithmetic_on_the_unboxed_local() {
     // knows it is an `<i32>` there, so `x + 1` cannot overflow.
     let (module, artifact) = decisions_for(
         "define function f(x :: <object>) => <integer>\n  \
-         if instance?(x, <i32>) then x + 1 else 0 end\nend;",
+         if (instance?(x, <i32>)) x + 1 else 0 end\nend;",
     );
     let sem::Expr::If { refinement, .. } = &module.functions[0].body.result else {
         panic!("expected if");
@@ -731,8 +731,8 @@ fn a_proved_numeric_send_has_its_method_result() {
 fn integer_comparisons_narrow_both_branches() {
     let (module, artifact) = decisions_for(
         "define function f(n :: <integer>) => <i32>\n  \
-         if n < 0 then 0i32\n  \
-         else if 100 >= n then as(<i32>, n) else as(<i32>, n - 100) end\n  end\nend;",
+         if (n < 0) 0i32\n  \
+         else if (100 >= n) as(<i32>, n) else as(<i32>, n - 100) end\n  end\nend;",
     );
     let ranges = checks_of(&module, &artifact, "f", TypingCheck::Range);
     let summary = ranges
@@ -762,7 +762,7 @@ fn integer_comparisons_narrow_both_branches() {
 fn equality_narrows_to_the_point_and_removes_it_otherwise() {
     let (module, artifact) = decisions_for(
         "define function f(n :: <u32>) => <i32>\n  \
-         if n = 0u32 then as(<i32>, n) else as(<i32>, n - 1u32) end\nend;",
+         if (n = 0u32) as(<i32>, n) else as(<i32>, n - 1u32) end\nend;",
     );
     let ranges = checks_of(&module, &artifact, "f", TypingCheck::Range);
     assert_eq!(ranges[0].rule, TypingRule::RangeWithin);
@@ -796,10 +796,10 @@ fn dispatch_distributes_over_union_members() {
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}define function both(round? :: <boolean>) => <integer>\n  \
          let c :: <shape> = make(<circle>);\n  let s :: <shape> = make(<square>);\n  \
-         area(if round? then c else s end)\nend;\n\
+         area(if (round?) c else s end)\nend;\n\
          define function some(round? :: <boolean>) => <integer>\n  \
          let c :: <shape> = make(<circle>);\n  let s :: <shape> = make(<shape>);\n  \
-         area(if round? then c else s end)\nend;"
+         area(if (round?) c else s end)\nend;"
     ));
     let [both] = checks_of(&module, &artifact, "both", TypingCheck::Dispatch)
         .try_into()
@@ -849,7 +849,7 @@ fn an_unreachable_branch_drops_out_of_the_join() {
         "{SHAPES}define function main() => <integer>\n  \
          let c :: <shape> = make(<circle>);\n  let d :: <shape> = make(<circle>);\n  \
          let s :: <shape> = make(<square>);\n  \
-         area(if instance?(c, <circle>) then d else as(<shape>, s) end)\nend;"
+         area(if (instance?(c, <circle>)) d else as(<shape>, s) end)\nend;"
     ));
     let decisions = main_decisions(&module, &artifact);
     // The test is always true, so the else branch's cast is unreachable and
@@ -888,7 +888,7 @@ fn block_exit_arguments_join_the_block_value() {
          let s :: <shape> = make(<square>);\n  \
          let shape :: <shape> = block (return)\n    \
          let c :: <shape> = make(<circle>);\n    \
-         let picked = if n > 10 then return(c) else s end;\n    picked\n  end;\n  \
+         let picked = if (n > 10) return(c) else s end;\n    picked\n  end;\n  \
          area(shape)\nend;"
     ));
     let [dispatch] = checks_of(&module, &artifact, "choose", TypingCheck::Dispatch)
@@ -922,7 +922,7 @@ fn an_escaping_exit_joins_the_declared_block_type() {
 fn literals_have_singleton_types_and_decide_conditions() {
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}{WHOLE}define function main() => <integer>\n  \
-         if #t then whole(7) else area(make(<shape>)) end\nend;"
+         if (#t) whole(7) else area(make(<shape>)) end\nend;"
     ));
     let decisions = main_decisions(&module, &artifact);
     assert_eq!(type_name(&module, &decisions[0].actual[0]), "singleton(7)");
@@ -1042,12 +1042,12 @@ fn unrefined_expressions_have_their_sem_category() {
 fn captures_carry_and_narrow_the_facts_of_their_sources() {
     let (module, artifact) = decisions_for(&format!(
         "{WHOLE}define function outer(x :: <object>) => <integer>\n  \
-         if instance?(x, <integer>) then\n    block ()\n      \
+         if (instance?(x, <integer>))\n    block ()\n      \
          let f :: <callable> = function () => <integer>\n        whole(x)\n      end;\n      0\n    \
          end\n  else 0 end\nend;\n\
          define function inner(x :: <object>) => <integer>\n  \
          let f :: <callable> = function () => <integer>\n    \
-         if instance?(x, <integer>) then whole(x) else 0 end\n  end;\n  0\nend;"
+         if (instance?(x, <integer>)) whole(x) else 0 end\n  end;\n  0\nend;"
     ));
     for name in ["outer", "inner"] {
         let [dispatch] = checks_of(&module, &artifact, name, TypingCheck::Dispatch)
@@ -1138,7 +1138,7 @@ fn refutations_label_the_sources_of_their_operands() {
 fn dump_renders_reason_chains_and_assumptions() {
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}define function measure(s :: <shape>) => <integer>\n  \
-         if instance?(s, <circle>) then area(s) else 0 end\nend;"
+         if (instance?(s, <circle>)) area(s) else 0 end\nend;"
     ));
     let dump = artifact.dump(&module);
     assert!(
@@ -1166,7 +1166,7 @@ fn unreachable_checks_are_never_reported() {
     // the then branch is never reached.
     let module = module(&format!(
         "{SHAPES}define function main() => <integer>\n  \
-         if #f then area(make(<circle>)) else 0 end\nend;"
+         if (#f) area(make(<circle>)) else 0 end\nend;"
     ));
     assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
     let artifact = analyze(&module, config);
@@ -1279,7 +1279,7 @@ fn span_of(source: &str, needle: &str, occurrence: usize) -> Span {
 fn type_of_a_narrowed_local_lists_its_narrowed_uses() {
     let source = format!(
         "{WHOLE}define function f(x :: <object>) => <integer>\n  \
-         if instance?(x, <integer>) then whole(x) else 0 end\nend;"
+         if (instance?(x, <integer>)) whole(x) else 0 end\nend;"
     );
     let (module, artifact) = decisions_for(&source);
     let f = function_definition(&module, "f");
@@ -1365,7 +1365,7 @@ fn type_of_a_block_is_the_join_of_its_exits() {
          let s :: <shape> = make(<square>);\n  \
          let shape :: <shape> = block (return)\n    \
          let c :: <shape> = make(<circle>);\n    \
-         let picked = if n > 10 then return(c) else s end;\n    picked\n  end;\n  \
+         let picked = if (n > 10) return(c) else s end;\n    picked\n  end;\n  \
          area(shape)\nend;"
     ));
     let choose = function_definition(&module, "choose");
@@ -1421,7 +1421,7 @@ fn type_of_a_block_is_the_join_of_its_exits() {
 fn type_of_a_capture_is_its_source_fact_where_the_closure_is_made() {
     let source = format!(
         "{WHOLE}define function outer(x :: <object>) => <integer>\n  \
-         if instance?(x, <integer>) then\n    block ()\n      \
+         if (instance?(x, <integer>))\n    block ()\n      \
          let f :: <callable> = function () => <integer>\n        whole(x)\n      end;\n      0\n    \
          end\n  else 0 end\nend;"
     );
@@ -1529,7 +1529,7 @@ fn dump_types_lists_bindings_uses_and_results() {
     let (module, artifact) = decisions_for(&format!(
         "{WHOLE}define function f(x :: <object>) => <integer>\n  \
          let y :: <integer> = 5;\n  \
-         if instance?(x, <integer>) then whole(x) else y end\nend;"
+         if (instance?(x, <integer>)) whole(x) else y end\nend;"
     ));
     let dump = artifact.dump_types(&module);
     assert!(
@@ -1677,8 +1677,8 @@ fn a_sealed_leaf_is_exact_so_its_sends_select_their_method() {
 fn an_instance_test_narrows_a_sealed_cone_to_its_other_pieces() {
     let source = format!(
         "{SEALED_SHAPES}define function side(s :: <shape>)\n  \
-         if instance?(s, <circle>) then 0 \
-         else if instance?(s, <square>) then 1 else area(s) end end\nend;"
+         if (instance?(s, <circle>)) 0 \
+         else if (instance?(s, <square>)) 1 else area(s) end end\nend;"
     );
     let (module, artifact) = decisions_for(&source);
     let typed = function_typing(&module, &artifact, "side");
@@ -1715,9 +1715,9 @@ fn an_instance_test_narrows_a_sealed_cone_to_its_other_pieces() {
 fn a_cast_against_a_sealed_hierarchy_is_proved_or_refuted_by_its_pieces() {
     let source = format!(
         "{SEALED_SHAPES}define function circle(s :: <shape>)\n  \
-         if instance?(s, <square>) then 0 else area(as(<circle>, s)) end\nend;\n\
+         if (instance?(s, <square>)) 0 else area(as(<circle>, s)) end\nend;\n\
          define function square(s :: <shape>)\n  \
-         if instance?(s, <square>) then 0 else area(as(<square>, s)) end\nend;"
+         if (instance?(s, <square>)) 0 else area(as(<square>, s)) end\nend;"
     );
     let (module, artifact) = decisions_for(&source);
     let cast = |name: &str| {
@@ -1778,7 +1778,7 @@ fn decisions_record_who_asked_for_each_check() {
            let c = as(<circle>, s);\n  \
            let k :: <circle> = f(c);\n  \
            let g = keep;\n  \
-           if instance?(s, <circle>) then small(n)\n  \
+           if (instance?(s, <circle>)) small(n)\n  \
            else small(as(limited(<integer>, min: 0, max: 9), n)) end\nend;",
     );
     let origins = |name: &str| {
@@ -1978,7 +1978,7 @@ fn explicit_casts_tests_and_indirect_entries_are_not_strict_obligations() {
          let g = keep;\n  \
          let c = as(<circle>, s);\n  \
          let m = as(limited(<integer>, min: 0), n);\n  \
-         if instance?(s, <square>) then 1 else 2 end\nend;"
+         if (instance?(s, <square>)) 1 else 2 end\nend;"
     ));
     let origins = artifact
         .decisions()

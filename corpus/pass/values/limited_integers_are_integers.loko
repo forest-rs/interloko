@@ -14,8 +14,8 @@ end;
 define function main() => <string>
   let small :: <i32> = -3;
   let boxed :: <object> = 10u32;
-  if twice(small) = -6 then
-    if instance?(boxed, <integer>) then class-name(object-class(boxed)) else "boxed" end
+  if (twice(small) = -6)
+    if (instance?(boxed, <integer>)) class-name(object-class(boxed)) else "boxed" end
   else
     "twice"
   end

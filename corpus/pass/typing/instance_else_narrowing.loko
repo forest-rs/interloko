@@ -28,8 +28,8 @@ end;
 define function count(round? :: <boolean>) => <integer>
   let circle :: <shape> = make(<circle>);
   let square :: <shape> = make(<square>);
-  let shape = if round? then circle else square end;
-  if instance?(shape, <circle>) then 0 else sides(shape) end
+  let shape = if (round?) circle else square end;
+  if (instance?(shape, <circle>)) 0 else sides(shape) end
 end;
 
 define function main() => <integer>

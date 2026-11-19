@@ -726,16 +726,45 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Conditional expression.
+    /// `if (test) body elseif (test) body … else body end`.
+    ///
+    /// The arms are tried in order and the first whose test is true runs.
+    /// Without an `else`, the expression produces no values and each arm's
+    /// values are discarded.
     If {
         /// Stable-ish AST node identity.
         id: AstNodeId,
-        /// Boolean condition.
+        /// The `if` arm, then one arm per `elseif`, in source order.
+        arms: Vec<CondArm>,
+        /// Body run when no test is true, when an `else` is written.
+        else_body: Option<Box<Block>>,
+        /// Source span.
+        span: Span,
+    },
+    /// `unless (test) body end`: runs `body` when `test` is false.
+    ///
+    /// Produces no values; the body's values are discarded.
+    Unless {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Boolean test.
         condition: Box<Expr>,
-        /// Expression evaluated when the condition is true.
-        then_branch: Box<Expr>,
-        /// Expression evaluated when the condition is false.
-        else_branch: Box<Expr>,
+        /// Body run when the test is false.
+        body: Box<Block>,
+        /// Source span.
+        span: Span,
+    },
+    /// `case test => body; … otherwise => body; end`.
+    ///
+    /// The first arm whose test is true runs. Without an `otherwise`, the
+    /// expression produces no values and each arm's values are discarded.
+    Case {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// The `test => body` arms in source order.
+        arms: Vec<CondArm>,
+        /// Body run when no test is true, when an `otherwise` is written.
+        otherwise: Option<Box<Block>>,
         /// Source span.
         span: Span,
     },
@@ -803,6 +832,8 @@ impl Expr {
             | Self::UnaryMinus { id, .. }
             | Self::Compare { id, .. }
             | Self::If { id, .. }
+            | Self::Unless { id, .. }
+            | Self::Case { id, .. }
             | Self::Handle { id, .. }
             | Self::Block { id, .. }
             | Self::Error { id, .. } => *id,
@@ -835,11 +866,25 @@ impl Expr {
             | Self::UnaryMinus { span, .. }
             | Self::Compare { span, .. }
             | Self::If { span, .. }
+            | Self::Unless { span, .. }
+            | Self::Case { span, .. }
             | Self::Handle { span, .. }
             | Self::Block { span, .. }
             | Self::Error { span, .. } => *span,
         }
     }
+}
+
+/// One arm of a conditional: `(test) body` in an `if` or `elseif`, or
+/// `test => body` in a `case`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CondArm {
+    /// Boolean test.
+    pub test: Expr,
+    /// Body run when the test is true.
+    pub body: Block,
+    /// Source span, from the arm's keyword or test through its body.
+    pub span: Span,
 }
 
 /// Restart clause for a lexical condition handler.
@@ -1681,6 +1726,8 @@ impl<'tree> Lowering<'tree> {
             CstKind::UnaryExpr => self.lower_unary(node),
             CstKind::BinaryExpr => self.lower_binary(node),
             CstKind::IfExpr => self.lower_if(node),
+            CstKind::UnlessExpr => self.lower_unless(node),
+            CstKind::CaseExpr => self.lower_case(node),
             CstKind::HandleExpr => self.lower_handle(node),
             CstKind::BlockExpr => self.lower_block_expr(node),
             _ => Expr::Error {
@@ -2520,30 +2567,93 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_if(&mut self, node: &CstNode) -> Expr {
-        let mut exprs = Vec::new();
-        for child in &node.children {
-            if let CstElement::Node(expr) = child {
-                exprs.push(self.lower_expr(expr));
-            }
+        let mut arms = vec![self.lower_cond_arm(node, node.span.start)];
+        let mut else_body = None;
+        for child in node.child_nodes(CstKind::ElseifClause) {
+            arms.push(self.lower_cond_arm(child, child.span.start));
         }
-        let mut exprs = exprs.into_iter();
-        let condition = exprs.next().unwrap_or_else(|| Expr::Error {
-            id: self.ast_id(node),
-            span: node.span,
-        });
-        let then_branch = exprs.next().unwrap_or_else(|| Expr::Error {
-            id: self.ast_id(node),
-            span: node.span,
-        });
-        let else_branch = exprs.next().unwrap_or_else(|| Expr::Error {
-            id: self.ast_id(node),
-            span: node.span,
-        });
+        if let Some(clause) = node.child_nodes(CstKind::ElseClause).next() {
+            else_body = Some(Box::new(self.lower_clause_body(clause)));
+        }
         Expr::If {
             id: self.ast_id(node),
-            condition: Box::new(condition),
-            then_branch: Box::new(then_branch),
-            else_branch: Box::new(else_branch),
+            arms,
+            else_body,
+            span: node.span,
+        }
+    }
+
+    fn lower_unless(&mut self, node: &CstNode) -> Expr {
+        let CondArm { test, body, .. } = self.lower_cond_arm(node, node.span.start);
+        Expr::Unless {
+            id: self.ast_id(node),
+            condition: Box::new(test),
+            body: Box::new(body),
+            span: node.span,
+        }
+    }
+
+    fn lower_case(&mut self, node: &CstNode) -> Expr {
+        let arms = node
+            .child_nodes(CstKind::CaseClause)
+            .map(|clause| self.lower_cond_arm(clause, clause.span.start))
+            .collect();
+        let otherwise = node
+            .child_nodes(CstKind::OtherwiseClause)
+            .next()
+            .map(|clause| Box::new(self.lower_clause_body(clause)));
+        Expr::Case {
+            id: self.ast_id(node),
+            arms,
+            otherwise,
+            span: node.span,
+        }
+    }
+
+    /// Lowers the test and body written directly under `node`, an arm that
+    /// starts at byte `start`.
+    fn lower_cond_arm(&mut self, node: &CstNode, start: usize) -> CondArm {
+        let mut test = None;
+        let mut body = None;
+        for child in &node.children {
+            let CstElement::Node(child) = child else {
+                continue;
+            };
+            match child.kind {
+                CstKind::Body => {
+                    body = Some(self.lower_block(child));
+                    break;
+                }
+                kind if kind.is_role() => {}
+                _ if test.is_none() => test = Some(self.lower_expr(child)),
+                _ => {}
+            }
+        }
+        let test = test.unwrap_or_else(|| Expr::Error {
+            id: self.ast_id(node),
+            span: node.span,
+        });
+        let body = body.unwrap_or_else(|| self.missing_block(node));
+        let span = Span::new(start, body.span.end.max(test.span().end));
+        CondArm { test, body, span }
+    }
+
+    /// Lowers the body of an `else` or `otherwise` clause.
+    fn lower_clause_body(&mut self, clause: &CstNode) -> Block {
+        match clause.child_nodes(CstKind::Body).next() {
+            Some(body) => self.lower_block(body),
+            None => self.missing_block(clause),
+        }
+    }
+
+    fn missing_block(&self, node: &CstNode) -> Block {
+        Block {
+            id: self.ast_id(node),
+            lets: Vec::new(),
+            result: Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            },
             span: node.span,
         }
     }
@@ -3464,7 +3574,7 @@ mod tests {
             "define class <c> (<object>)\n  slot s :: {6};\nend;\n\
              define function f(n :: {0}) => {1}\n  \
              let m :: {2} = n;\n  let g :: {4} = f;\n  \
-             if instance?(n, {5}) then as({3}, m) else 0 end\nend;",
+             if (instance?(n, {5})) as({3}, m) else 0 end\nend;",
             written[0], written[1], written[2], written[3], written[4], written[5], written[6]
         );
         let tree = parse(&source);
@@ -3498,19 +3608,14 @@ mod tests {
             shown(g.type_annotation.as_ref()).as_deref(),
             Some(written[4])
         );
-        let Expr::If {
-            condition,
-            then_branch,
-            ..
-        } = &function.body.result
-        else {
+        let Expr::If { arms, .. } = &function.body.result else {
             panic!("an if");
         };
-        let Expr::InstanceOf { target, .. } = condition.as_ref() else {
+        let Expr::InstanceOf { target, .. } = &arms[0].test else {
             panic!("instance?");
         };
         assert_eq!(target.to_string(), written[5]);
-        let Expr::Cast { target, .. } = then_branch.as_ref() else {
+        let Expr::Cast { target, .. } = &arms[0].body.result else {
             panic!("as");
         };
         assert_eq!(target.to_string(), written[3]);
@@ -3729,24 +3834,19 @@ mod tests {
     fn lowers_instance_tests_and_casts() {
         let tree = parse(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
-             define function main(x :: <object>) => <integer>\n  if instance?(x, <circle>) then as(<circle>, x).radius else 0 end\nend;",
+             define function main(x :: <object>) => <integer>\n  if (instance?(x, <circle>)) as(<circle>, x).radius else 0 end\nend;",
         );
         let module = lower(&tree);
         assert_eq!(module.diagnostics, Vec::new());
-        let Expr::If {
-            condition,
-            then_branch,
-            ..
-        } = &module.functions[0].body.result
-        else {
+        let Expr::If { arms, .. } = &module.functions[0].body.result else {
             panic!("expected if");
         };
         assert!(matches!(
-            condition.as_ref(),
+            &arms[0].test,
             Expr::InstanceOf { target, .. } if target.name() == Some("<circle>")
         ));
         assert!(matches!(
-            then_branch.as_ref(),
+            &arms[0].body.result,
             Expr::SlotRead { receiver, .. }
                 if matches!(receiver.as_ref(), Expr::Cast { target, .. } if target.name() == Some("<circle>"))
         ));
@@ -3853,37 +3953,86 @@ mod tests {
     }
 
     #[test]
+    fn lowers_elseif_unless_and_case_arms() {
+        let tree = parse(
+            "define function f(x)\n  if (x < 0) 0 elseif (x = 0) let y = 1; y else 2 end\nend;\n\
+             define function g(x)\n  unless (x < 0) x end\nend;\n\
+             define function h(x)\n  case x < 0 => 0; x = 0 => 1; otherwise => 2 end\nend;\n\
+             define function k(x)\n  case x < 0 => 0 end\nend;",
+        );
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+
+        let Expr::If {
+            arms, else_body, ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected if");
+        };
+        assert_eq!(arms.len(), 2);
+        assert_eq!(arms[1].body.lets.len(), 1);
+        assert_eq!(&tree.source[arms[1].span.start..][..6], "elseif");
+        assert!(matches!(
+            else_body.as_deref().map(|body| &body.result),
+            Some(Expr::Number { value: 2, .. })
+        ));
+
+        assert!(matches!(
+            &module.functions[1].body.result,
+            Expr::Unless { body, .. } if matches!(body.result, Expr::Name { .. })
+        ));
+
+        let Expr::Case {
+            arms, otherwise, ..
+        } = &module.functions[2].body.result
+        else {
+            panic!("expected case");
+        };
+        assert_eq!(arms.len(), 2);
+        assert!(matches!(
+            arms[1].test,
+            Expr::Compare {
+                op: CompareOp::Eq,
+                ..
+            }
+        ));
+        assert!(otherwise.is_some());
+
+        assert!(matches!(
+            &module.functions[3].body.result,
+            Expr::Case { arms, otherwise: None, .. } if arms.len() == 1
+        ));
+    }
+
+    #[test]
     fn lowers_booleans_comparisons_and_if() {
-        let tree = parse("define function main(x)\n  if x < 0 then #f else x >= 10 end\nend;");
+        let tree = parse("define function main(x)\n  if (x < 0) #f else x >= 10 end\nend;");
         let module = lower(&tree);
 
         assert_eq!(module.diagnostics, Vec::new());
         let Expr::If {
-            condition,
-            then_branch,
-            else_branch,
-            ..
+            arms, else_body, ..
         } = &module.functions[0].body.result
         else {
             panic!("expected if expression");
         };
+        let [arm] = arms.as_slice() else {
+            panic!("expected one arm");
+        };
         assert!(matches!(
-            condition.as_ref(),
+            arm.test,
             Expr::Compare {
                 op: CompareOp::Lt,
                 ..
             }
         ));
+        assert!(matches!(arm.body.result, Expr::Bool { value: false, .. }));
         assert!(matches!(
-            then_branch.as_ref(),
-            Expr::Bool { value: false, .. }
-        ));
-        assert!(matches!(
-            else_branch.as_ref(),
-            Expr::Compare {
+            else_body.as_deref().map(|body| &body.result),
+            Some(Expr::Compare {
                 op: CompareOp::Ge,
                 ..
-            }
+            })
         ));
     }
 

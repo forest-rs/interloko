@@ -16,9 +16,9 @@
 // neither operation can overflow and both lose their checks.
 
 define function double-next(x :: <object>) => <integer>
-  if instance?(x, <i32>) then (x + 1) * 2 else 0 end
+  if (instance?(x, <i32>)) (x + 1) * 2 else 0 end
 end;
 
 define function main() => <integer>
-  if double-next(4294967296) = 0 then double-next(20) else 0 end
+  if (double-next(4294967296) = 0) double-next(20) else 0 end
 end;

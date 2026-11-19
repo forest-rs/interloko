@@ -21,7 +21,7 @@ end;
 define generic truthy(x :: <object>) => <integer>;
 
 define method truthy(x :: <object>) => <integer>
-  if instance?(x, <circle>) then 0 else 1 end
+  if (instance?(x, <circle>)) 0 else 1 end
 end;
 
 define function main() => <integer>

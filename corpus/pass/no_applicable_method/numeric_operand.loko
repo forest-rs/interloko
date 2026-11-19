@@ -12,6 +12,6 @@ define function main() => <integer>
   handle
     as(<integer>, add(as(<object>, "two")))
   with restart e :: <no-applicable-method>
-    if generic-function-name(e.no-applicable-method-generic) = "+" then 3 else 0 end
+    if (generic-function-name(e.no-applicable-method-generic) = "+") 3 else 0 end
   end
 end;

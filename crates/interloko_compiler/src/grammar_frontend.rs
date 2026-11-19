@@ -3112,7 +3112,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "expression",
-            "handle-expression | block-expression | if-expression | assignment-expression",
+            "handle-expression | block-expression | if-expression | unless-expression | case-expression | assignment-expression",
             "syntax.rs:Parser::parse_expr",
         ),
         (
@@ -3157,8 +3157,43 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "if-expression",
-            "`if` expression `then` expression `else` expression `end`",
-            "syntax.rs:Parser::parse_if",
+            "`if` `(` expression `)` body elseif-clause* else-clause? `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_if",
+        ),
+        (
+            "elseif-clause",
+            "`elseif` `(` expression `)` body",
+            "base_loko_primary::BaseLokoCstBuilder::build_if",
+        ),
+        (
+            "else-clause",
+            "`else` body",
+            "base_loko_primary::BaseLokoCstBuilder::build_if",
+        ),
+        (
+            "unless-expression",
+            "`unless` `(` expression `)` body `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_unless",
+        ),
+        (
+            "case-expression",
+            "`case` case-clause* otherwise-clause? `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_case",
+        ),
+        (
+            "case-clause",
+            "expression `=>` body case-clause-end",
+            "base_loko_primary::BaseLokoCstBuilder::build_case",
+        ),
+        (
+            "case-clause-end",
+            "`;` | &`end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_case",
+        ),
+        (
+            "otherwise-clause",
+            "`otherwise` `=>` body `;`?",
+            "base_loko_primary::BaseLokoCstBuilder::build_case",
         ),
         (
             "assignment-expression",
@@ -3856,6 +3891,12 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::FunctionExpr => Some("function-expression"),
         CstKind::VectorExpr => Some("vector-expression"),
         CstKind::IfExpr => Some("if-expression"),
+        CstKind::ElseifClause => Some("elseif-clause"),
+        CstKind::ElseClause => Some("else-clause"),
+        CstKind::UnlessExpr => Some("unless-expression"),
+        CstKind::CaseExpr => Some("case-expression"),
+        CstKind::CaseClause => Some("case-clause"),
+        CstKind::OtherwiseClause => Some("otherwise-clause"),
         CstKind::HandleExpr => Some("handle-expression"),
         CstKind::RestartClause => Some("restart-clause"),
         CstKind::BlockExpr => Some("block-expression"),
@@ -4299,7 +4340,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 56);
+        assert_eq!(grammar.effective_rules.len(), 63);
 
         assert!(
             !records

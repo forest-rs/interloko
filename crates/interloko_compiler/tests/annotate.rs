@@ -28,7 +28,7 @@ define method area(q :: <square>)
   4
 end;
 define function measure(s :: <shape>)
-  let bonus = if instance?(s, <circle>) then 1 else 0 end;
+  let bonus = if (instance?(s, <circle>)) 1 else 0 end;
   area(s) + bonus
 end;
 define function main()

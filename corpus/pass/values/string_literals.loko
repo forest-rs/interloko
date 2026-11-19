@@ -6,5 +6,5 @@ define function same-message(a :: <string>, b :: <string>) => <boolean>
 end;
 
 define function main()
-  if same-message("hello\nworld", "hello\nworld") then 1 else 0 end
+  if (same-message("hello\nworld", "hello\nworld")) 1 else 0 end
 end;

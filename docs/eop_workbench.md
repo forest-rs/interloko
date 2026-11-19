@@ -747,7 +747,7 @@ ordinary object of the kernel class `<type-error>`, under `<error>` and
 handle
   as(<circle>, s).radius
 with restart e :: <type-error>
-  if e.type-error-code = "type-error.cast" then 0 else 1 end
+  if (e.type-error-code = "type-error.cast") 0 else 1 end
 end
 ```
 
@@ -767,7 +767,7 @@ name it rather than parse text. Following Dylan, there are three kinds:
 
 ```loko
 define function largest(expected :: <type>) => <integer>
-  if instance?(expected, <limited-integer>) then
+  if (instance?(expected, <limited-integer>))
     as(<integer>, limited-integer-max(as(<limited-integer>, expected)))
   else
     0
@@ -911,7 +911,7 @@ A generic send whose arguments no method accepts signals a
 handle
   area(s)
 with restart e :: <no-applicable-method>
-  if generic-function-name(e.no-applicable-method-generic) = "area" then 0 else 1 end
+  if (generic-function-name(e.no-applicable-method-generic) = "area") 0 else 1 end
 end
 ```
 

@@ -4,5 +4,5 @@
 // expect: dump lowered contains const.bool true
 
 define function main()
-  if #t then 42 else 0 end
+  if (#t) 42 else 0 end
 end;

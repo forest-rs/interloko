@@ -9,7 +9,7 @@
 // bound it does not have.
 
 define function score(t :: <type>, n :: <integer>) => <integer>
-  if instance?(n, t) then 1 else 0 end
+  if (instance?(n, t)) 1 else 0 end
 end;
 
 define function type?(x :: <object>) => <boolean>
@@ -22,9 +22,9 @@ define function main() => <integer>
   score(digit, 7)
     + 2 * score(digit, 10)
     + 2 * score(natural, 4000000000)
-    + 4 * (if <i32> = limited(<integer>, min: -2147483648, max: 2147483647) then 1 else 0 end)
-    + 8 * (if digit = <u32> then 1 else 0 end)
-    + 8 * (if instance?(limited-integer-max(as(<limited-integer>, natural)), <integer>) then 0 else 1 end)
-    + 16 * (if limited-integer-base(as(<limited-integer>, digit)) = <integer> then 1 else 0 end)
-    + 32 * (if type?(<i32>) then 1 else 0 end)
+    + 4 * (if (<i32> = limited(<integer>, min: -2147483648, max: 2147483647)) 1 else 0 end)
+    + 8 * (if (digit = <u32>) 1 else 0 end)
+    + 8 * (if (instance?(limited-integer-max(as(<limited-integer>, natural)), <integer>)) 0 else 1 end)
+    + 16 * (if (limited-integer-base(as(<limited-integer>, digit)) = <integer>) 1 else 0 end)
+    + 32 * (if (type?(<i32>)) 1 else 0 end)
 end;

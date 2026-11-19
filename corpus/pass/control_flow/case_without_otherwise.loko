@@ -1,0 +1,27 @@
+// expect: run 2
+// expect: diagnostics 0
+
+// Without `otherwise`, a `case` produces no values, like an `if` without
+// `else`: its bodies run for their effects. When no test is true nothing
+// runs. (Dylan returns `#f` here; Loko's typed conditionals produce no
+// values instead, so using one where a value is expected is a type
+// error: see `fail/control_flow/case_without_otherwise_value.loko`.)
+
+define class <counter> (<object>)
+  slot count :: <integer>, init-value: 0;
+end;
+
+define function note(c :: <counter>, n :: <integer>) => ()
+  case
+    n = 1 => c.count := c.count + 1;
+    n = 2 => c.count := c.count + 10
+  end
+end;
+
+define function main() => <integer>
+  let c = make(<counter>);
+  let a = block () #t cleanup note(c, 1) end;
+  let b = block () #t cleanup note(c, 3) end;
+  let d = block () #t cleanup note(c, 1) end;
+  c.count
+end;

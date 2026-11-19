@@ -21,7 +21,7 @@ end;
 define function check-sample(value :: <double-float>, distance :: <double-float>) => <double-float>
   // A shaded sample is a brightness in [0, 1]. Anything else is a shader
   // bug, so it is signalled rather than silently clamped.
-  if value < 0.0 then
+  if (value < 0.0)
     signal(make(<bad-sample>, value: value, distance: distance))
   else
     value

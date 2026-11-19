@@ -5,11 +5,11 @@
 // both, in either order, and a `<u32>` block body widens to an
 // `<integer>` exit.
 define function pick(c :: <boolean>, k :: <i32>) => <integer>
-  if c then 0 else k end
+  if (c) 0 else k end
 end;
 
 define function other(c :: <boolean>, k :: <u32>) => <integer>
-  if c then k else -1 end
+  if (c) k else -1 end
 end;
 
 define function main() => <integer>

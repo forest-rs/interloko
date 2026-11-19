@@ -1155,6 +1155,10 @@ impl<'a> Analysis<'a> {
                 *env = self.join_env(then_env, else_env, *span);
                 self.join_facts(then_fact, else_fact, *span)
             }
+            E::Discard { value, .. } => {
+                let _ = self.eval(env, value);
+                self.declared(expr)
+            }
             E::Handle {
                 body,
                 restart,
@@ -2595,6 +2599,7 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
             walk(module, then_branch, visit);
             walk(module, else_branch, visit);
         }
+        E::Discard { value, .. } => walk(module, value, visit),
         E::Handle { body, restart, .. } => {
             walk(module, body, visit);
             if let Some(guard) = &restart.guard {

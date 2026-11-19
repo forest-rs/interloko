@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.function-return-type-mismatch
+// expect: diagnostic contains function `pick` returns <integer> but body has 0 values
+
+// An `if` without `else` produces no values, so it cannot be the result
+// of a function that declares one.
+
+define function pick(flag :: <boolean>) => <integer>
+  if (flag) 1 end
+end;
+
+define function main() => <integer>
+  pick(#t)
+end;

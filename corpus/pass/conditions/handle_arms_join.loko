@@ -19,7 +19,7 @@ end;
 
 define function cast-arms(c :: <boolean>) => <shape>
   handle
-    if c then signal(make(<oops>)) else as(<shape>, make(<circle>)) end
+    if (c) signal(make(<oops>)) else as(<shape>, make(<circle>)) end
   with restart e :: <oops>
     as(<shape>, make(<square>))
   end
@@ -27,7 +27,7 @@ end;
 
 define function narrow-body(c :: <boolean>) => <shape>
   handle
-    if c then signal(make(<oops>)) else make(<circle>) end
+    if (c) signal(make(<oops>)) else make(<circle>) end
   with restart e :: <oops>
     as(<shape>, make(<square>))
   end
@@ -35,7 +35,7 @@ end;
 
 define function narrow-handler(c :: <boolean>)
   handle
-    if c then signal(make(<oops>)) else make(<shape>) end
+    if (c) signal(make(<oops>)) else make(<shape>) end
   with restart e :: <oops>
     make(<circle>)
   end

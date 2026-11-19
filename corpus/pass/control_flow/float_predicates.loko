@@ -3,8 +3,8 @@
 // expect: dump lowered contains f64.ne
 
 define function main() => <boolean>
-  if nan?(0.0 / 0.0) then
-    if finite?(1.0 / 0.0) then #f else finite?(1e308) end
+  if (nan?(0.0 / 0.0))
+    if (finite?(1.0 / 0.0)) #f else finite?(1e308) end
   else
     #f
   end

@@ -30,7 +30,7 @@ end;
 define function pick(round? :: <boolean>) => <integer>
   let circle :: <shape> = make(<circle>);
   let square :: <shape> = make(<square>);
-  area(if round? then circle else square end)
+  area(if (round?) circle else square end)
 end;
 
 define function main() => <integer>

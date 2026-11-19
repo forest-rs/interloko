@@ -6,9 +6,9 @@
 // the `if` rather than leave lowering a join it cannot build.
 
 define function real-first(c :: <boolean>)
-  if c then as(<real>, 1.5) else 2 end
+  if (c) as(<real>, 1.5) else 2 end
 end;
 
 define function integer-first(c :: <boolean>)
-  if c then 2 else as(<real>, 1.5) end
+  if (c) 2 else as(<real>, 1.5) end
 end;

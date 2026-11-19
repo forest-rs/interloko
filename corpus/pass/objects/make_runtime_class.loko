@@ -24,7 +24,7 @@ end;
 
 define function main() => <integer>
   let copy = twin(make(<square>, size: 7));
-  if instance?(copy, <square>) then
+  if (instance?(copy, <square>))
     as(<square>, copy).side * 20 + copy.size * 4 + 1
   else
     0

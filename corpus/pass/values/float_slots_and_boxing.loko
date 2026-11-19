@@ -14,5 +14,5 @@ end;
 
 define function main() => <boolean>
   let reading = make(<reading>, celsius: 21.5, raw: 21.5);
-  if is-float?(reading.raw) then is-float?(reading.celsius) else #f end
+  if (is-float?(reading.raw)) is-float?(reading.celsius) else #f end
 end;
