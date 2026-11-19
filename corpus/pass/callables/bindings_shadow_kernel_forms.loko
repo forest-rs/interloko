@@ -1,0 +1,30 @@
+// expect: run 1179
+// expect: diagnostics 0
+
+// `make`, `signal`, `as`, `instance?` and `limited` are the kernel's
+// functions, which a program's bindings shadow as they shadow any other,
+// and a program's own `concatenate` or `class-of` replaces the kernel's.
+
+define function concatenate (a :: <integer>, b :: <integer>) => <integer>
+  a * 100 + b
+end;
+
+define function class-of (x :: <integer>) => <integer>
+  x + 1
+end;
+
+// A call that writes a type still calls the binding.
+define function limits (x :: <integer>) => <integer>
+  let limited = method (c :: <class>) => <integer> x end;
+  limited(<integer>)
+end;
+
+define function main() => <integer>
+  let make = method (x :: <integer>) => <integer> x * 2 end;
+  let signal = method (x :: <integer>) => <integer> x + 3 end;
+  let as = method (x :: <integer>, y :: <integer>) => <integer> x - y end;
+  let instance? = method (x :: <integer>, y :: <integer>) => <integer> x * y end;
+  let limited = method (x :: <integer>, y :: <integer>) => <integer> x * 10 + y end;
+  make(1) + signal(1) + as(10, 4) + instance?(2, 3) + limited(5, 1)
+    + concatenate(1, 2) + class-of(7) + limits(1000)
+end;

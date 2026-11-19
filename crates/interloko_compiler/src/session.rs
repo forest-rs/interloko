@@ -8191,12 +8191,6 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
         ast::Expr::TypeLiteral { id, target, .. } => {
             let _ = writeln!(out, "{id} type {target}");
         }
-        ast::Expr::InstanceOf {
-            id, value, target, ..
-        } => {
-            let _ = writeln!(out, "{id} instance? {target}");
-            dump_ast_expr(out, value, indent + 2);
-        }
         ast::Expr::Cast {
             id, target, value, ..
         } => {

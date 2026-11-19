@@ -415,10 +415,18 @@ The current slices include:
   A callable is `==` itself boxed or not, and two values of the same
   function with nothing captured, such as two mentions of one function,
   are `==`. Like a callable in a slot, a boxed one holds its environment
-  only for the invocation that made it. A local, parameter or captured
-  binding is called by its name, as in Dylan, and shadows any module-level
-  definition of that name, and the built-in `apply` and `values`, as it
-  does the float and text functions: `let f = scale; f(3, by: 2)` calls
+  only for the invocation that made it. As in Dylan, the innermost
+  binding of a name wins: a local, parameter or captured binding shadows
+  any definition of the program of that name, and a definition of the
+  program (a function, constant, generic or slot getter) shadows any
+  built-in of the kernel's, `make`, `as`, `instance?`, `signal`,
+  `limited`, `apply`, `values`, `class-of`, `concatenate` and the float
+  and text functions included. A program's methods join a built-in
+  collection generic instead, as Dylan's do. Code the compiler writes
+  reaches the kernel by names no source can spell, so `c[k]` always calls
+  the kernel's `element`, and the kernel's `<sequence>` iteration its
+  `size` and `element`, whatever the program defines.
+  A binding is called by its name: `let f = scale; f(3, by: 2)` calls
   `scale` directly, keywords and defaults included, since the binding
   always holds it, while a `<function>`, `<callable>` or typed callable
   binding is called through its value, typed when its signature is known.
@@ -580,8 +588,9 @@ The current slices include:
   accepts signals `<no-applicable-method>`. Each generic is sealed over the
   kernel classes it has methods for, so a program's method for `<vector>`
   is refused. A program's own function or generic of one of these names
-  replaces the built-in generic, and a slot named `size` keeps its getter
-  for its own class. `default` is a real keyword parameter of `element`,
+  replaces the built-in generic for calls of the name, though `c[k]` and
+  the kernel's iteration still reach the kernel's, and a slot named `size`
+  keeps its getter for its own class. `default` is a real keyword parameter of `element`,
   so `element(c, k, default: d)` returns `d` for a key outside the
   collection whatever `c` is, and a program's method takes it as `#key
   default`, testing `default == $unsupplied` when the call passed none. A

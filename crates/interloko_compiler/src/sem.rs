@@ -450,7 +450,7 @@ fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
         "remove-key!" => Intrinsic::TableRemoveKey,
         // The kernel's iteration protocol methods call these; a `%` cannot
         // appear in a source name, so no program can call or shadow them.
-        "%size" => Intrinsic::CollectionSize,
+        "%collection-size" => Intrinsic::CollectionSize,
         "%vector-element" => Intrinsic::VectorElement,
         "%vector-element-setter" => Intrinsic::VectorElementSetter,
         "%vector-constant?" => Intrinsic::VectorConstant,
@@ -9165,25 +9165,20 @@ impl Lowering {
                 Some(limited) => self.lower_type_object(TypeObject::named(limited), *span),
                 None => self.lower_class_object(ctx, class_name, *span),
             },
-            ast::Expr::TypeLiteral { target, span, .. } => {
-                match self.resolve_type_annotation_detail_in_context(ctx, target) {
-                    ResolvedType {
-                        kind: ValueKind::I64,
-                        range,
-                        ..
-                    } => self.lower_type_object(
-                        TypeObject::limited(range.unwrap_or(IntRange::INTEGER)),
+            ast::Expr::TypeLiteral {
+                id, target, span, ..
+            } => {
+                if self.binding_or_definition(ctx, "limited") {
+                    return self.lower_shadowed_type_literal(
+                        ctx,
+                        *id,
+                        target,
+                        expected_results,
                         *span,
-                    ),
-                    _ => Expr::Error { span: *span },
+                    );
                 }
+                self.lower_type_literal(ctx, target, *span)
             }
-            ast::Expr::InstanceOf {
-                value,
-                target,
-                span,
-                ..
-            } => self.lower_instance_of(ctx, value, target, *span),
             ast::Expr::Cast {
                 target,
                 value,
@@ -9196,242 +9191,7 @@ impl Lowering {
                 args,
                 keywords,
                 span,
-            } => {
-                if let Some(function) = CollectionFunction::from_name(callee)
-                    .filter(|_| !self.defines_callable(ctx, callee))
-                {
-                    return self.lower_collection_call(ctx, *id, function, args, keywords, *span);
-                }
-                // A local or captured binding shadows a module-level
-                // definition of its name: the call is a call through its
-                // value.
-                let callable_value = ctx.binds_lexically(callee);
-                if !callable_value && let Some(signature) = self.keyword_signature(callee).cloned()
-                {
-                    return self
-                        .lower_keyword_call(ctx, *id, callee, &signature, args, keywords, *span);
-                }
-                if matches!(callee.as_str(), "copy-sequence" | "starts-with?")
-                    && !self.defines_callable(ctx, callee)
-                    && self.resolve_function(callee).is_none()
-                    && self.resolve_generic(callee).is_none()
-                {
-                    return self.lower_keyword_text_call(ctx, *id, callee, args, keywords, *span);
-                }
-                // A call through a callable value passes its keywords to the
-                // value's entry; no other call takes keyword arguments.
-                if !callable_value {
-                    for keyword in keywords {
-                        ctx.diagnostics
-                            .push(Self::unexpected_keyword(callee, keyword));
-                    }
-                }
-                if let Some(rounding) = Rounding::from_name(callee)
-                    && !self.defines_callable(ctx, callee)
-                    && self.resolve_function(callee).is_none()
-                    && self.resolve_generic(callee).is_none()
-                {
-                    return self.lower_integer_division(
-                        ctx,
-                        *id,
-                        rounding,
-                        args,
-                        *span,
-                        expected_results,
-                    );
-                }
-                // `apply` and `values` are built in only where no binding
-                // or definition of the program takes the name.
-                let built_in = !self.defines_callable(ctx, callee);
-                if built_in && callee == "apply" {
-                    return self.lower_apply(ctx, args, expected_results, *span);
-                }
-                if callee == KERNEL_VALUES || (built_in && callee == "values") {
-                    let mut values = args
-                        .iter()
-                        .map(|arg| self.lower_expr(ctx, arg))
-                        .collect::<Vec<_>>();
-                    if let Some(expected) = expected_results
-                        && expected.len() == values.len()
-                    {
-                        adapt_literal_args(&mut values, expected.iter().map(Some));
-                    }
-                    let result_kinds = values
-                        .iter()
-                        .map(|value| self.expr_kind(value))
-                        .collect::<Vec<_>>();
-                    return Expr::Values {
-                        values,
-                        result_kinds,
-                        span: *span,
-                    };
-                }
-                if let Some(target) = self.local_callable_target(ctx, callee, *span) {
-                    // A binding that names a function or generic statically
-                    // calls it as a call of its name does.
-                    if let ValueKind::KnownCallable(callable) = self.expr_kind(&target)
-                        && let Some(call) =
-                            self.lower_known_binding_call(ctx, *id, callable, args, keywords, *span)
-                    {
-                        return call;
-                    }
-                    let signatures = self
-                        .callable_signature_of(&target)
-                        .map(|signature| signature.param_sigs)
-                        .unwrap_or_default();
-                    let lowered_args = self.lower_args_against(ctx, args, &signatures);
-                    return self.lower_value_call(
-                        ctx,
-                        *id,
-                        Some(callee),
-                        target,
-                        lowered_args,
-                        keywords,
-                        expected_results,
-                        *span,
-                    );
-                }
-                let signatures = self
-                    .resolve_function(callee)
-                    .map(|symbol| symbol.param_callable_sigs.clone())
-                    .unwrap_or_default();
-                let mut lowered_args = self.lower_args_against(ctx, args, &signatures);
-                if callee == "class-of" {
-                    if args.len() == 1 {
-                        let object = lowered_args.into_iter().next().expect("arity was checked");
-                        return self.lower_class_of(ctx, object, *span);
-                    }
-                    ctx.diagnostics.push(
-                        Diagnostic::error(*span, DiagnosticCode::FunctionArityMismatch)
-                            .with_arg(DiagnosticArg::text("callee", "class-of"))
-                            .with_arg(DiagnosticArg::unsigned("expected_count", 1))
-                            .with_arg(DiagnosticArg::unsigned(
-                                "actual_count",
-                                u64::try_from(args.len()).unwrap_or(u64::MAX),
-                            )),
-                    );
-                    return Expr::Error { span: *span };
-                }
-                if let Some(call) = self.lower_intrinsic_call(ctx, callee, &lowered_args, *span) {
-                    return call;
-                }
-                if let Some(symbol) = self.resolve_function(callee).cloned() {
-                    return self.lower_function_call(ctx, &symbol, lowered_args, callee, *span);
-                }
-                if let Some(function) = self.resolve_host_function(callee).cloned() {
-                    if function.param_kinds.len() == args.len() {
-                        adapt_literal_args(
-                            &mut lowered_args,
-                            function.param_kinds.iter().map(Some),
-                        );
-                        self.narrow_args(&mut lowered_args, &function.param_kinds, &[]);
-                        for (index, (arg, expected)) in
-                            lowered_args.iter().zip(&function.param_kinds).enumerate()
-                        {
-                            let actual = self.expr_kind(arg);
-                            if !self.kinds_match(*expected, actual) {
-                                ctx.diagnostics.push(
-                                    Diagnostic::error(
-                                        arg.span(),
-                                        DiagnosticCode::FunctionArgumentTypeMismatch,
-                                    )
-                                    .with_arg(DiagnosticArg::text("function", callee.clone()))
-                                    .with_arg(DiagnosticArg::unsigned(
-                                        "argument_index",
-                                        u64::try_from(index + 1).unwrap_or(u64::MAX),
-                                    ))
-                                    .with_arg(DiagnosticArg::text(
-                                        "expected",
-                                        self.kind_name(*expected),
-                                    ))
-                                    .with_arg(
-                                        DiagnosticArg::text("actual", self.kind_name(actual)),
-                                    ),
-                                );
-                            }
-                        }
-                        return Expr::HostCall {
-                            function: function.id,
-                            args: lowered_args,
-                            result_kind: function.result_kind,
-                            span: *span,
-                        };
-                    }
-                    ctx.diagnostics.push(
-                        Diagnostic::error(*span, DiagnosticCode::FunctionArityMismatch)
-                            .with_arg(DiagnosticArg::text("callee", callee.clone()))
-                            .with_arg(DiagnosticArg::unsigned(
-                                "expected_count",
-                                u64::try_from(function.param_kinds.len()).unwrap_or(u64::MAX),
-                            ))
-                            .with_arg(DiagnosticArg::unsigned(
-                                "actual_count",
-                                u64::try_from(args.len()).unwrap_or(u64::MAX),
-                            )),
-                    );
-                    return Expr::Error { span: *span };
-                }
-                if let Some(symbol) = self.resolve_generic(callee).cloned() {
-                    return self.lower_generic_send(ctx, &symbol, lowered_args, callee, *span);
-                }
-                if self.has_accessor(callee) {
-                    if args.len() == 1 {
-                        let receiver = lowered_args.into_iter().next().expect("arity was checked");
-                        return self.lower_accessor_call(ctx, receiver, callee, *span);
-                    }
-                    ctx.diagnostics.push(
-                        Diagnostic::error(*span, DiagnosticCode::FunctionArityMismatch)
-                            .with_arg(DiagnosticArg::text("callee", callee.clone()))
-                            .with_arg(DiagnosticArg::unsigned("expected_count", 1))
-                            .with_arg(DiagnosticArg::unsigned(
-                                "actual_count",
-                                u64::try_from(args.len()).unwrap_or(u64::MAX),
-                            )),
-                    );
-                    return Expr::Error { span: *span };
-                }
-                // Rounding an integer leaves it as it is.
-                if matches!(callee.as_str(), "floor" | "ceiling" | "round" | "truncate")
-                    && let [value] = lowered_args.as_slice()
-                    && matches!(
-                        self.expr_kind(value),
-                        ValueKind::I64 | ValueKind::I32 | ValueKind::U32
-                    )
-                {
-                    return lowered_args
-                        .into_iter()
-                        .next()
-                        .expect("one argument was matched");
-                }
-                if let Some(builtin) = FloatBuiltin::from_name(callee) {
-                    return self.lower_float_call(ctx, builtin, lowered_args, *span);
-                }
-                if let Some(functions) = text_functions_for_name(callee) {
-                    return self.lower_text_call(ctx, callee, functions, lowered_args, *span);
-                }
-                if callee == ast::POSITION_FROM_OFFSET {
-                    return self.lower_text_call(
-                        ctx,
-                        callee,
-                        &[TextFunction::PositionFromOffset],
-                        lowered_args,
-                        *span,
-                    );
-                }
-                if callee == "byte-offset" {
-                    return self
-                        .lower_intrinsic_call(ctx, callee, &lowered_args, *span)
-                        .unwrap_or(Expr::Error { span: *span });
-                }
-                if let Some(op) = BinaryOp::bitwise_function(callee) {
-                    return self.lower_bitwise(ctx, op, lowered_args, *span);
-                }
-                ctx.diagnostics.push(
-                    Diagnostic::error(*span, DiagnosticCode::UnresolvedFunctionOrGeneric)
-                        .with_arg(DiagnosticArg::text("callee", callee.clone())),
-                );
-                Expr::Error { span: *span }
-            }
+            } => self.lower_named_call(ctx, *id, callee, args, keywords, expected_results, *span),
             ast::Expr::ValueCall {
                 id,
                 callee,
@@ -9665,6 +9425,490 @@ impl Lowering {
             ),
             ast::Expr::Error { span, .. } => Expr::Error { span: *span },
         }
+    }
+
+    /// Lowers a call of the name `callee`. As in Dylan, the innermost
+    /// binding of the name wins: a local or captured binding, then a
+    /// definition of the program (a function, host function, constant,
+    /// generic of its own or slot getter), and only then the kernel's
+    /// built-in of that name. Code the compiler writes calls the kernel by
+    /// names that start with `%`, which no source name can.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_named_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        callee: &str,
+        args: &[ast::Expr],
+        keywords: &[ast::KeywordArg],
+        expected_results: Option<&[ValueKind]>,
+        span: Span,
+    ) -> Expr {
+        if let Some(target) = self.local_callable_target(ctx, callee, span) {
+            // A binding that names a function or generic statically calls
+            // it as a call of its name does.
+            if let ValueKind::KnownCallable(callable) = self.expr_kind(&target)
+                && let Some(call) =
+                    self.lower_known_binding_call(ctx, id, callable, args, keywords, span)
+            {
+                return call;
+            }
+            let signatures = self
+                .callable_signature_of(&target)
+                .map(|signature| signature.param_sigs)
+                .unwrap_or_default();
+            let lowered_args = self.lower_args_against(ctx, args, &signatures);
+            return self.lower_value_call(
+                ctx,
+                id,
+                Some(callee),
+                target,
+                lowered_args,
+                keywords,
+                expected_results,
+                span,
+            );
+        }
+        if self.program_defines(callee) {
+            return self.lower_definition_call(
+                ctx,
+                id,
+                callee,
+                args,
+                keywords,
+                expected_results,
+                span,
+            );
+        }
+        self.lower_built_in_call(ctx, id, callee, args, keywords, expected_results, span)
+    }
+
+    /// Whether a binding or definition of the program takes `name` from
+    /// the kernel's built-in of that name; see [`Self::lower_named_call`].
+    fn binding_or_definition(&self, ctx: &FunctionContext, name: &str) -> bool {
+        ctx.binds_lexically(name) || self.program_defines(name)
+    }
+
+    /// Whether a definition of the program takes `name` from the kernel's
+    /// built-in of that name: a function, host function, constant, generic
+    /// of its own or slot getter. A method of a kernel collection generic
+    /// joins it rather than replacing it, and so does a slot getter of the
+    /// same name, which serves its own class.
+    fn program_defines(&self, name: &str) -> bool {
+        self.shadows_collection_generic(name)
+            || self.resolve_constant(name).is_some()
+            || (CollectionFunction::from_name(name).is_none() && self.has_accessor(name))
+    }
+
+    /// Lowers a call of `callee`, a definition of the program.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_definition_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        callee: &str,
+        args: &[ast::Expr],
+        keywords: &[ast::KeywordArg],
+        expected_results: Option<&[ValueKind]>,
+        span: Span,
+    ) -> Expr {
+        if let Some(signature) = self.keyword_signature(callee).cloned() {
+            return self.lower_keyword_call(ctx, id, callee, &signature, args, keywords, span);
+        }
+        // A constant holds a value, which the call calls as any operand's.
+        if let Some(constant) = self.resolve_constant(callee).cloned()
+            && self.resolve_function(callee).is_none()
+            && self.resolve_host_function(callee).is_none()
+            && self.resolve_generic(callee).is_none()
+        {
+            let target = Expr::ConstantRef {
+                constant: constant.id,
+                result_kind: constant.kind,
+                callable_signature: constant.callable_signature,
+                span,
+            };
+            let signatures = self
+                .callable_signature_of(&target)
+                .map(|signature| signature.param_sigs)
+                .unwrap_or_default();
+            let lowered_args = self.lower_args_against(ctx, args, &signatures);
+            return self.lower_value_call(
+                ctx,
+                id,
+                None,
+                target,
+                lowered_args,
+                keywords,
+                expected_results,
+                span,
+            );
+        }
+        for keyword in keywords {
+            ctx.diagnostics
+                .push(Self::unexpected_keyword(callee, keyword));
+        }
+        // An anonymous method passed where a function takes a typed callable
+        // takes its types from that signature.
+        let signatures = self
+            .resolve_function(callee)
+            .map(|symbol| symbol.param_callable_sigs.clone())
+            .unwrap_or_default();
+        let mut lowered_args = self.lower_args_against(ctx, args, &signatures);
+        if let Some(symbol) = self.resolve_function(callee).cloned() {
+            return self.lower_function_call(ctx, &symbol, lowered_args, callee, span);
+        }
+        if let Some(function) = self.resolve_host_function(callee).cloned() {
+            if function.param_kinds.len() == args.len() {
+                adapt_literal_args(&mut lowered_args, function.param_kinds.iter().map(Some));
+                self.narrow_args(&mut lowered_args, &function.param_kinds, &[]);
+                for (index, (arg, expected)) in
+                    lowered_args.iter().zip(&function.param_kinds).enumerate()
+                {
+                    let actual = self.expr_kind(arg);
+                    if !self.kinds_match(*expected, actual) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                arg.span(),
+                                DiagnosticCode::FunctionArgumentTypeMismatch,
+                            )
+                            .with_arg(DiagnosticArg::text("function", callee))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "argument_index",
+                                u64::try_from(index + 1).unwrap_or(u64::MAX),
+                            ))
+                            .with_arg(DiagnosticArg::text("expected", self.kind_name(*expected)))
+                            .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                        );
+                    }
+                }
+                return Expr::HostCall {
+                    function: function.id,
+                    args: lowered_args,
+                    result_kind: function.result_kind,
+                    span,
+                };
+            }
+            ctx.diagnostics.push(Self::arity_mismatch(
+                callee,
+                function.param_kinds.len(),
+                args.len(),
+                span,
+            ));
+            return Expr::Error { span };
+        }
+        if let Some(symbol) = self.resolve_generic(callee).cloned() {
+            return self.lower_generic_send(ctx, &symbol, lowered_args, callee, span);
+        }
+        // A slot getter, the one definition left.
+        if lowered_args.len() != 1 {
+            ctx.diagnostics
+                .push(Self::arity_mismatch(callee, 1, args.len(), span));
+            return Expr::Error { span };
+        }
+        let receiver = lowered_args.into_iter().next().expect("arity was checked");
+        self.lower_accessor_call(ctx, receiver, callee, span)
+    }
+
+    /// Lowers a call of `callee`, a built-in of the kernel's, since no
+    /// binding or definition of the program takes its name.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_built_in_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        callee: &str,
+        args: &[ast::Expr],
+        keywords: &[ast::KeywordArg],
+        expected_results: Option<&[ValueKind]>,
+        span: Span,
+    ) -> Expr {
+        if let Some(function) = CollectionFunction::from_name(callee)
+            .or_else(|| CollectionFunction::from_kernel_name(callee))
+        {
+            return self.lower_collection_call(ctx, id, function, args, keywords, span);
+        }
+        match callee {
+            "copy-sequence" | "starts-with?" => {
+                return self.lower_keyword_text_call(ctx, id, callee, args, keywords, span);
+            }
+            "make" => return self.lower_make_call(ctx, args, keywords, span),
+            "limited" => {
+                // `limited(…)` that writes a type is a type literal; this
+                // one does not.
+                for arg in args {
+                    let _ = self.lower_expr(ctx, arg);
+                }
+                for keyword in keywords {
+                    let _ = self.lower_expr(ctx, &keyword.value);
+                }
+                ctx.diagnostics.push(Diagnostic::error(
+                    span,
+                    DiagnosticCode::AstInvalidTypeLiteral,
+                ));
+                return Expr::Error { span };
+            }
+            _ => {}
+        }
+        // No other built-in takes keyword arguments.
+        for keyword in keywords {
+            ctx.diagnostics
+                .push(Self::unexpected_keyword(callee, keyword));
+        }
+        if let Some(rounding) = Rounding::from_name(callee) {
+            return self.lower_integer_division(ctx, id, rounding, args, span, expected_results);
+        }
+        match callee {
+            "apply" => return self.lower_apply(ctx, args, expected_results, span),
+            "values" | KERNEL_VALUES => {
+                let mut values = args
+                    .iter()
+                    .map(|arg| self.lower_expr(ctx, arg))
+                    .collect::<Vec<_>>();
+                if let Some(expected) = expected_results
+                    && expected.len() == values.len()
+                {
+                    adapt_literal_args(&mut values, expected.iter().map(Some));
+                }
+                let result_kinds = values
+                    .iter()
+                    .map(|value| self.expr_kind(value))
+                    .collect::<Vec<_>>();
+                return Expr::Values {
+                    values,
+                    result_kinds,
+                    span,
+                };
+            }
+            "signal" => {
+                let [condition] = args else {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(span, DiagnosticCode::AstInvalidSignal)
+                            .with_arg(DiagnosticArg::unsigned("expected_count", 1))
+                            .with_arg(DiagnosticArg::unsigned(
+                                "actual_count",
+                                u64::try_from(args.len()).unwrap_or(u64::MAX),
+                            )),
+                    );
+                    return Expr::Error { span };
+                };
+                return self.lower_signal(ctx, condition, expected_results, span);
+            }
+            "as" => return self.lower_as_call(ctx, args, span),
+            "instance?" => {
+                if let [value, target] = args
+                    && let Some(target) = self.written_type(ctx, target)
+                {
+                    return self.lower_instance_of(ctx, value, &target, span);
+                }
+                // A type the program computes, such as a `<type-error>`'s
+                // expected type, is tested by the intrinsic below.
+            }
+            _ => {}
+        }
+        let lowered_args: Vec<_> = args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
+        if callee == "class-of" {
+            if lowered_args.len() != 1 {
+                ctx.diagnostics
+                    .push(Self::arity_mismatch(callee, 1, args.len(), span));
+                return Expr::Error { span };
+            }
+            let object = lowered_args.into_iter().next().expect("arity was checked");
+            return self.lower_class_of(ctx, object, span);
+        }
+        if let Some(call) = self.lower_intrinsic_call(ctx, callee, &lowered_args, span) {
+            return call;
+        }
+        // Rounding an integer leaves it as it is.
+        if matches!(callee, "floor" | "ceiling" | "round" | "truncate")
+            && let [value] = lowered_args.as_slice()
+            && matches!(
+                self.expr_kind(value),
+                ValueKind::I64 | ValueKind::I32 | ValueKind::U32
+            )
+        {
+            return lowered_args
+                .into_iter()
+                .next()
+                .expect("one argument was matched");
+        }
+        if let Some(builtin) = FloatBuiltin::from_name(callee) {
+            return self.lower_float_call(ctx, builtin, lowered_args, span);
+        }
+        if let Some(functions) = text_functions_for_name(callee) {
+            return self.lower_text_call(ctx, callee, functions, lowered_args, span);
+        }
+        if callee == ast::POSITION_FROM_OFFSET {
+            return self.lower_text_call(
+                ctx,
+                callee,
+                &[TextFunction::PositionFromOffset],
+                lowered_args,
+                span,
+            );
+        }
+        if let Some(op) = BinaryOp::bitwise_function(callee) {
+            return self.lower_bitwise(ctx, op, lowered_args, span);
+        }
+        ctx.diagnostics.push(
+            Diagnostic::error(span, DiagnosticCode::UnresolvedFunctionOrGeneric)
+                .with_arg(DiagnosticArg::text("callee", callee)),
+        );
+        Expr::Error { span }
+    }
+
+    /// Lowers a call of the kernel's `make`: `make(<class>, slot: value,
+    /// ...)`, whose one positional argument is the class.
+    fn lower_make_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        args: &[ast::Expr],
+        keywords: &[ast::KeywordArg],
+        span: Span,
+    ) -> Expr {
+        let [class] = args else {
+            for arg in args {
+                let _ = self.lower_expr(ctx, arg);
+            }
+            for keyword in keywords {
+                let _ = self.lower_expr(ctx, &keyword.value);
+            }
+            ctx.diagnostics
+                .push(Self::arity_mismatch("make", 1, args.len(), span));
+            return Expr::Error { span };
+        };
+        self.lower_make_object(ctx, class, keywords, span)
+    }
+
+    /// Lowers a call of the kernel's `as`: `as(type, value)`, whose type is
+    /// written, or `as(<string-position>, s, n)`, the position at byte
+    /// offset `n` of `s`.
+    fn lower_as_call(&mut self, ctx: &mut FunctionContext, args: &[ast::Expr], span: Span) -> Expr {
+        if let [target, string, offset] = args
+            && matches!(target, ast::Expr::ClassName { class_name, .. } if class_name == "<string-position>")
+        {
+            let args = vec![self.lower_expr(ctx, string), self.lower_expr(ctx, offset)];
+            return self.lower_text_call(
+                ctx,
+                ast::POSITION_FROM_OFFSET,
+                &[TextFunction::PositionFromOffset],
+                args,
+                span,
+            );
+        }
+        let [target, value] = args else {
+            for arg in args {
+                let _ = self.lower_expr(ctx, arg);
+            }
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::AstInvalidCast)
+                    .with_arg(DiagnosticArg::unsigned("expected_count", 2))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "actual_count",
+                        u64::try_from(args.len()).unwrap_or(u64::MAX),
+                    )),
+            );
+            return Expr::Error { span };
+        };
+        let Some(target) = self.written_type(ctx, target) else {
+            let _ = self.lower_expr(ctx, value);
+            ctx.diagnostics
+                .push(Diagnostic::error(span, DiagnosticCode::AstInvalidCast));
+            return Expr::Error { span };
+        };
+        self.lower_cast(ctx, value, &target, span)
+    }
+
+    /// The type `arg`, an argument of the kernel's `as` or `instance?`,
+    /// writes: a type name, or a `limited(...)` type literal while no
+    /// binding or definition of the program takes `limited`. Any other
+    /// argument computes a type object.
+    fn written_type(&self, ctx: &FunctionContext, arg: &ast::Expr) -> Option<ast::TypeExpr> {
+        match arg {
+            ast::Expr::ClassName {
+                class_name, span, ..
+            } => Some(ast::TypeExpr::Named {
+                name: class_name.clone(),
+                span: *span,
+            }),
+            ast::Expr::TypeLiteral { target, .. }
+                if !self.binding_or_definition(ctx, "limited") =>
+            {
+                Some(target.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Lowers the type `target` written as a value: a type object.
+    fn lower_type_literal(
+        &mut self,
+        ctx: &mut FunctionContext,
+        target: &ast::TypeExpr,
+        span: Span,
+    ) -> Expr {
+        match self.resolve_type_annotation_detail_in_context(ctx, target) {
+            ResolvedType {
+                kind: ValueKind::I64,
+                range,
+                ..
+            } => self.lower_type_object(
+                TypeObject::limited(range.unwrap_or(IntRange::INTEGER)),
+                span,
+            ),
+            _ => Expr::Error { span },
+        }
+    }
+
+    /// Lowers `limited(...)`, written as a type, while a binding or
+    /// definition of the program takes `limited`: a call of it with the
+    /// base type and the bounds as written. A bound that is not an
+    /// `<integer>` literal is reported, since only the type kept it.
+    fn lower_shadowed_type_literal(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        target: &ast::TypeExpr,
+        expected_results: Option<&[ValueKind]>,
+        span: Span,
+    ) -> Expr {
+        let ast::TypeExpr::Limited(limited) = target else {
+            return Expr::Error { span };
+        };
+        let as_value = |target: &ast::TypeExpr| match target {
+            ast::TypeExpr::Named { name, span } => ast::Expr::ClassName {
+                id,
+                class_name: name.clone(),
+                span: *span,
+            },
+            target => ast::Expr::TypeLiteral {
+                id,
+                target: target.clone(),
+                span: target.span(),
+            },
+        };
+        let args = vec![as_value(&limited.base)];
+        let mut keywords = Vec::new();
+        for option in &limited.options {
+            let Some(value) = option.value else {
+                ctx.diagnostics.push(
+                    Diagnostic::error(option.span, DiagnosticCode::LimitedTypeBound)
+                        .with_arg(DiagnosticArg::text("option", option.keyword.clone()))
+                        .with_arg(DiagnosticArg::text("bound", option.text.clone())),
+                );
+                return Expr::Error { span };
+            };
+            keywords.push(ast::KeywordArg {
+                id,
+                name: option.keyword.clone(),
+                value: ast::Expr::Number {
+                    id,
+                    value,
+                    span: option.span,
+                },
+                span: option.span,
+            });
+        }
+        self.lower_named_call(ctx, id, "limited", &args, &keywords, expected_results, span)
     }
 
     /// Resolves a call's callee to a lexical `<callable>` local or capture.
@@ -10596,14 +10840,6 @@ impl Lowering {
             }
         }
         Some(self.checked_intrinsic_call(ctx, intrinsic, callee, args, span))
-    }
-
-    /// Whether the program names `name` as something a call can call: a
-    /// callable local or capture, a function, a host function, or a generic
-    /// other than a built-in collection generic. Such a definition shadows
-    /// a built-in collection generic of the same name.
-    fn defines_callable(&self, ctx: &FunctionContext, name: &str) -> bool {
-        ctx.binds_lexically(name) || self.shadows_collection_generic(name)
     }
 
     /// Whether a module-level definition of `name` (a function, a host
