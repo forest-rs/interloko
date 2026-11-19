@@ -161,8 +161,59 @@ fn base_loko_parse_error(
     error
 }
 
+/// Reports a parse failure at the fragment where the source stopped
+/// matching, naming what could have come there in a reader's terms.
+///
+/// The grammar lists every fragment it tried at the failure: each operator
+/// that could have continued the expression before it, each token that
+/// could have started an expression, and the rules that failed there. The
+/// operators are left out, since one is always possible after an operand,
+/// and an expression's starting tokens and rules collapse into
+/// "expression", reported as `syntax.expected-expression` when nothing
+/// else could have come there.
 fn grammar_parse_diagnostic(error: InterpretedParseError) -> Diagnostic {
-    let expected = if error.expected.is_empty() {
+    let mut expression = false;
+    let mut type_expected = false;
+    let mut name_expected = false;
+    let mut alternatives: Vec<alloc::string::String> = Vec::new();
+    for fragment in &error.expected {
+        match fragment {
+            ExpectedFragment::Rule(rule) if is_expression_rule(rule) => expression = true,
+            ExpectedFragment::Rule(
+                "type-annotation-value" | "nominal-type" | "annotation-type" | "type-name",
+            ) => type_expected = true,
+            ExpectedFragment::Rule("name") => name_expected = true,
+            ExpectedFragment::Literal(text) if !continues_operand(text) => {
+                let text = alloc::format!("`{text}`");
+                if !alternatives.contains(&text) {
+                    alternatives.push(text);
+                }
+            }
+            _ => {}
+        }
+    }
+    if type_expected && !expression {
+        alternatives.retain(|text| {
+            !matches!(
+                text.as_str(),
+                "`callable`" | "`limited`" | "`class`" | "`<`"
+            )
+        });
+        alternatives.insert(0, "type".to_string());
+    }
+    if name_expected && !expression {
+        alternatives.insert(0, "name".to_string());
+    }
+    if expression {
+        alternatives.retain(|text| !starts_expression(text.trim_matches('`')));
+        if alternatives.is_empty() {
+            return Diagnostic::error(error.span.into(), DiagnosticCode::SyntaxExpectedExpression);
+        }
+        alternatives.insert(0, "expression".to_string());
+    }
+    let expected = if !alternatives.is_empty() {
+        alternatives.join(" or ")
+    } else if error.expected.is_empty() {
         "base Loko grammar".to_string()
     } else {
         error
@@ -174,6 +225,93 @@ fn grammar_parse_diagnostic(error: InterpretedParseError) -> Diagnostic {
     };
     Diagnostic::error(error.span.into(), DiagnosticCode::SyntaxExpectedToken)
         .with_arg(DiagnosticArg::text("expected", expected))
+}
+
+/// Whether `text` is an operator or accessor that continues the operand
+/// before it, such as `+`, `.` or `:=`.
+fn continues_operand(text: &str) -> bool {
+    match syntax::lex(text).as_slice() {
+        [token] => {
+            token.kind.is_infix_operator()
+                || matches!(
+                    token.kind,
+                    TokenKind::Dot | TokenKind::LBracket | TokenKind::Assign
+                )
+        }
+        _ => false,
+    }
+}
+
+/// Whether `text` can begin an expression, or a body's `let`.
+fn starts_expression(text: &str) -> bool {
+    matches!(
+        text,
+        "-" | "~"
+            | "("
+            | "#["
+            | "#t"
+            | "#f"
+            | "#"
+            | "#:"
+            | "\""
+            | "'"
+            | "<"
+            | "let"
+            | "method"
+            | "handle"
+            | "block"
+            | "begin"
+            | "while"
+            | "until"
+            | "for"
+            | "if"
+            | "unless"
+            | "case"
+            | "select"
+    )
+}
+
+/// Whether `rule` matches an expression, or a part of one standing for it.
+fn is_expression_rule(rule: &str) -> bool {
+    matches!(
+        rule,
+        "expression"
+            | "handle-expression"
+            | "block-expression"
+            | "begin-expression"
+            | "while-expression"
+            | "until-expression"
+            | "for-expression"
+            | "if-expression"
+            | "unless-expression"
+            | "case-expression"
+            | "select-expression"
+            | "assignment-expression"
+            | "assignment-target"
+            | "logical-expression"
+            | "comparison-expression"
+            | "additive-expression"
+            | "multiplicative-expression"
+            | "power-expression"
+            | "unary-expression"
+            | "negative-expression"
+            | "not-expression"
+            | "postfix-expression"
+            | "primary-expression"
+            | "statement"
+            | "method-expression"
+            | "parenthesized-expression"
+            | "vector-expression"
+            | "call-expression"
+            | "name-expression"
+            | "type-expression"
+            | "number-literal"
+            | "bool-literal"
+            | "string-literal"
+            | "character-literal"
+            | "symbol-literal"
+            | "keyword-symbol"
+    )
 }
 
 struct BaseLokoCstProjector<'source> {
@@ -1416,44 +1554,7 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn is_expr_rule(&self, rule: &str) -> bool {
-        matches!(
-            rule,
-            "handle-expression"
-                | "block-expression"
-                | "begin-expression"
-                | "while-expression"
-                | "until-expression"
-                | "for-expression"
-                | "if-expression"
-                | "unless-expression"
-                | "case-expression"
-                | "select-expression"
-                | "assignment-expression"
-                | "assignment-target"
-                | "logical-expression"
-                | "comparison-expression"
-                | "additive-expression"
-                | "multiplicative-expression"
-                | "power-expression"
-                | "unary-expression"
-                | "negative-expression"
-                | "not-expression"
-                | "postfix-expression"
-                | "primary-expression"
-                | "statement"
-                | "method-expression"
-                | "parenthesized-expression"
-                | "vector-expression"
-                | "call-expression"
-                | "name-expression"
-                | "type-expression"
-                | "number-literal"
-                | "bool-literal"
-                | "string-literal"
-                | "character-literal"
-                | "symbol-literal"
-                | "keyword-symbol"
-        )
+        is_expression_rule(rule) && rule != "expression"
     }
 }
 
