@@ -7227,6 +7227,9 @@ impl Host for SharedFunctionCallHost<'_> {
             .borrow_mut()
             .call(symbol, sig_hash, args, rets, context)
     }
+    fn is_synchronous(&self, symbol: &str, _: SigHash) -> bool {
+        !interloko_runtime::control::is_control_symbol(symbol)
+    }
 }
 
 struct FunctionCallHost<'a> {
@@ -7301,6 +7304,9 @@ impl FunctionCallHost<'_> {
 }
 
 impl Host for FunctionCallHost<'_> {
+    fn is_synchronous(&self, symbol: &str, _: SigHash) -> bool {
+        !interloko_runtime::control::is_control_symbol(symbol)
+    }
     fn call(
         &mut self,
         symbol: &str,
