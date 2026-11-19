@@ -1272,6 +1272,36 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::table_key_signature(),
         ),
         (
+            RuntimeOp::TableVersion,
+            runtime::TABLE_VERSION,
+            runtime::collection_size_signature(),
+        ),
+        (
+            RuntimeOp::TablePositions,
+            runtime::TABLE_POSITIONS,
+            runtime::collection_size_signature(),
+        ),
+        (
+            RuntimeOp::TableNextPosition,
+            runtime::TABLE_NEXT_POSITION,
+            runtime::table_next_position_signature(),
+        ),
+        (
+            RuntimeOp::TablePositionValue,
+            runtime::TABLE_POSITION_VALUE,
+            runtime::table_position_signature(),
+        ),
+        (
+            RuntimeOp::TablePositionKey,
+            runtime::TABLE_POSITION_KEY,
+            runtime::table_position_signature(),
+        ),
+        (
+            RuntimeOp::VectorConstant,
+            runtime::VECTOR_CONSTANT,
+            runtime::vector_constant_signature(),
+        ),
+        (
             RuntimeOp::TableRemoveKey,
             runtime::TABLE_REMOVE_KEY,
             runtime::table_key_signature(),

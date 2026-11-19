@@ -1,0 +1,17 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports unhandled condition <collection-modified-error>
+// expect: diagnostics 0
+
+// Adding or removing a key while a `for` iterates the table signals a
+// `<collection-modified-error>` when the loop moves on: the table's entry
+// positions may have changed, so iterating on could skip or repeat one.
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["a"] := 1;
+  t["b"] := 2;
+  for (x in t)
+    t["c"] := 3
+  end;
+  0
+end;

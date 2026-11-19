@@ -1,0 +1,23 @@
+// expect: run 1234
+// expect: diagnostics 0
+// expect: dump lowered contains runtime.table-next-position
+
+// `for (x in t)` visits a table's values in the order their keys were
+// added, skipping removed ones. Replacing a value while iterating changes
+// no key, so the loop goes on.
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["a"] := 1;
+  t["gone"] := 5000;
+  t["b"] := 20;
+  t[3] := 300;
+  remove-key!(t, "gone");
+  t["d"] := 4000;
+  let digits = 0;
+  for (x :: <integer> in t)
+    t["a"] := 0;
+    digits := digits * 10 + (if (x = 1) 1 elseif (x = 20) 2 elseif (x = 300) 3 else 4 end)
+  end;
+  digits
+end;

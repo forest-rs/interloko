@@ -652,22 +652,53 @@ impl BaseLokoCstProjector<'_> {
         self.node_with_nested(kind, node, nested)
     }
 
-    /// Builds `for (clause) body end`: the clause, then the body.
+    /// Builds `for (clause, ...) body end`: each clause in order, then the
+    /// body.
     fn build_for(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let mut nested = Vec::new();
+        self.collect_for_clauses(node, &mut nested);
+        nested.extend(
+            node.children
+                .iter()
+                .filter(|child| child.is_rule("body"))
+                .map(|body| self.build_body(body)),
+        );
+        self.node_with_nested(CstKind::ForExpr, node, nested)
+    }
+
+    /// Collects the clauses of a `for`, which the clause list nests, without
+    /// entering the body or a clause's own expressions.
+    fn collect_for_clauses(&self, node: &InterpretedRuleNode<'_>, out: &mut Vec<CstNode>) {
+        for child in &node.children {
+            if child.is_rule("numeric-for-clause") {
+                out.push(self.build_numeric_for_clause(child));
+            } else if child.is_rule("collection-for-clause") {
+                out.push(self.build_collection_for_clause(child));
+            } else if !child.is_rule("body") && !child.is_rule("expression") {
+                self.collect_for_clauses(child, out);
+            }
+        }
+    }
+
+    /// Builds `name in collection`: the variable's name and type roles, then
+    /// the collection expression.
+    fn build_collection_for_clause(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let nested = node
             .children
             .iter()
-            .filter_map(|child| {
-                if child.is_rule("numeric-for-clause") {
-                    Some(self.build_numeric_for_clause(child))
-                } else if child.is_rule("body") {
-                    Some(self.build_body(child))
-                } else {
-                    None
-                }
-            })
+            .filter(|child| child.is_rule("expression"))
+            .map(|expr| self.build_expr(expr))
             .collect::<Vec<_>>();
-        self.node_with_nested(CstKind::ForExpr, node, nested)
+        let mut roles = Vec::new();
+        if let Some(binding) = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("let-name-binding"))
+        {
+            self.collect_role_nodes(binding, "let-name", CstKind::LetName, &mut roles);
+            self.collect_annotation_type_roles(binding, &mut roles);
+        }
+        self.node_with_nested_and_roles(CstKind::CollectionForClause, node, nested, roles)
     }
 
     /// Builds `name from start (to|below|above bound)? (by step)?`: the

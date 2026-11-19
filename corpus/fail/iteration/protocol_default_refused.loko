@@ -1,0 +1,22 @@
+// expect: diagnostic code sem.collection-method-overrides-kernel
+
+// A program's class under `<sequence>` may define its own protocol method,
+// but a method on `<sequence>` itself would replace the kernel's default
+// for every sequence.
+
+define method forward-iteration-protocol (s :: <sequence>)
+ => (<object>, <object>, callable(<object>, <object>) => <object>,
+     callable(<object>, <object>, <object>) => <boolean>,
+     callable(<object>, <object>) => <object>,
+     callable(<object>, <object>) => <object>, <object>)
+  values(0, 0,
+         function (c :: <object>, s :: <object>) => <object> s end,
+         function (c :: <object>, s :: <object>, l :: <object>) => <boolean> #t end,
+         function (c :: <object>, s :: <object>) => <object> s end,
+         function (c :: <object>, s :: <object>) => <object> s end,
+         #f)
+end;
+
+define function main() => <integer>
+  0
+end;

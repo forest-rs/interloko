@@ -15,6 +15,7 @@
 //!       <select-error>
 //!       <not-found-error>
 //!       <immutable-collection-error>
+//!       <collection-modified-error>
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
@@ -27,7 +28,10 @@
 //! target value. A `<not-found-error>` reports an `element` of a collection
 //! without the key and without a `default:` ([`NOT_FOUND_CODE`]), and an
 //! `<immutable-collection-error>` a store into a constant collection, a
-//! vector literal ([`IMMUTABLE_COLLECTION_CODE`]). Their slots are
+//! vector literal ([`IMMUTABLE_COLLECTION_CODE`]). A
+//! `<collection-modified-error>` reports a `<table>` whose keys changed
+//! while a `for` loop iterated it ([`COLLECTION_MODIFIED_CODE`]). Their
+//! slots are
 //! read-only, so they add no setter generics to a program.
 //!
 //! A send never finds several equally specific methods: a module whose
@@ -57,6 +61,9 @@ pub enum ConditionClass {
     /// `<immutable-collection-error>`: a store into a collection that is
     /// constant, such as a vector literal.
     ImmutableCollectionError,
+    /// `<collection-modified-error>`: a collection's keys changed while it
+    /// was being iterated.
+    CollectionModifiedError,
 }
 
 impl ConditionClass {
@@ -72,6 +79,7 @@ impl ConditionClass {
         Self::SelectError,
         Self::NotFoundError,
         Self::ImmutableCollectionError,
+        Self::CollectionModifiedError,
     ];
 
     /// Returns the Loko-visible class name.
@@ -85,6 +93,7 @@ impl ConditionClass {
             Self::SelectError => "<select-error>",
             Self::NotFoundError => "<not-found-error>",
             Self::ImmutableCollectionError => "<immutable-collection-error>",
+            Self::CollectionModifiedError => "<collection-modified-error>",
         }
     }
 
@@ -99,6 +108,7 @@ impl ConditionClass {
             b"<select-error>" => Some(Self::SelectError),
             b"<not-found-error>" => Some(Self::NotFoundError),
             b"<immutable-collection-error>" => Some(Self::ImmutableCollectionError),
+            b"<collection-modified-error>" => Some(Self::CollectionModifiedError),
             _ => None,
         }
     }
@@ -114,7 +124,8 @@ impl ConditionClass {
             | Self::NoApplicableMethod
             | Self::SelectError
             | Self::NotFoundError
-            | Self::ImmutableCollectionError => Some(Self::Error),
+            | Self::ImmutableCollectionError
+            | Self::CollectionModifiedError => Some(Self::Error),
         }
     }
 
@@ -128,6 +139,7 @@ impl ConditionClass {
             Self::SelectError => &SELECT_ERROR_SLOTS,
             Self::NotFoundError => &NOT_FOUND_ERROR_SLOTS,
             Self::ImmutableCollectionError => &IMMUTABLE_COLLECTION_ERROR_SLOTS,
+            Self::CollectionModifiedError => &COLLECTION_MODIFIED_ERROR_SLOTS,
         }
     }
 }
@@ -299,6 +311,24 @@ pub const IMMUTABLE_COLLECTION_ERROR_SLOTS: [ConditionSlot; 2] = [
 /// The stable code of an `<immutable-collection-error>` the runtime
 /// signals.
 pub const IMMUTABLE_COLLECTION_CODE: &str = "collection.immutable";
+
+/// The slots of `<collection-modified-error>`, in layout order: the
+/// collection and the code.
+pub const COLLECTION_MODIFIED_ERROR_SLOTS: [ConditionSlot; 2] = [
+    ConditionSlot {
+        name: "collection-modified-error-collection",
+        type_name: "<object>",
+        init_keyword: "collection",
+    },
+    ConditionSlot {
+        name: "collection-modified-error-code",
+        type_name: "<string>",
+        init_keyword: "code",
+    },
+];
+
+/// The stable code of a `<collection-modified-error>` the runtime signals.
+pub const COLLECTION_MODIFIED_CODE: &str = "collection.modified";
 
 /// What kind of runtime check a `<type-error>` reports.
 ///

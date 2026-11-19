@@ -501,6 +501,21 @@ pub enum RuntimeOp {
     TableKeyExists,
     /// Removes a key's entry from a `<table>`, returning whether it had one.
     TableRemoveKey,
+    /// Returns a `<table>`'s iteration version.
+    TableVersion,
+    /// Returns a `<table>`'s number of entry positions.
+    TablePositions,
+    /// Returns a `<table>`'s next entry position; a changed version raises
+    /// the check-failed tag.
+    TableNextPosition,
+    /// Returns the value at a `<table>` entry position; an empty position
+    /// raises the check-failed tag.
+    TablePositionValue,
+    /// Returns the key at a `<table>` entry position; an empty position
+    /// raises the check-failed tag.
+    TablePositionKey,
+    /// Returns whether a vector is constant.
+    VectorConstant,
     /// Renders a float as literal text.
     FloatToString,
     /// Renders a `<single-float>` as suffixed literal text.
@@ -2273,6 +2288,22 @@ impl<'module> Lowering<'module> {
         for thunk in &mut ids.exit_thunks {
             thunk.boxed = take();
         }
+        // A send that finds no method takes its `use-value` results from
+        // the boxed `<object>`s a chooser supplies, adapting each typed
+        // callable among them.
+        let mut generic_result_sigs = Vec::new();
+        for generic in &module.generics {
+            for sig in generic.result_callable_sigs.iter().flatten() {
+                let signature = callable_signature_from_sem(
+                    &mut ids.call_sigs,
+                    &sig.params,
+                    &sig.param_sigs,
+                    &sig.results,
+                    &sig.result_sigs,
+                )?;
+                generic_result_sigs.push(intern_callable_signature(&mut ids.call_sigs, signature));
+            }
+        }
         // A boxed entry adapts each typed callable it is passed, and an
         // adapter each typed callable it returns.
         let mut pending = Vec::new();
@@ -2296,6 +2327,7 @@ impl<'module> Lowering<'module> {
                 boxed_params(*sig);
             }
         }
+        pending.extend(generic_result_sigs);
         while let Some(sig) = pending.pop() {
             if ids.adapters.iter().any(|(adapted, _)| *adapted == sig) {
                 continue;
@@ -4592,6 +4624,16 @@ impl<'module> BodyLowering<'module> {
         span: Span,
         site: Option<sem::SiteId>,
     ) -> Result<(), LowerError> {
+        // The method a send runs may be one the runtime selects or a
+        // link's newest code, so the tape cannot see the shape of a
+        // callable it returns: such a result opens as a slot's callable
+        // does.
+        for dst in &dsts {
+            let index = (dst.0 as usize).wrapping_sub(1);
+            if matches!(self.register_kinds.get(index), Some(ValueKind::Closure(_))) {
+                self.callable_joins.push((*dst, false));
+            }
+        }
         if let Some(site) = site
             && let Some((method, callee)) = self.send_link(generic, site)
         {
@@ -5232,11 +5274,11 @@ impl<'module> BodyLowering<'module> {
         if let Some((_, known)) = self.callable_joins.iter().find(|(join, _)| *join == reg) {
             return *known;
         }
+        // A send's callable results are joins of unknown shape, recorded
+        // when the send is lowered, so only calls prove a result here.
         self.proven_callables.contains(&reg)
             || self.instructions.iter().any(|instr| match instr {
-                Instr::Call { dsts, .. }
-                | Instr::CallIndirect { dsts, .. }
-                | Instr::LinkedSend { dsts, .. } => dsts.contains(&reg),
+                Instr::Call { dsts, .. } | Instr::CallIndirect { dsts, .. } => dsts.contains(&reg),
                 _ => false,
             })
     }
@@ -5410,11 +5452,15 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         // The results a replacement supplies: every one but a known
-        // callable, whose only value is the callable.
+        // callable, whose only value is the callable. A callable comes as
+        // the boxed `<object>` any callable boxes to, and is checked and
+        // adapted to the result's signature below, as an argument crossing
+        // a callable's boxed entry is.
         let mut results = Vec::with_capacity(generic.result_kinds.len());
         for kind in &generic.result_kinds {
             results.push(match kind {
                 sem::ValueKind::KnownCallable(_) => None,
+                sem::ValueKind::Callable => Some(self.alloc(BOXED_WIRE)),
                 _ => Some(self.alloc(self.value_kind(*kind)?)),
             });
         }
@@ -5437,6 +5483,19 @@ impl<'module> BodyLowering<'module> {
                 values.push(self.lower_known_callable(callable, span)?.reg);
                 continue;
             };
+            if generic.result_kinds[index] == sem::ValueKind::Callable {
+                let kind = self.value_kind_with_callable_signature(
+                    sem::ValueKind::Callable,
+                    generic
+                        .result_callable_sigs
+                        .get(index)
+                        .cloned()
+                        .flatten()
+                        .as_ref(),
+                )?;
+                values.push(self.unwire(*result, kind, None, &site, span)?.reg);
+                continue;
+            }
             let target = match generic.result_ranges.get(index).copied().flatten() {
                 Some(range) if result.kind == ValueKind::I64 => {
                     Some(sem::EntryTarget::Range(range))
@@ -7761,6 +7820,11 @@ impl<'module> BodyLowering<'module> {
                 return self.lower_vector_access(intrinsic, args, span);
             }
             sem::Intrinsic::TableElement => return self.lower_table_element(args, span),
+            sem::Intrinsic::TableNextPosition
+            | sem::Intrinsic::TablePositionValue
+            | sem::Intrinsic::TablePositionKey => {
+                return self.lower_table_iteration(intrinsic, args, span);
+            }
             sem::Intrinsic::MakeVector | sem::Intrinsic::MakeStretchyVector => {
                 return self.lower_make_vector(intrinsic, args, result_kind, span);
             }
@@ -8189,6 +8253,61 @@ impl<'module> BodyLowering<'module> {
             sem::ConditionClass::NotFoundError,
             &[collection.reg, key.reg],
             interloko_model::condition::NOT_FOUND_CODE,
+            span,
+        )?;
+        self.instructions.extend([
+            Instr::Signal {
+                dsts: vec![result.reg],
+                condition,
+                span,
+            },
+            // A signal does not end its block; the jump does.
+            Instr::Jump { label: done, span },
+            Instr::Label { label: done },
+        ]);
+        Ok(result)
+    }
+
+    /// Lowers a `for` loop's step through a `<table>`: finding its next
+    /// entry position, or reading the value at one. A table whose keys
+    /// changed since the loop began signals a `<collection-modified-error>`,
+    /// whose `use-value` replacement is the result.
+    fn lower_table_iteration(
+        &mut self,
+        intrinsic: sem::Intrinsic,
+        args: &[sem::Expr],
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let op = runtime_op_for_intrinsic(intrinsic)
+            .ok_or_else(|| invalid_semantic("intrinsic has no runtime operation"))?;
+        let values = self.lower_runtime_args(op, args)?;
+        let kind = if op == RuntimeOp::TableNextPosition {
+            ValueKind::I64
+        } else {
+            ValueKind::Any
+        };
+        let result = self.alloc(kind);
+        let [failed, done] = core::array::from_fn(|_| self.alloc_label());
+        self.instructions.extend([
+            Instr::CheckedRuntimeCall {
+                dst: result.reg,
+                op,
+                args: values.iter().map(|value| value.reg).collect(),
+                failed,
+                span,
+            },
+            Instr::Jump { label: done, span },
+            Instr::Label { label: failed },
+        ]);
+        let table = values
+            .first()
+            .copied()
+            .ok_or_else(|| invalid_semantic("a table iteration step takes the table"))?;
+        let collection = self.box_any(table, span)?;
+        let condition = self.collection_condition(
+            sem::ConditionClass::CollectionModifiedError,
+            &[collection.reg],
+            interloko_model::condition::COLLECTION_MODIFIED_CODE,
             span,
         )?;
         self.instructions.extend([
@@ -10409,6 +10528,12 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> Option<RuntimeOp> {
         sem::Intrinsic::TableRemoveKey => RuntimeOp::TableRemoveKey,
         sem::Intrinsic::MakeVector | sem::Intrinsic::MakeStretchyVector => RuntimeOp::MakeVector,
         sem::Intrinsic::MakeTable => RuntimeOp::MakeTable,
+        sem::Intrinsic::TableVersion => RuntimeOp::TableVersion,
+        sem::Intrinsic::TablePositions => RuntimeOp::TablePositions,
+        sem::Intrinsic::TableNextPosition => RuntimeOp::TableNextPosition,
+        sem::Intrinsic::TablePositionValue => RuntimeOp::TablePositionValue,
+        sem::Intrinsic::TablePositionKey => RuntimeOp::TablePositionKey,
+        sem::Intrinsic::VectorConstant => RuntimeOp::VectorConstant,
         sem::Intrinsic::FloatToString => RuntimeOp::FloatToString,
         sem::Intrinsic::IntegerToString => RuntimeOp::IntegerToString,
         sem::Intrinsic::Concatenate => RuntimeOp::Concatenate,
@@ -10445,7 +10570,15 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         | RuntimeOp::TypeName => index == 0,
         // Collections travel as the objects they are; elements, keys,
         // values and defaults as boxed `<object>`s.
-        RuntimeOp::CollectionSize | RuntimeOp::VectorElement | RuntimeOp::MakeTable => false,
+        RuntimeOp::CollectionSize
+        | RuntimeOp::VectorElement
+        | RuntimeOp::MakeTable
+        | RuntimeOp::TableVersion
+        | RuntimeOp::TablePositions
+        | RuntimeOp::TableNextPosition
+        | RuntimeOp::TablePositionValue
+        | RuntimeOp::TablePositionKey
+        | RuntimeOp::VectorConstant => false,
         RuntimeOp::VectorElementOr | RuntimeOp::MakeVector => index == 2,
         RuntimeOp::VectorElementSetter => index == 0,
         RuntimeOp::StretchyAdd
@@ -11267,6 +11400,12 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::TableElementSetter => "table-element-setter",
         RuntimeOp::TableKeyExists => "key-exists?",
         RuntimeOp::TableRemoveKey => "remove-key!",
+        RuntimeOp::TableVersion => "table-version",
+        RuntimeOp::TablePositions => "table-positions",
+        RuntimeOp::TableNextPosition => "table-next-position",
+        RuntimeOp::TablePositionValue => "table-position-value",
+        RuntimeOp::TablePositionKey => "table-position-key",
+        RuntimeOp::VectorConstant => "vector-constant?",
         RuntimeOp::FloatToString | RuntimeOp::SingleFloatToString => "float-to-string",
         RuntimeOp::IntegerToString => "integer-to-string",
         RuntimeOp::Concatenate => "concatenate",

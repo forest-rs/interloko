@@ -497,6 +497,51 @@ pub struct NumericFor {
     pub span: Span,
 }
 
+/// A collection clause of a `for` loop: `name in collection`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollectionFor {
+    /// The iteration variable, bound to each element in turn.
+    pub binding: LetBinding,
+    /// The collection, evaluated once.
+    pub collection: Box<Expr>,
+    /// Source span of the clause.
+    pub span: Span,
+}
+
+/// One clause of a `for` loop. A loop with several stops when the first of
+/// them finishes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ForClause {
+    /// `i from a to b by s`.
+    Numeric(NumericFor),
+    /// `x in c`.
+    Collection(CollectionFor),
+}
+
+impl ForClause {
+    /// The clause's iteration variable.
+    #[must_use]
+    pub const fn binding(&self) -> &LetBinding {
+        match self {
+            Self::Numeric(clause) => &clause.binding,
+            Self::Collection(clause) => &clause.binding,
+        }
+    }
+
+    /// The expressions the clause evaluates once before the loop, in order.
+    pub fn exprs(&self) -> impl Iterator<Item = &Expr> {
+        let exprs: [Option<&Expr>; 3] = match self {
+            Self::Numeric(clause) => [
+                Some(&clause.start),
+                clause.bound.as_ref().map(|(_, bound)| &**bound),
+                clause.step.as_deref(),
+            ],
+            Self::Collection(clause) => [Some(&clause.collection), None, None],
+        };
+        exprs.into_iter().flatten()
+    }
+}
+
 /// Local binding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Let {
@@ -802,13 +847,13 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Numeric loop, `for (i from a below b by s) body end`. It produces no
-    /// values.
+    /// `for` loop: `for (i from a below b by s) body end`, `for (x in c)
+    /// body end`, or several clauses at once. It produces no values.
     For {
         /// Stable-ish AST node identity.
         id: AstNodeId,
-        /// The loop's clause.
-        clause: NumericFor,
+        /// The loop's clauses, in order.
+        clauses: Vec<ForClause>,
         /// Loop body; its locals, the iteration variable's binding among
         /// them, are scoped to one iteration.
         body: Box<Block>,
@@ -1068,14 +1113,11 @@ impl Expr {
                 visit(test);
                 body.for_each_expr(visit);
             }
-            Self::For { clause, body, .. } => {
-                visit(&clause.start);
-                if let Some((_, bound)) = &clause.bound {
-                    visit(bound);
-                }
-                if let Some(step) = &clause.step {
-                    visit(step);
-                }
+            Self::For { clauses, body, .. } => {
+                clauses
+                    .iter()
+                    .flat_map(ForClause::exprs)
+                    .for_each(&mut visit);
                 body.for_each_expr(visit);
             }
             Self::Vector { elements, .. } => elements.iter().for_each(visit),
@@ -3369,27 +3411,73 @@ impl<'tree> Lowering<'tree> {
             id: lowering.ast_id(node),
             span: node.span,
         };
-        let mut clause = None;
+        let mut clauses = Vec::new();
         let mut body = None;
         for child in &node.children {
             let CstElement::Node(child_node) = child else {
                 continue;
             };
             match child_node.kind {
-                CstKind::NumericForClause => clause = self.lower_numeric_for(child_node),
+                CstKind::NumericForClause => match self.lower_numeric_for(child_node) {
+                    Some(clause) => clauses.push(ForClause::Numeric(clause)),
+                    None => return error(self),
+                },
+                CstKind::CollectionForClause => match self.lower_collection_for(child_node) {
+                    Some(clause) => clauses.push(ForClause::Collection(clause)),
+                    None => return error(self),
+                },
                 CstKind::Body => body = Some(self.lower_block(child_node)),
                 _ => {}
             }
         }
-        let (Some(clause), Some(body)) = (clause, body) else {
+        let Some(body) = body.filter(|_| !clauses.is_empty()) else {
             return error(self);
         };
         Expr::For {
             id: self.ast_id(node),
-            clause,
+            clauses,
             body: Box::new(body),
             span: node.span,
         }
+    }
+
+    /// Lowers `name in collection`.
+    fn lower_collection_for(&mut self, node: &CstNode) -> Option<CollectionFor> {
+        let mut binding = None;
+        let mut collection = None;
+        for child in &node.children {
+            match child {
+                CstElement::Token(index) => {
+                    let token = self.tree.tokens[*index];
+                    if token.kind == TokenKind::DoubleColon {
+                        if let Some(LetBinding {
+                            type_annotation: annotation @ None,
+                            ..
+                        }) = &mut binding
+                        {
+                            *annotation = self.type_annotation_after(node, *index);
+                        }
+                    } else if token.kind == TokenKind::Ident && binding.is_none() {
+                        let text = token.text(&self.tree.source);
+                        binding = Some(LetBinding {
+                            definition: self.definition(DefinitionKind::Local, text, ""),
+                            name: text.to_string(),
+                            type_annotation: None,
+                            span: token.span,
+                        });
+                    }
+                }
+                CstElement::Node(expr) if !expr.kind.is_role() && collection.is_none() => {
+                    collection = Some(Box::new(self.lower_expr(expr)));
+                }
+                CstElement::Node(_) => {}
+            }
+        }
+        Some(CollectionFor {
+            binding: binding?,
+            collection: collection?,
+            span: node.span,
+        })
     }
 
     /// Lowers `name from start (to|below|above bound)? (by step)?`. The
@@ -4299,13 +4387,20 @@ mod tests {
         let statements = &module.functions[0].body.statements;
         let [
             Statement::Let(_),
-            Statement::Expr(Expr::For { clause: first, .. }),
-            Statement::Expr(Expr::For { clause: second, .. }),
-            Statement::Expr(Expr::For { clause: third, .. }),
+            Statement::Expr(Expr::For { clauses: first, .. }),
+            Statement::Expr(Expr::For {
+                clauses: second, ..
+            }),
+            Statement::Expr(Expr::For { clauses: third, .. }),
         ] = statements.as_slice()
         else {
             panic!("unexpected statements {statements:?}");
         };
+        let numeric = |clauses: &[ForClause]| match clauses {
+            [ForClause::Numeric(clause)] => clause.clone(),
+            other => panic!("expected one numeric clause, got {other:?}"),
+        };
+        let (first, second, third) = (numeric(first), numeric(second), numeric(third));
         assert_eq!(first.binding.name, "i");
         assert!(first.binding.type_annotation.is_some());
         assert!(matches!(*first.start, Expr::Number { value: 1, .. }));
@@ -4331,6 +4426,37 @@ mod tests {
         assert!(second.step.is_none());
         assert_eq!(third.binding.name, "k");
         assert!(third.bound.is_none() && third.step.is_none());
+    }
+
+    #[test]
+    fn for_clauses_mix_collections_and_counters_in_order() {
+        let tree = parse(
+            "define function main() => <integer>\n  \
+             for (x :: <integer> in v, i from 0, in in in) 0 end;\n  \
+             0\nend;",
+        );
+        assert_eq!(tree.diagnostics, Vec::new());
+        let module = lower(&tree);
+        let [Statement::Expr(Expr::For { clauses, .. })] =
+            module.functions[0].body.statements.as_slice()
+        else {
+            panic!("unexpected statements");
+        };
+        let [
+            ForClause::Collection(first),
+            ForClause::Numeric(second),
+            ForClause::Collection(third),
+        ] = clauses.as_slice()
+        else {
+            panic!("unexpected clauses {clauses:?}");
+        };
+        assert_eq!(first.binding.name, "x");
+        assert!(first.binding.type_annotation.is_some());
+        assert!(matches!(&*first.collection, Expr::Name { name, .. } if name == "v"));
+        assert_eq!(second.binding.name, "i");
+        // `in` is not reserved either.
+        assert_eq!(third.binding.name, "in");
+        assert!(matches!(&*third.collection, Expr::Name { name, .. } if name == "in"));
     }
 
     #[test]

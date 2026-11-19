@@ -1,0 +1,18 @@
+// expect: run 31
+// expect: diagnostics 0
+
+// A stretchy vector's iteration reads its size at each step, so elements
+// added during the loop are visited too: deterministically, the loop ends
+// when it reaches the end as it then is.
+
+define function main() => <integer>
+  let v = make(<stretchy-vector>);
+  add!(v, 1);
+  let sum = 0;
+  for (x :: <integer> in v)
+    if (x < 16) add!(v, x * 2) end;
+    sum := sum + x
+  end;
+  // 1 + 2 + 4 + 8 + 16
+  sum
+end;

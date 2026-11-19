@@ -1,0 +1,24 @@
+// expect: run 7
+// expect: diagnostics 0
+
+// The `<collection-modified-error>` is an ordinary `<error>`: a handler
+// can take it, and it holds the table and the stable code
+// `collection.modified`.
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["a"] := 1;
+  t["b"] := 2;
+  handle
+    begin
+      for (x in t) remove-key!(t, "b") end;
+      0
+    end
+  with restart e :: <collection-modified-error>
+    if (collection-modified-error-collection(e) == t)
+      if (collection-modified-error-code(e) = "collection.modified") 7 else 2 end
+    else
+      1
+    end
+  end
+end;

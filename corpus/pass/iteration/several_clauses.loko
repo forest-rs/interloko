@@ -1,0 +1,16 @@
+// expect: run 1203
+// expect: diagnostics 0
+
+// A `for` with several clauses steps them together and ends when the first
+// of them runs out: here the vector, before the unbounded counter.
+
+define function main() => <integer>
+  let v = #[100, 200, 300];
+  let sum = 0;
+  for (x :: <integer> in v, i from 1, y in v)
+    sum := sum + x * i + as(<integer>, y) * 0
+  end;
+  // 100 + 400 + 900, less what the next loop's bound stops
+  for (i from 0 below 100, x in v) sum := sum + i end;
+  sum - 200
+end;

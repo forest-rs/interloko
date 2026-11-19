@@ -38,11 +38,21 @@ pub enum CollectionFunction {
     /// `add!(collection, element) => <object>`: adds `element` at the end
     /// of `collection`, which it returns.
     Add,
+    /// `forward-iteration-protocol(collection)`: the seven values that
+    /// iterate the collection, as the `iteration` module describes. Its kernel methods
+    /// are not rows of [`BUILTIN_METHODS`] but come from there.
+    ForwardIterationProtocol,
 }
 
 impl CollectionFunction {
     /// Every collection generic.
-    pub const ALL: &'static [Self] = &[Self::Size, Self::Element, Self::ElementSetter, Self::Add];
+    pub const ALL: &'static [Self] = &[
+        Self::Size,
+        Self::Element,
+        Self::ElementSetter,
+        Self::Add,
+        Self::ForwardIterationProtocol,
+    ];
 
     /// Returns the generic named `name`.
     #[must_use]
@@ -61,6 +71,7 @@ impl CollectionFunction {
             Self::Element => "element",
             Self::ElementSetter => "element-setter",
             Self::Add => "add!",
+            Self::ForwardIterationProtocol => super::iteration::FORWARD_ITERATION_PROTOCOL,
         }
     }
 
@@ -68,7 +79,7 @@ impl CollectionFunction {
     #[must_use]
     pub const fn params(self) -> &'static [&'static str] {
         match self {
-            Self::Size => &["collection"],
+            Self::Size | Self::ForwardIterationProtocol => &["collection"],
             Self::Element => &["collection", "key"],
             Self::ElementSetter => &["value", "collection", "key"],
             Self::Add => &["collection", "element"],
@@ -85,7 +96,7 @@ impl CollectionFunction {
     #[must_use]
     pub const fn collection_index(self) -> usize {
         match self {
-            Self::Size | Self::Element | Self::Add => 0,
+            Self::Size | Self::Element | Self::Add | Self::ForwardIterationProtocol => 0,
             Self::ElementSetter => 1,
         }
     }
@@ -100,7 +111,7 @@ impl CollectionFunction {
     pub const fn keywords(self) -> &'static [&'static str] {
         match self {
             Self::Element => &["default"],
-            Self::Size | Self::ElementSetter | Self::Add => &[],
+            Self::Size | Self::ElementSetter | Self::Add | Self::ForwardIterationProtocol => &[],
         }
     }
 }
@@ -279,6 +290,8 @@ mod tests {
             (CollectionFunction::Element, 3),
             (CollectionFunction::ElementSetter, 2),
             (CollectionFunction::Add, 3),
+            // Its kernel methods come from the `iteration` module.
+            (CollectionFunction::ForwardIterationProtocol, 0),
         ] {
             assert_eq!(builtin_methods(function).count(), rows);
         }

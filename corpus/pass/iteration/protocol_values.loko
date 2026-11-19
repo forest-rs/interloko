@@ -1,0 +1,19 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// The protocol is a generic a program can call. A literal vector is
+// constant, so its element setter is `#f`; a vector `make` makes has one.
+
+define function setter-of(v :: <object>) => <object>
+  let (state, limit, next, done?, key, current, setter) = forward-iteration-protocol(v);
+  setter
+end;
+
+define function main() => <integer>
+  let (state, limit, next, done?, key, current, setter) =
+    forward-iteration-protocol(#[10, 20]);
+  let made = make(<vector>, size: 1);
+  (if (setter-of(#[1]) == #f) 1 else 0 end)
+    + (if (setter-of(made) == #f) 0 else 1 end)
+    + (if (done?(#[10, 20], next(#[10, 20], next(#[10, 20], state)), limit)) 1 else 0 end)
+end;

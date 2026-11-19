@@ -253,6 +253,31 @@ pub const TABLE_KEY_EXISTS: &str = "interloko.collection.table_key_exists";
 /// Host-call symbol for removing a key's entry from a `<table>`, returning
 /// whether it had one. It takes [`table_key_signature`].
 pub const TABLE_REMOVE_KEY: &str = "interloko.collection.table_remove_key";
+/// Host-call symbol for whether a vector is constant, as a literal is. It
+/// takes [`vector_constant_signature`].
+pub const VECTOR_CONSTANT: &str = "interloko.collection.vector_constant";
+/// Host-call symbol for a `<table>`'s iteration version, which changes
+/// whenever its keys do. It takes [`collection_size_signature`].
+pub const TABLE_VERSION: &str = "interloko.collection.table_version";
+/// Host-call symbol for a `<table>`'s number of entry positions, the limit
+/// of its iteration states. It takes [`collection_size_signature`].
+pub const TABLE_POSITIONS: &str = "interloko.collection.table_positions";
+/// Host-call symbol for a `<table>`'s first entry position at or after a
+/// position, `(table, from, version) -> position`, or its number of
+/// positions when there is none. A table whose version is no longer
+/// `version` raises [`control::CHECK_FAILED_TAG`]. It takes
+/// [`table_next_position_signature`].
+pub const TABLE_NEXT_POSITION: &str = "interloko.collection.table_next_position";
+/// Host-call symbol for the key of a `<table>`'s entry at a position,
+/// `(table, position, version) -> key`. A position holding no entry, or a
+/// table whose version is no longer `version`, raises
+/// [`control::CHECK_FAILED_TAG`]. It takes
+/// [`table_position_signature`].
+pub const TABLE_POSITION_KEY: &str = "interloko.collection.table_position_key";
+/// Host-call symbol for the value of a `<table>`'s entry at a position, as
+/// [`TABLE_POSITION_KEY`] reads its key. It takes
+/// [`table_position_signature`].
+pub const TABLE_POSITION_VALUE: &str = "interloko.collection.table_position_value";
 /// Host-call symbol for rendering a float as its shortest round-trip literal.
 pub const FLOAT_TO_STRING: &str = "interloko.float_to_string";
 /// Host-call symbol for rendering an integer in decimal.
@@ -2853,6 +2878,53 @@ impl Host for InterlokoHost {
                 );
                 Ok(0)
             }
+            VECTOR_CONSTANT => {
+                let [ValueRef::Obj(vector)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::Bool(self.vector_is_constant(*vector)?);
+                Ok(0)
+            }
+            TABLE_VERSION | TABLE_POSITIONS => {
+                let [ValueRef::Obj(table)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::I64(if symbol == TABLE_VERSION {
+                    self.table_iteration_version(*table)?
+                } else {
+                    self.table_positions(*table)?
+                });
+                Ok(0)
+            }
+            TABLE_NEXT_POSITION => {
+                let [
+                    ValueRef::Obj(table),
+                    ValueRef::I64(from),
+                    ValueRef::I64(version),
+                ] = args
+                else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::I64(
+                    self.table_next_position(*table, *from, *version)?
+                        .ok_or_else(|| type_error::check_failed(&ctx))?,
+                );
+                Ok(0)
+            }
+            TABLE_POSITION_KEY | TABLE_POSITION_VALUE => {
+                let [
+                    ValueRef::Obj(table),
+                    ValueRef::I64(position),
+                    ValueRef::I64(version),
+                ] = args
+                else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self
+                    .table_entry_part(*table, *position, *version, symbol == TABLE_POSITION_KEY)?
+                    .ok_or_else(|| type_error::check_failed(&ctx))?;
+                Ok(0)
+            }
             TABLE_REMOVE_KEY => {
                 let [ValueRef::Obj(table), key] = args else {
                     return Err(HostError::Failed);
@@ -3843,6 +3915,35 @@ pub fn table_element_setter_signature() -> HostSig {
     HostSig {
         args: vec![any_type(), object_type(), any_type()],
         rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`VECTOR_CONSTANT`]: `(vector) -> <boolean>`.
+#[must_use]
+pub fn vector_constant_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type()],
+        rets: vec![ValueType::Bool],
+    }
+}
+
+/// Host signature for [`TABLE_POSITION_KEY`] and [`TABLE_POSITION_VALUE`]:
+/// `(table, position, version) -> <object>`.
+#[must_use]
+pub fn table_position_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type(), ValueType::I64, ValueType::I64],
+        rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`TABLE_NEXT_POSITION`]: `(table, from, version) ->
+/// position`.
+#[must_use]
+pub fn table_next_position_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type(), ValueType::I64, ValueType::I64],
+        rets: vec![ValueType::I64],
     }
 }
 

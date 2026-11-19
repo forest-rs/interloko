@@ -154,8 +154,29 @@ The current slices include:
   `:=` cannot assign it, so a closure may always capture it (that
   iteration's value). The counter steps with checked arithmetic after each iteration, so
   a loop through the largest `<integer>` signals `type-error.overflow`
-  after its last iteration. Iterating collections, `for (x in c)`, waits
-  for the iteration protocol;
+  after its last iteration;
+- collection `for` loops: `for (x in c) body end` binds `x` to each
+  element of `c` in turn, an `<object>`; `x :: type` checks each with
+  `as`. Several clauses, `for (x in a, i from 0, y in b)`, step together
+  and end when the first runs out. A vector visits its elements in order,
+  reading its size each step, so a stretchy vector's elements added during
+  the loop are visited; a table visits its values in the order their keys
+  were added, and adding or removing a key while it is iterated signals a
+  `<collection-modified-error>` when the loop moves on (replacing a value
+  does not). Over a `<vector>` or `<table>` typing knows, the loop reads
+  the collection directly, as the equivalent `while` would; over any other
+  collection it makes one `forward-iteration-protocol` send at entry and
+  calls the callables it answers. That is Dylan's protocol without
+  `copy-state`, since every state is an immutable value: an initial state,
+  a limit, `next-state(c, s)`, `finished-state?(c, s, limit)`,
+  `current-key(c, s)`, `current-element(c, s)`, and
+  `current-element-setter(v, c, s)` or `#f` for a constant collection. It
+  is an open built-in generic, sealed over `<vector>`, `<table>` and
+  `<sequence>` itself. The abstract `<sequence>` class, whose subclasses are
+  `<vector>` and a program's own (`<string>` joins when it can be
+  iterated), has a default method iterating from 0 below
+  `size(c)` with `element`, so a program's sequence class iterates once it
+  defines `size` and `element`; any other class defines its own method;
 - Dylan-style names, where a hyphen is always a name character: `x-1` and
   `a-b` are single names, so subtraction is spaced (`x - 1`, `a -% b`),
   and `?` and `!` may end one (`digit?`, `add!`);
@@ -380,8 +401,8 @@ The current slices include:
     only for the run that made it. A missing key without a `default:` signals a
     `<not-found-error>` holding the table and the key, whose `use-value`
     supplies the element. Entries keep the order they were added in, and
-    a version counter counts changes to the set of keys, for iteration to
-    check;
+    a version counter counts changes to the set of keys, which iteration
+    checks;
 - Dylan's collection generics `size(collection)`, `element(collection,
   key, #key default)`, `element-setter(value, collection, key)` and
   `add!(collection, element)` (whose kernel methods take a stretchy vector
@@ -406,8 +427,8 @@ The current slices include:
   a silent drop;
 - recoverable condition/restart forms, with `<condition>`, `<error>`,
   `<type-error>`, `<no-applicable-method>`, `<select-error>`,
-  `<not-found-error>` and `<immutable-collection-error>` defined by the
-  kernel: a
+  `<not-found-error>`, `<immutable-collection-error>` and
+  `<collection-modified-error>` defined by the kernel: a
   runtime check that fails (a cast, a callable value's argument or result,
   a range, an overflow) signals a `<type-error>` naming the value, the
   expected type (a type object: a class, a `<limited-integer>` or a

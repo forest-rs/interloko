@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.for-clause-type-mismatch
+// expect: diagnostic contains `for` clause `in` expects a class or limited type for its elements
+
+// Elements are `<object>`s, which `as` checks against a class or limited
+// type; no `as` reaches a callable type.
+
+define function main() => <integer>
+  for (f :: callable() => <integer> in #[1]) 0 end;
+  0
+end;

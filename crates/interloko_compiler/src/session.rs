@@ -8089,21 +8089,36 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             dump_ast_block(out, body, indent + 2);
         }
         ast::Expr::For {
-            id, clause, body, ..
+            id, clauses, body, ..
         } => {
-            let _ = writeln!(out, "{id} for {}", clause.binding.name);
-            indent_line(out, indent + 2);
-            let _ = writeln!(out, "from");
-            dump_ast_expr(out, &clause.start, indent + 4);
-            if let Some((bound, value)) = &clause.bound {
-                indent_line(out, indent + 2);
-                let _ = writeln!(out, "{}", bound.word());
-                dump_ast_expr(out, value, indent + 4);
-            }
-            if let Some(step) = &clause.step {
-                indent_line(out, indent + 2);
-                let _ = writeln!(out, "by");
-                dump_ast_expr(out, step, indent + 4);
+            let names = clauses
+                .iter()
+                .map(|clause| clause.binding().name.as_str())
+                .collect::<Vec<_>>();
+            let _ = writeln!(out, "{id} for {}", names.join(", "));
+            for clause in clauses {
+                match clause {
+                    ast::ForClause::Numeric(clause) => {
+                        indent_line(out, indent + 2);
+                        let _ = writeln!(out, "{} from", clause.binding.name);
+                        dump_ast_expr(out, &clause.start, indent + 4);
+                        if let Some((bound, value)) = &clause.bound {
+                            indent_line(out, indent + 2);
+                            let _ = writeln!(out, "{}", bound.word());
+                            dump_ast_expr(out, value, indent + 4);
+                        }
+                        if let Some(step) = &clause.step {
+                            indent_line(out, indent + 2);
+                            let _ = writeln!(out, "by");
+                            dump_ast_expr(out, step, indent + 4);
+                        }
+                    }
+                    ast::ForClause::Collection(clause) => {
+                        indent_line(out, indent + 2);
+                        let _ = writeln!(out, "{} in", clause.binding.name);
+                        dump_ast_expr(out, &clause.collection, indent + 4);
+                    }
+                }
             }
             dump_ast_block(out, body, indent + 2);
         }
@@ -13816,6 +13831,12 @@ fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
         sem::Intrinsic::MakeVector => "make-vector",
         sem::Intrinsic::MakeStretchyVector => "make-stretchy-vector",
         sem::Intrinsic::MakeTable => "make-table",
+        sem::Intrinsic::TableVersion => "table-version",
+        sem::Intrinsic::TablePositions => "table-positions",
+        sem::Intrinsic::TableNextPosition => "table-next-position",
+        sem::Intrinsic::TablePositionValue => "table-position-value",
+        sem::Intrinsic::TablePositionKey => "table-position-key",
+        sem::Intrinsic::VectorConstant => "vector-constant?",
         sem::Intrinsic::FloatToString => "float-to-string",
         sem::Intrinsic::IntegerToString => "integer-to-string",
         sem::Intrinsic::Concatenate => "concatenate",
@@ -22817,6 +22838,63 @@ end;
     }
 
     #[test]
+    fn a_failed_send_checks_and_adapts_a_callable_replacement() {
+        // A send that finds no method takes a replacement for a typed
+        // callable result as a boxed `<object>`: a non-callable fails the
+        // entry check and signals again, and a callable is adapted to the
+        // result's signature and called through it.
+        let artifacts = CompilerSession::compile_source(
+            "adder.loko",
+            "define generic adder(x) => callable(<integer>) => <integer>;\n\
+             define method adder(x :: <integer>) => callable(<integer>) => <integer>\n  \
+             function (n :: <integer>) => <integer> n + x end\nend;\n\
+             define function add-one(n :: <integer>) => <integer>\n  n + 1\nend;\n\
+             define function main() => <integer>\n  \
+             let spare :: <object> = add-one;\n  \
+             let text :: <object> = \"no\";\n  \
+             let f = adder(text);\n  \
+             f(41)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        // Typing sees the send has no method, and only warns.
+        assert!(
+            artifacts
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code
+                    == DiagnosticCode::TypingDispatchNoApplicableMethod),
+            "{:?}",
+            artifacts.diagnostics
+        );
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut seen = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                if let Some(report) = condition.type_error() {
+                    seen.push(report.code);
+                    // The entry check resumes with the callable itself:
+                    // `add-one`'s value in `main`'s frame, before it boxed.
+                    let callable = condition
+                        .frames
+                        .iter()
+                        .rev()
+                        .flat_map(|frame| &frame.registers)
+                        .map(|register| register.value.clone())
+                        .find(|value| matches!(value, Value::Agg(_)))
+                        .expect("a callable");
+                    return Choice::UseValue(vec![callable]);
+                }
+                assert!(condition.no_applicable_method().is_some());
+                seen.push(String::from("no method"));
+                Choice::UseValue(vec![register_of_class(condition, "<string>")])
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+            assert_eq!(value, FunctionValue::Integer(42), "{policy:?}");
+            assert_eq!(seen, ["no method", "type-error.entry"]);
+        }
+    }
+
+    #[test]
     fn a_failed_cast_signals_a_type_error_and_checks_its_replacement() {
         let artifacts =
             CompilerSession::compile_source("cast.loko", SHAPE_CAST, RuntimeMode::CompileOnly);
@@ -23064,7 +23142,16 @@ end;
              as(<integer>, v[5]) + as(<integer>, t[7])\nend;",
             RuntimeMode::CompileOnly,
         );
-        assert_eq!(artifacts.diagnostics, Vec::new());
+        // Typing sees the send has no method, and only warns.
+        assert!(
+            artifacts
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code
+                    == DiagnosticCode::TypingDispatchNoApplicableMethod),
+            "{:?}",
+            artifacts.diagnostics
+        );
         for policy in lower::CodegenPolicy::ALL {
             let artifacts = artifacts.with_codegen_policy(*policy);
             let mut seen = Vec::new();

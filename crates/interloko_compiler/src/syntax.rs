@@ -451,6 +451,8 @@ pub enum CstKind {
     ForExpr = 66,
     /// Numeric clause of a `for` loop: `i from a to b by s`.
     NumericForClause = 67,
+    /// Collection clause of a `for` loop: `x in c`.
+    CollectionForClause = 68,
     /// Exit procedure name bound by a `block` expression.
     BlockExitName = 49,
     /// `when … =>` guard of a restart clause.
