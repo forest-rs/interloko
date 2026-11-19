@@ -2049,6 +2049,9 @@ impl InterlokoHost {
 }
 
 impl Host for InterlokoHost {
+    fn is_synchronous(&self, symbol: &str, _: SigHash) -> bool {
+        !crate::control::is_control_symbol(symbol)
+    }
     fn call(
         &mut self,
         symbol: &str,
