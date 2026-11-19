@@ -724,6 +724,23 @@ impl<'a> Analysis<'a> {
         declared(self.module, binding.kind, binding.range)
     }
 
+    /// Binds `local`, a parameter of the anonymous method `closure` that
+    /// writes no type, to the one the signature expected of the method
+    /// gives it.
+    fn bind_expected(&mut self, env: &mut Env, local: LocalId, closure: ClosureId) {
+        let Some(binding) = self.local(local) else {
+            return;
+        };
+        let ty = self.declared_type(binding);
+        let fact = self.fact(
+            ReasonKind::Expected { closure },
+            binding.span,
+            ty,
+            Vec::new(),
+        );
+        self.define(env, Var::Local(local), fact);
+    }
+
     /// Binds `local` to its declared type.
     fn bind_declared(&mut self, env: &mut Env, local: LocalId) {
         let Some(binding) = self.local(local) else {
@@ -1619,8 +1636,16 @@ impl<'a> Analysis<'a> {
             };
             self.define(&mut inner, Var::Capture(capture.id), fact);
         }
-        for param in &closure.params {
-            self.bind_declared(&mut inner, *param);
+        let expected = closure
+            .expected
+            .as_ref()
+            .map_or(&[][..], |expected| expected.params.as_slice());
+        for (index, param) in closure.params.iter().enumerate() {
+            if expected.get(index).copied().unwrap_or(false) {
+                self.bind_expected(&mut inner, *param, closure.id);
+            } else {
+                self.bind_declared(&mut inner, *param);
+            }
         }
         self.check_entry(&inner, &closure.entry_checks);
         let _ = self.block(&mut inner, &closure.body);

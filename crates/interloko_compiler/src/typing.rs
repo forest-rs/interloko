@@ -969,6 +969,14 @@ pub enum ReasonKind {
     /// value passes it: any value its register can hold, which the entry
     /// checks before the body relies on the parameter's class.
     IndirectEntry,
+    /// An anonymous method's parameter that writes no type, and takes the
+    /// one the callable signature expected where the method is written
+    /// gives it ([`sem::ExpectedSignature`]). The method's entry checks it
+    /// as it would a written one.
+    Expected {
+        /// The method.
+        closure: ClosureId,
+    },
     /// A closed-world assumption the decisions citing it rely on.
     ClosedWorld(Assumption),
 }
@@ -992,6 +1000,7 @@ impl ReasonKind {
             Self::Widened => "widened",
             Self::Exit => "exit",
             Self::IndirectEntry => "indirect-entry",
+            Self::Expected { .. } => "expected",
             Self::ClosedWorld(_) => "closed-world",
         }
     }
@@ -2083,6 +2092,9 @@ fn provenance_labels(
             ReasonKind::Widened => format!("widened to {ty}"),
             ReasonKind::Exit => "control leaves here".into(),
             ReasonKind::IndirectEntry => format!("passed indirectly as {ty}"),
+            ReasonKind::Expected { .. } => {
+                format!("takes {ty} from the callable signature its method is expected to have")
+            }
             ReasonKind::Joined | ReasonKind::Kept | ReasonKind::ClosedWorld(_) => continue,
         };
         if reason.span == decision.span
@@ -2240,6 +2252,9 @@ fn reason_label(module: &sem::Module, reason: &Reason) -> String {
         }
         ReasonKind::HandlerCondition { specializer } => {
             let _ = write!(label, "({})", class_name(module, *specializer));
+        }
+        ReasonKind::Expected { closure } => {
+            let _ = write!(label, "(c{})", closure.0);
         }
         ReasonKind::ClosedWorld(assumption) => {
             let _ = write!(label, "({})", assumption_label(module, *assumption));

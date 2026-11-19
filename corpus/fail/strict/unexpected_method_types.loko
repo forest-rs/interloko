@@ -1,0 +1,34 @@
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-cast
+// expect: diagnostic contains function total is strict (declared), but typing cannot prove that <object> is <circle>
+
+// `sum-of` takes any `<function>`, so nothing is expected of the method
+// passed to it: `c` writes no type and is an `<object>`, and the strict
+// `total` cannot prove it is the `<circle>` `area` takes. Where `sum-of`
+// expects a `callable(<circle>) => <integer>`, `c` takes `<circle>` from it
+// and the send is proved (`pass/strict/expected_method_types.loko`).
+
+define class <circle> (<object>)
+end;
+
+define generic area(c :: <circle>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  1
+end;
+
+define function sum-of(circles :: <stretchy-vector>, measure :: <function>) => <integer>
+  let total = 0;
+  for (c :: <circle> in circles) total := total + measure(c) end;
+  total
+end;
+
+define strict function total(circles :: <stretchy-vector>) => <integer>
+  sum-of(circles, method (c) area(c) end)
+end;
+
+define function main() => <integer>
+  let circles = make(<stretchy-vector>);
+  for (i from 0 below 3) add!(circles, make(<circle>)) end;
+  total(circles)
+end;

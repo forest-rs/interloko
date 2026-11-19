@@ -8631,9 +8631,26 @@ fn dump_sem(module: &sem::Module) -> String {
             || "inferred".to_string(),
             |kinds| sem_kind_list_label(module, kinds),
         );
+        // What the closure took from the signature expected of it.
+        let expected = closure
+            .expected
+            .as_ref()
+            .map_or_else(String::new, |expected| {
+                let taken = closure
+                    .params
+                    .iter()
+                    .zip(&expected.params)
+                    .filter(|(_, taken)| **taken)
+                    .filter_map(|(local, _)| closure.locals.get(local.0 as usize))
+                    .map(|local| local.name.as_str())
+                    .chain(expected.results.then_some("results"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(" expected={taken}")
+            });
         let _ = writeln!(
             out,
-            "closure c{} ({params}) captures={} result={} return={return_annotation}",
+            "closure c{} ({params}) captures={} result={} return={return_annotation}{expected}",
             closure.id.0,
             closure.captures.len(),
             sem_kind_list_label(module, &closure.result_kinds)
@@ -13894,6 +13911,56 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
     }
 }
 
+/// A callable signature's fingerprint: its parameters' and results' kinds,
+/// with the signatures and ranges they carry, and its keywords.
+fn sem_signature_fingerprint(module: &sem::Module, signature: &sem::CallableSignature) -> String {
+    let values = |kinds: &[sem::ValueKind],
+                  sigs: &[Option<sem::CallableSignature>],
+                  ranges: &[Option<interloko_model::types::IntRange>]| {
+        kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                let mut value = sem_kind_fingerprint(module, *kind);
+                if let Some(signature) = sigs.get(index).and_then(Option::as_ref) {
+                    let _ = write!(value, "{}", sem_signature_fingerprint(module, signature));
+                }
+                if let Some(range) = ranges.get(index).copied().flatten() {
+                    let _ = write!(value, "{range:?}");
+                }
+                value
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let keywords = signature
+        .keywords
+        .iter()
+        .map(|keyword| {
+            format!(
+                "{}:{}",
+                keyword.name,
+                sem_kind_fingerprint(module, keyword.kind)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "callable({};{})=>({})",
+        values(
+            &signature.params,
+            &signature.param_sigs,
+            &signature.param_ranges
+        ),
+        keywords,
+        values(
+            &signature.results,
+            &signature.result_sigs,
+            &signature.result_ranges
+        )
+    )
+}
+
 fn sem_kind_list_fingerprint(module: &sem::Module, kinds: &[sem::ValueKind]) -> String {
     match kinds {
         [] => "()".into(),
@@ -15741,10 +15808,14 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             closure,
             captures,
             result_kind,
+            callable_signature,
             ..
         } => {
             let result = sem_kind_fingerprint(module, *result_kind);
-            let _ = write!(out, "closure({}:{result}:", closure.0);
+            // The signature carries what an anonymous method took from the
+            // one expected of it, which a callee's edit may change.
+            let signature = sem_signature_fingerprint(module, callable_signature);
+            let _ = write!(out, "closure({}:{result}:{signature}:", closure.0);
             for capture in captures {
                 let kind = sem_kind_fingerprint(module, capture.kind);
                 // A shared capture holds its local's cell, not a copy.
@@ -15759,6 +15830,14 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                     ":params={}:",
                     sem_kind_list_fingerprint(module, &closure.param_kinds)
                 );
+                if let Some(expected) = &closure.expected {
+                    let _ = write!(
+                        out,
+                        "expected={:?}{}:",
+                        expected.params,
+                        if expected.results { "+results" } else { "" }
+                    );
+                }
                 out.push_str(&fingerprint_sem_block(module, &closure.body));
             }
             out.push(')');
@@ -21753,6 +21832,43 @@ mod tests {
                 .artifacts
                 .dump_stage(DumpStage::Sem)
                 .contains("known-callable function f1")
+        );
+    }
+
+    #[test]
+    fn incremental_callee_signature_edit_retypes_an_anonymous_method_passed_to_it() {
+        // `x` takes the range of `each`'s callable parameter, which proves
+        // the conversion; widening that parameter changes what the method
+        // in `main` takes, so `main` changes and its conversion is checked.
+        let before = "define function each(f :: callable(limited(<integer>, min: 0, max: 9)) => ())\n \
+                      => ()\n  f(7)\nend;\n\
+                      define function main() => <integer>\n  \
+                      each(method (x) as(<u32>, x) end);\n  0\nend;";
+        let after = before.replace("limited(<integer>, min: 0, max: 9)", "<integer>");
+        let mut session = IncrementalCompilerSession::new();
+        let file = session.add_source("each.loko", before);
+        let first = session
+            .compile(file, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        assert!(
+            first
+                .artifacts
+                .dump_stage(DumpStage::Typing)
+                .contains("s0 range proved rule=range-within")
+        );
+
+        let update = session
+            .edit_and_compile(file, &after, RuntimeMode::CompileOnly)
+            .expect("source should exist");
+        let diff = update.diff.as_ref().expect("edit should produce a diff");
+        assert!(diff.changed.iter().any(|change| {
+            change.definition.name == "main" && change.change == DefinitionChangeKind::Modified
+        }));
+        assert!(
+            update
+                .artifacts
+                .dump_stage(DumpStage::Typing)
+                .contains("s0 range checked rule=range-overlaps")
         );
     }
 
