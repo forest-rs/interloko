@@ -12,6 +12,7 @@ use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
 use crate::syntax::{self, Span};
 
+mod built_in;
 mod collection;
 mod iteration;
 mod keywords;
@@ -395,38 +396,22 @@ impl CallableSignature {
     }
 }
 
+/// The discriminator of the definitions a built-in's value is made of: its
+/// hidden kernel function, or its built-in generic and kernel methods.
+const BUILT_IN_DISCRIMINATOR: &str = "built-in";
+
+/// The tag of the syntax a built-in's value calls it with.
+const BUILT_IN_TAG: u64 = 0x0062_7569_6c74_696e;
+
+/// The parameters of a built-in's value, in order.
+const BUILT_IN_PARAMS: &[&str] = &["a", "b", "c", "d"];
+
 /// How diagnostics name the callee of a call of an operand's value, such
 /// as `f(1)(2)`, which has no name of its own.
 const VALUE_CALLEE: &str = "called value";
 
 fn slot_setter_name(slot_name: &str) -> String {
     format!("{slot_name}-setter")
-}
-
-/// Whether `name` is a built-in function that a call resolves by name and
-/// that has no value of its own: the float library, the text functions,
-/// the integer divisions and bitwise functions, the other intrinsics, and
-/// the forms written as calls, such as `apply` and `make`. The built-in
-/// collection generics, such as `size`, are values and are not among them.
-fn names_built_in_function(name: &str) -> bool {
-    !name.starts_with('%')
-        && (FloatBuiltin::from_name(name).is_some()
-            || text_functions_for_name(name).is_some()
-            || Rounding::from_name(name).is_some()
-            || BinaryOp::bitwise_function(name).is_some()
-            || intrinsic_for_name(name).is_some()
-            || matches!(
-                name,
-                "apply"
-                    | "values"
-                    | "class-of"
-                    | "copy-sequence"
-                    | "starts-with?"
-                    | "make"
-                    | "signal"
-                    | "as"
-                    | "limited"
-            ))
 }
 
 fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
@@ -871,6 +856,15 @@ pub enum GenericFunctionOrigin {
         /// Operator the generic implements.
         operator: promotion::NumericOperator,
     },
+    /// Built-in generic a built-in function with several overloads is as
+    /// a value, such as `sqrt` or `as-uppercase` (see the `built_in`
+    /// module): one kernel method per overload, each the built-in's call of
+    /// its parameters. It is sealed over its kernel methods' classes, so a
+    /// program's method may join it for classes of its own.
+    BuiltIn {
+        /// The generic, whose kernel methods fix what it is sealed over.
+        generic: GenericFunctionId,
+    },
     /// Built-in open collection generic, `size`, `element`,
     /// `element-setter`, `add!` or `forward-iteration-protocol`, with the
     /// kernel's methods from [`BUILTIN_METHODS`] (or, for the protocol, the
@@ -893,6 +887,23 @@ impl GenericFunctionOrigin {
         match self {
             Self::Source => true,
             Self::SlotSetter { .. } => false,
+            Self::BuiltIn { generic } => {
+                // A method whose specializers may all meet a kernel
+                // method's would override it for those arguments.
+                !module.methods.iter().any(|kernel| {
+                    kernel.generic == generic
+                        && kernel.origin == MethodOrigin::BuiltIn
+                        && kernel.specializers.len() == specializers.len()
+                        && kernel.specializers.iter().zip(specializers).all(
+                            |(kernel, specializer)| match (kernel, specializer) {
+                                (Some(kernel), Some(class)) => {
+                                    module.classes_may_overlap(*kernel, *class)
+                                }
+                                _ => true,
+                            },
+                        )
+                })
+            }
             Self::Numeric { .. } => {
                 let Some(real) = module.builtin_value_class(BuiltinValueClass::Real) else {
                     return false;
@@ -1846,26 +1857,25 @@ fn check_collection_method_overrides(module: &mut Module) {
         let Some(generic) = module.generics.get(method.generic.0 as usize) else {
             continue;
         };
-        let GenericFunctionOrigin::Collection { function } = generic.origin else {
-            continue;
+        let index = match generic.origin {
+            GenericFunctionOrigin::Collection { function }
+                if method.origin != (MethodOrigin::Collection { function }) =>
+            {
+                function.collection_index()
+            }
+            GenericFunctionOrigin::BuiltIn { .. } if method.origin != MethodOrigin::BuiltIn => 0,
+            _ => continue,
         };
-        if method.origin == (MethodOrigin::Collection { function })
-            || generic.origin.admits_method(module, &method.specializers)
-        {
+        if generic.origin.admits_method(module, &method.specializers) {
             continue;
         }
         let mut class = String::new();
-        if let Some(specializer) = method
-            .specializers
-            .get(function.collection_index())
-            .copied()
-            .flatten()
-        {
+        if let Some(specializer) = method.specializers.get(index).copied().flatten() {
             let _ = module.write_class(&mut class, specializer);
         }
         diagnostics.push(
             Diagnostic::error(method.span, DiagnosticCode::CollectionMethodOverridesKernel)
-                .with_arg(DiagnosticArg::text("function", function.name()))
+                .with_arg(DiagnosticArg::text("function", generic.name.clone()))
                 .with_arg(DiagnosticArg::text("class", class)),
         );
     }
@@ -3132,6 +3142,9 @@ pub enum MethodOrigin {
         /// Operator the method implements.
         operator: promotion::NumericOperator,
     },
+    /// Kernel method of a built-in generic a built-in function with
+    /// several overloads is: one overload's call of its parameters.
+    BuiltIn,
     /// Kernel method of a built-in collection generic, from
     /// [`BUILTIN_METHODS`]. Its body is the row's operation on its
     /// parameters.
@@ -5964,6 +5977,20 @@ struct Lowering {
     /// persists across lowering passes; its kernel methods are regenerated
     /// with every pass.
     collection_generics: Vec<(CollectionFunction, GenericFunctionId)>,
+    /// How many functions the program defines: the hidden kernel functions
+    /// of [`Self::built_in_functions`] follow them, and no call of a name
+    /// finds those.
+    program_functions: usize,
+    /// The hidden kernel functions single-overload built-ins named as
+    /// values are, by built-in name, created the first time a value names
+    /// one. They persist across lowering passes, since their bodies depend
+    /// on nothing the program defines.
+    built_in_functions: Vec<(String, Function)>,
+    /// The built-in generics built-ins with several overloads are, by
+    /// built-in name, created the first time a value, a method or a call
+    /// typing cannot resolve names one. Each persists across lowering
+    /// passes; its kernel methods are regenerated with every pass.
+    built_in_generics: Vec<(String, GenericFunctionId)>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -5991,6 +6018,9 @@ impl Lowering {
             dispatch_specializers: Vec::new(),
             numeric_generics: Vec::new(),
             collection_generics: Vec::new(),
+            program_functions: module.functions.len(),
+            built_in_functions: Vec::new(),
+            built_in_generics: Vec::new(),
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
@@ -7851,6 +7881,7 @@ impl Lowering {
         self.collect_slot_setter_methods();
         self.collect_numeric_methods();
         self.collect_collection_methods();
+        self.collect_built_in_methods();
         self.refresh_inferred_generic_results();
         self.check_ambiguous_generic_methods();
         // After the methods, so a default's or an initializer's sends find
@@ -7859,7 +7890,7 @@ impl Lowering {
         self.lower_constants(module);
         self.report_constant_cycles();
 
-        let functions = module
+        let mut functions = module
             .functions
             .iter()
             .enumerate()
@@ -7869,7 +7900,14 @@ impl Lowering {
                     function,
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // The hidden kernel functions built-ins named as values are follow,
+        // in the order their ids were given.
+        functions.extend(
+            self.built_in_functions
+                .iter()
+                .map(|(_, function)| function.clone()),
+        );
 
         let mut lowered = Module {
             source_file: module.source_file,
@@ -8058,8 +8096,10 @@ impl Lowering {
     fn lower_method(&mut self, id: MethodId, method: &ast::Method) -> Method {
         let mut ctx = FunctionContext::new();
         ctx.shared_names = ast::shared_local_names(&method.body);
-        // A method may be the first to name a built-in collection generic.
+        // A method may be the first to name a built-in collection generic,
+        // or the generic a built-in function with several overloads is.
         let _ = self.collection_generic_named(&method.name);
+        let _ = self.built_in_generic_named(&method.name);
         let generic_symbol = self.resolve_generic(&method.name).cloned();
         let generic = generic_symbol
             .as_ref()
@@ -9706,6 +9746,19 @@ impl Lowering {
             _ => {}
         }
         let lowered_args: Vec<_> = args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
+        // A built-in with several overloads sends to its generic when no
+        // overload takes the arguments' types: an `<object>` among them, or
+        // a class a program's method joined the generic for.
+        if self.sends_to_built_in_generic(callee, &lowered_args)
+            && let Some(generic) = self.built_in_generic_named(callee)
+            && let Some(symbol) = self
+                .generic_symbols
+                .iter()
+                .find(|symbol| symbol.id == generic)
+                .cloned()
+        {
+            return self.lower_generic_send(ctx, &symbol, lowered_args, callee, span);
+        }
         if callee == "class-of" {
             if lowered_args.len() != 1 {
                 ctx.diagnostics
@@ -9944,7 +9997,7 @@ impl Lowering {
         })
     }
 
-    fn lower_known_name(&self, ctx: &mut FunctionContext, name: &str, span: Span) -> Expr {
+    fn lower_known_name(&mut self, ctx: &mut FunctionContext, name: &str, span: Span) -> Expr {
         if let Some(symbol) = self.resolve_constant(name) {
             return Expr::ConstantRef {
                 constant: symbol.id,
@@ -9975,9 +10028,12 @@ impl Lowering {
                 Expr::Error { span }
             }
             AccessorResolution::None => {
+                if let Some(callable) = self.built_in_value(name) {
+                    return Expr::KnownCallable { callable, span };
+                }
                 let diagnostic = match self.spaced_hyphen_suggestion(ctx, name) {
-                    _ if names_built_in_function(name) => {
-                        Diagnostic::error(span, DiagnosticCode::BuiltInFunctionValue)
+                    _ if built_in::FORMS.contains(&name) => {
+                        Diagnostic::error(span, DiagnosticCode::BuiltInFormValue)
                             .with_arg(DiagnosticArg::text("function", name))
                     }
                     Some(spaced) => {
@@ -10848,12 +10904,306 @@ impl Lowering {
     fn shadows_collection_generic(&self, name: &str) -> bool {
         self.resolve_function(name).is_some()
             || self.resolve_host_function(name).is_some()
-            || self.resolve_generic(name).is_some_and(|symbol| {
-                !self
-                    .collection_generics
-                    .iter()
-                    .any(|(_, generic)| *generic == symbol.id)
+            || self
+                .resolve_generic(name)
+                .is_some_and(|symbol| !self.is_kernel_generic(symbol.id))
+    }
+
+    /// Whether `generic` is one of the kernel's open generics a program's
+    /// methods join: a built-in collection generic, or the built-in generic
+    /// a built-in function with several overloads is.
+    fn is_kernel_generic(&self, generic: GenericFunctionId) -> bool {
+        self.collection_generics
+            .iter()
+            .any(|(_, id)| *id == generic)
+            || self.built_in_generics.iter().any(|(_, id)| *id == generic)
+    }
+
+    /// The value the built-in `name` is, creating it on first use: its
+    /// hidden kernel function when it has one overload, its built-in
+    /// generic when it has several (see the `built_in` module). `None`
+    /// when `name` is no built-in with a value.
+    fn built_in_value(&mut self, name: &str) -> Option<KnownCallable> {
+        let overloads = built_in::overloads(name)?;
+        Some(match overloads.as_slice() {
+            [params] => KnownCallable::DirectFunction(self.built_in_function(name, params)),
+            _ => KnownCallable::GenericFunction(self.built_in_generic(name, &overloads)),
+        })
+    }
+
+    /// The built-in generic named `name`, creating it on first use, when
+    /// `name` is a built-in with several overloads that no definition of
+    /// the program takes.
+    fn built_in_generic_named(&mut self, name: &str) -> Option<GenericFunctionId> {
+        if self.program_defines(name) {
+            return None;
+        }
+        let overloads = built_in::overloads(name).filter(|overloads| overloads.len() > 1)?;
+        Some(self.built_in_generic(name, &overloads))
+    }
+
+    /// Whether a call of the built-in `name` with `args` sends to its
+    /// built-in generic: it has several overloads, none takes the
+    /// arguments' types as typing sees them, and one of those types may
+    /// have a method all the same, an `<object>` or a class of the
+    /// program's own, whose methods may join the generic. A call of a
+    /// built-in with one overload, or of kernel types none takes, lowers
+    /// the built-in's call, inline or reported.
+    fn sends_to_built_in_generic(&mut self, name: &str, args: &[Expr]) -> bool {
+        let Some(overloads) = built_in::overloads(name).filter(|overloads| overloads.len() > 1)
+        else {
+            return false;
+        };
+        let actual = args
+            .iter()
+            .map(|arg| self.expr_kind(arg))
+            .collect::<Vec<_>>();
+        let may_join = actual.iter().any(|kind| match kind {
+            ValueKind::Any => true,
+            ValueKind::Object(class) => self.classes.get(class.0 as usize).is_some_and(|class| {
+                matches!(
+                    class.origin,
+                    ClassOrigin::Native | ClassOrigin::HostBacked { .. }
+                )
+            }),
+            _ => false,
+        });
+        may_join
+            && !overloads.iter().any(|params| {
+                params.len() == actual.len()
+                    && params.iter().zip(&actual).all(|(param, actual)| {
+                        let expected = self.resolve_type_name(param, false, Span::default());
+                        *actual == ValueKind::Error || self.kinds_match(expected, *actual)
+                    })
             })
+    }
+
+    /// The hidden kernel function the single-overload built-in `name`,
+    /// taking `params`, is as a value, creating it on first use. Its body
+    /// is the built-in's call of its parameters, lowered as any call of the
+    /// built-in is, and its contract is closed: its results are the
+    /// call's.
+    fn built_in_function(&mut self, name: &str, params: &[&str]) -> FunctionId {
+        if let Some((_, function)) = self
+            .built_in_functions
+            .iter()
+            .find(|(existing, _)| existing == name)
+        {
+            return function.id;
+        }
+        let id = FunctionId(u32::try_from(self.functions.len()).unwrap_or(u32::MAX));
+        let definition = DefinitionId::new(
+            self.source_file,
+            DefinitionKind::Function,
+            name,
+            BUILT_IN_DISCRIMINATOR,
+        );
+        let (ctx, locals, param_kinds, body) = self.built_in_body(name, definition, params);
+        let result_kinds = self.expr_kinds(&body.result);
+        let result_callable_sigs = self.expr_result_callable_signatures(&body.result);
+        let arity = param_kinds.len();
+        self.functions.push(FunctionSymbol {
+            name: name.into(),
+            id,
+            param_kinds: param_kinds.clone(),
+            param_callable_sigs: vec![None; arity],
+            param_ranges: vec![None; arity],
+            return_kinds: result_kinds.clone(),
+            return_callable_sigs: result_callable_sigs.clone(),
+            return_ranges: vec![None; result_kinds.len()],
+            return_annotation: Some(result_kinds.clone()),
+            span: Span::default(),
+        });
+        self.built_in_functions.push((
+            name.into(),
+            Function {
+                id,
+                definition,
+                name: name.into(),
+                params: locals,
+                param_kinds,
+                param_callable_sigs: vec![None; arity],
+                param_ranges: vec![None; arity],
+                locals: ctx.locals,
+                body,
+                result_ranges: vec![None; result_kinds.len()],
+                result_kinds: result_kinds.clone(),
+                result_callable_sigs,
+                return_annotation: Some(result_kinds),
+                entry_checks: Vec::new(),
+                keywords: Vec::new(),
+                strict: false,
+                span: Span::default(),
+            },
+        ));
+        id
+    }
+
+    /// The built-in generic the built-in `name` with several overloads,
+    /// `overloads`, is, creating it on first use. Its parameters are
+    /// unannotated, as a numeric generic's are, and each result is the
+    /// overloads' own where they agree and an `<object>` where they do not.
+    /// It persists across lowering passes; its kernel methods are
+    /// regenerated with every pass ([`Self::collect_built_in_methods`]).
+    fn built_in_generic(
+        &mut self,
+        name: &str,
+        overloads: &[Vec<&'static str>],
+    ) -> GenericFunctionId {
+        if let Some((_, id)) = self
+            .built_in_generics
+            .iter()
+            .find(|(existing, _)| existing == name)
+        {
+            return *id;
+        }
+        let id = GenericFunctionId(u32::try_from(self.generics.len()).unwrap_or(u32::MAX));
+        let definition = DefinitionId::new(
+            self.source_file,
+            DefinitionKind::Generic,
+            name,
+            BUILT_IN_DISCRIMINATOR,
+        );
+        let mut result_kinds: Option<Vec<ValueKind>> = None;
+        for params in overloads {
+            let (_, _, _, body) = self.built_in_body(name, definition, params);
+            let kinds = self.expr_kinds(&body.result);
+            result_kinds = Some(match result_kinds {
+                None => kinds,
+                Some(joined) => joined
+                    .into_iter()
+                    .zip(kinds)
+                    .map(|(joined, kind)| if joined == kind { kind } else { ValueKind::Any })
+                    .collect(),
+            });
+        }
+        let result_kinds = result_kinds.unwrap_or_default();
+        let arity = overloads.first().map_or(0, Vec::len);
+        let results = result_kinds.len();
+        self.generic_symbols.push(GenericSymbol {
+            name: name.into(),
+            id,
+            param_kinds: vec![None; arity],
+            param_ranges: vec![None; arity],
+            return_kinds: result_kinds.clone(),
+            return_callable_sigs: vec![None; results],
+            return_ranges: vec![None; results],
+            return_annotation: Some(result_kinds.clone()),
+            dispatch_param: 0,
+            span: Span::default(),
+        });
+        self.generics.push(GenericFunction {
+            id,
+            definition,
+            name: name.into(),
+            params: BUILT_IN_PARAMS
+                .iter()
+                .take(arity)
+                .map(|name| (*name).into())
+                .collect(),
+            param_kinds: vec![None; arity],
+            param_ranges: vec![None; arity],
+            arity,
+            dispatch_param: 0,
+            dispatch_params: (0..arity).collect(),
+            result_kinds: result_kinds.clone(),
+            result_callable_sigs: vec![None; results],
+            result_ranges: vec![None; results],
+            return_annotation: Some(result_kinds),
+            span: Span::default(),
+            origin: GenericFunctionOrigin::BuiltIn { generic: id },
+            sealing: Sealing::Open,
+            strict: false,
+            keywords: Vec::new(),
+        });
+        self.built_in_generics.push((name.into(), id));
+        id
+    }
+
+    /// Generates the kernel methods of every built-in generic created so
+    /// far, one per overload of its built-in: the built-in's call of the
+    /// method's parameters, each of its overload's type.
+    fn collect_built_in_methods(&mut self) {
+        for (name, generic) in self.built_in_generics.clone() {
+            for params in built_in::overloads(&name).unwrap_or_default() {
+                let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+                let definition = DefinitionId::new(
+                    self.source_file,
+                    DefinitionKind::Method,
+                    &name,
+                    &format!("{BUILT_IN_DISCRIMINATOR}:{}", params.join(",")),
+                );
+                let (ctx, locals, kinds, body) = self.built_in_body(&name, definition, &params);
+                let specializers = kinds
+                    .iter()
+                    .map(|kind| self.method_specializer_for_kind(*kind))
+                    .collect::<Vec<_>>();
+                let result_kinds = self.expr_kinds(&body.result);
+                self.methods.push(Method {
+                    id,
+                    definition,
+                    generic,
+                    specializer: specializers
+                        .first()
+                        .copied()
+                        .flatten()
+                        .unwrap_or(OBJECT_CLASS_ID),
+                    specializers,
+                    param: locals.first().copied().unwrap_or(LocalId(u32::MAX)),
+                    params: locals,
+                    locals: ctx.locals,
+                    body,
+                    result_ranges: vec![None; result_kinds.len()],
+                    result_kinds: result_kinds.clone(),
+                    return_annotation: Some(result_kinds),
+                    span: Span::default(),
+                    origin: MethodOrigin::BuiltIn,
+                    strict: false,
+                });
+            }
+        }
+    }
+
+    /// A built-in's call of parameters of the types `params`, of the
+    /// function or method `definition`: the context holding them, their
+    /// locals and kinds, and the body, the call lowered as a call of the
+    /// built-in always is.
+    fn built_in_body(
+        &mut self,
+        name: &str,
+        definition: DefinitionId,
+        params: &[&str],
+    ) -> (FunctionContext, Vec<LocalId>, Vec<ValueKind>, Block) {
+        let span = Span::default();
+        let mut ctx = FunctionContext::new();
+        let mut locals = Vec::new();
+        let mut kinds = Vec::new();
+        let mut args = Vec::new();
+        let id = AstNodeId::generated(self.source_file, BUILT_IN_TAG, name, 0, 0);
+        for (param, type_name) in BUILT_IN_PARAMS.iter().zip(params) {
+            let kind = self.resolve_type_name(type_name, false, span);
+            locals.push(ctx.add_local(
+                self.local_definition(definition, param),
+                (*param).into(),
+                kind,
+                None,
+                span,
+            ));
+            kinds.push(kind);
+            args.push(ast::Expr::Name {
+                id,
+                name: (*param).into(),
+                span,
+            });
+        }
+        let result = self.lower_built_in_call(&mut ctx, id, name, &args, &[], None, span);
+        self.diagnostics.append(&mut ctx.diagnostics);
+        let body = Block {
+            statements: Vec::new(),
+            result,
+            span,
+        };
+        (ctx, locals, kinds, body)
     }
 
     /// Returns the built-in collection generic named `name`, creating it on
@@ -12338,6 +12688,20 @@ impl Lowering {
             }
             KnownCallable::SlotAccessor { .. } => return None,
         };
+        // A built-in's value calls the built-in, inline where a call of its
+        // name would be.
+        let built_in = match callable {
+            KnownCallable::DirectFunction(function) => {
+                function.0 as usize >= self.program_functions
+            }
+            KnownCallable::GenericFunction(generic) => {
+                self.built_in_generics.iter().any(|(_, id)| *id == generic)
+            }
+            KnownCallable::SlotAccessor { .. } => false,
+        };
+        if built_in {
+            return Some(self.lower_built_in_call(ctx, id, &name, args, keywords, None, span));
+        }
         if let Some(function) = self
             .collection_generics
             .iter()
@@ -17529,8 +17893,12 @@ impl Lowering {
         }
     }
 
+    /// The program's function named `name`. A built-in's hidden kernel
+    /// function has its name too, but no call of the name finds it.
     fn resolve_function(&self, name: &str) -> Option<&FunctionSymbol> {
-        self.functions.iter().find(|symbol| symbol.name == name)
+        self.functions[..self.program_functions.min(self.functions.len())]
+            .iter()
+            .find(|symbol| symbol.name == name)
     }
 
     fn resolve_host_function(&self, name: &str) -> Option<&ResolvedHostFunction> {

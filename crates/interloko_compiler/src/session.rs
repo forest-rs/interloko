@@ -14814,6 +14814,7 @@ fn sem_generic_origin_label(origin: sem::GenericFunctionOrigin) -> String {
         sem::GenericFunctionOrigin::Collection { function } => {
             format!("collection({})", function.name())
         }
+        sem::GenericFunctionOrigin::BuiltIn { .. } => "built-in".into(),
     }
 }
 
@@ -14826,6 +14827,7 @@ fn sem_method_origin_label(origin: sem::MethodOrigin) -> String {
         sem::MethodOrigin::Session { sequence } => format!("session(#{sequence})"),
         sem::MethodOrigin::Numeric { operator } => format!("numeric({})", operator.name()),
         sem::MethodOrigin::Collection { function } => format!("collection({})", function.name()),
+        sem::MethodOrigin::BuiltIn => "built-in".into(),
     }
 }
 

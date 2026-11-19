@@ -1810,6 +1810,7 @@ fn method_origin_label(origin: MethodOrigin) -> String {
         MethodOrigin::Collection { function } => {
             format!("kernel collection method for `{}`", function.name())
         }
+        MethodOrigin::BuiltIn => "kernel method of a built-in function".into(),
     }
 }
 

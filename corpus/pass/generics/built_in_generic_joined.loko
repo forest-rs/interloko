@@ -1,0 +1,23 @@
+// expect: run 15.5
+// expect: diagnostics 0
+
+// A built-in with several overloads is a generic sealed over the kernel's
+// classes, as `size` is: a program's method joins it for a class of its
+// own, and a call typing cannot match to an overload, an `<object>` or
+// that class, sends to it.
+
+define class <square> (<object>)
+  constant slot area :: <double-float>, required-init-keyword: area:;
+end;
+
+define method sqrt (s :: <square>) => <double-float>
+  sqrt(s.area)
+end;
+
+define function main() => <double-float>
+  let o :: <object> = make(<square>, area: 16.0);
+  let f :: <object> = 2.25;
+  let side :: <double-float> = sqrt(o);
+  let root :: <double-float> = sqrt(f);
+  side + root + sqrt(make(<square>, area: 100.0))
+end;
