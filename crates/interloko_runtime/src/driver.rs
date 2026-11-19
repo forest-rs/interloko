@@ -17,14 +17,17 @@
 //! A run links [`CodeUnit`]s: it starts from an entry unit installed in the
 //! VM, either by [`run`] or once by [`install`] for any number of
 //! [`run_installed`] calls, and a chooser may install replacements while a
-//! condition is unhandled. Generic sends ask the runtime which method to
-//! call ([`crate::code::CODE_DISPATCH`]), which the host answers inline from
-//! the units the driver hands it at the start of the run and at every
+//! condition is unhandled. Generic sends call through their generic's guarded
+//! link, whose misses ask the driver ([`crate::code::CODE_FILL`]) for the
+//! method to call and cache it there for the run's newest unit, or ask the
+//! runtime ([`crate::code::CODE_DISPATCH`]), which the host answers inline
+//! from the units the driver hands it at the start of the run and at every
 //! install ([`InterlokoHost::send_cache`]), or, when typing selected the
 //! method, call it through a link that every install repoints
 //! ([`crate::code::CodeUnit::link_target`]), and a retried frame calls the
 //! newest version of its function, while every frame keeps running the unit
-//! it entered.
+//! it entered. A guard only ever names its own unit's code: installs and
+//! runs of other code empty the guards they make stale.
 //!
 //! Code older than the newest unit may reach it only where the newest unit
 //! keeps what that code relies on ([`crate::code::CodeUnit::check_replaces`]):
@@ -34,6 +37,7 @@
 //! still call their code.
 
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -44,17 +48,20 @@ use execution_tape::program::LinkId;
 use execution_tape::program::ValueType;
 use execution_tape::value::{FuncId, FuncRef, Obj, TagRef, UnitId, Value};
 use execution_tape::vm::{
-    ActivationId, ComputationInspection, InstallError, PendingHostCall, PendingSuspension,
-    RelinkError, RunStatus, TagError, Trap, TrapInfo, Turn, TurnOptions, TurnOutcome, Units, Vm,
+    ActivationId, ComputationInspection, GuardKeys, InstallError, LinkGuard, PendingHostCall,
+    PendingSuspension, RelinkError, RunStatus, TagError, Trap, TrapInfo, Turn, TurnOptions,
+    TurnOutcome, Units, Vm,
 };
 use interloko_model::{ClassId, GenericFunctionId};
 
 use crate::InterlokoHost;
 use crate::chooser::{
     Choice, ConditionChooser, FrameSnapshot, LinkSnapshot, OfferedRestart, RegisterSnapshot,
-    UnhandledCondition,
+    SiteSnapshot, UnhandledCondition,
 };
-use crate::code::{CODE_DISPATCH, CodeMismatch, CodeUnit, Definition, UnitTable, method_link};
+use crate::code::{
+    CODE_DISPATCH, CODE_FILL, CodeMismatch, CodeUnit, Definition, UnitTable, method_link,
+};
 use crate::control::{
     ABORT_TAG, BindingKind, BindingToken, CHECK_FAILED_TAG, CONDITION_GUARD,
     CONDITION_GUARD_RESULT, CONDITION_GUARD_UNWOUND, CONDITION_NO_APPLICABLE_METHOD,
@@ -210,6 +217,9 @@ pub struct Installed {
     code: Arc<CodeUnit>,
     /// This unit and every unit installed during its runs, oldest first.
     linked: UnitTable,
+    /// Whether a run set up this unit's guarded sends and none installed a
+    /// unit since, so their guards hold only this unit's selections.
+    sites_settled: bool,
 }
 
 impl Installed {
@@ -238,18 +248,37 @@ impl Installed {
 /// signature too, and its dispatcher otherwise. A refusal or a missing method
 /// therefore breaks that invariant, and is reported without undoing the
 /// links already repointed.
+///
+/// With `sites`, every guarded send of `units` is handed where it starts
+/// over, which `relink` may keep a guard from when what it caches already
+/// names `newest`'s code. A guard only ever names its own unit's code: the
+/// newest unit's sends start from its guesses ([`CodeUnit::site_start`]),
+/// and every other unit's start empty over that unit's dispatcher, so no
+/// turn, the driver's or not, reaches another install's code through one.
 fn relink_all<'u>(
     units: impl IntoIterator<Item = (UnitId, &'u CodeUnit)>,
     unit: UnitId,
     newest: &CodeUnit,
-    mut relink: impl FnMut(UnitId, LinkId, FuncRef) -> Result<FuncRef, RelinkError>,
+    sites: bool,
+    mut relink: impl FnMut(UnitId, LinkId, Option<LinkGuard>, FuncRef) -> Result<(), RelinkError>,
 ) -> Result<(), LinkError> {
     for (owner, code) in units {
+        for site in code.sites.iter().filter(|_| sites) {
+            let start = if owner == unit {
+                newest.site_start(unit, site)
+            } else {
+                code.generics
+                    .get(site.generic.0 as usize)
+                    .map(|dispatcher| (LinkGuard::Unfilled, FuncRef::new(owner, *dispatcher)))
+            };
+            let (start, target) = start.ok_or(LinkError::Mismatch(CodeMismatch::Layout))?;
+            relink(owner, site.link, Some(start), target).map_err(LinkError::Relink)?;
+        }
         for method in code.linked_methods() {
             let target = newest
                 .link_target(unit, method)
                 .ok_or(LinkError::Mismatch(CodeMismatch::Layout))?;
-            let relinked = relink(owner, method_link(method), target);
+            let relinked = relink(owner, method_link(method), None, target);
             debug_assert!(
                 relinked.is_ok(),
                 "units that took over from each other accept each other's targets: {relinked:?}"
@@ -276,6 +305,7 @@ pub fn install<H: Host>(vm: &mut Vm<H>, code: &Arc<CodeUnit>) -> Result<Installe
         unit,
         code: Arc::clone(code),
         linked,
+        sites_settled: false,
     })
 }
 
@@ -347,6 +377,9 @@ pub fn run_installed<'a, H: RuntimeHost>(
     for (owner, code) in installed.linked.iter().filter(|(owner, _)| *owner != unit) {
         units.push(owner, Arc::clone(code));
     }
+    // A unit whose earlier run set up its sends, and installed nothing,
+    // still has guards that hold only its own selections.
+    let settled = installed.sites_settled && installed.linked.iter().count() == 1;
     relink_all(
         installed
             .linked
@@ -354,9 +387,26 @@ pub fn run_installed<'a, H: RuntimeHost>(
             .map(|(owner, code)| (owner, &**code)),
         unit,
         &installed.code,
-        |owner, link, target| vm.relink(owner, link, target),
+        !settled,
+        |owner, link, guard, target| match guard {
+            None => vm.relink(owner, link, target).map(drop),
+            // A guard already where it starts, or that a run of the same
+            // code filled, stays: it names the entry unit's selections, as
+            // this run's sends would.
+            Some(start)
+                if vm.units().guarded_link(owner, link).is_some_and(|cached| {
+                    (cached.guard, cached.target) == (start, target)
+                        || (cached.target.unit == unit && cached.guard != LinkGuard::Unfilled)
+                }) =>
+            {
+                Ok(())
+            }
+            Some(guard) => vm.relink_guarded(owner, link, guard, target).map(drop),
+        },
     )
     .map_err(RunFailure::Link)?;
+    installed.sites_settled = true;
+    empty_foreign_guards(vm, &installed.linked);
     units.push(unit, Arc::clone(&installed.code));
     let turn = vm
         .start(
@@ -378,6 +428,7 @@ pub fn run_installed<'a, H: RuntimeHost>(
         made_check_error: None,
         unhandled_check: None,
         fault: None,
+        fills: BTreeMap::new(),
     };
     let ended = loop {
         let status = match turn.drive(u64::MAX) {
@@ -406,9 +457,9 @@ pub fn run_installed<'a, H: RuntimeHost>(
         }
     };
     let (turn, (sends, send_cache_hits)) = open.close();
-    ended?;
     // Finishing publishes the outputs; a turn dropped without it discards
     // them along with everything else it allocated.
+    ended?;
     let outputs = match turn.finish() {
         Ok(TurnOutcome::Returned(outputs)) => outputs,
         _ => unreachable!("a computation that reported Complete returned"),
@@ -421,6 +472,28 @@ pub fn run_installed<'a, H: RuntimeHost>(
             ..driver.state.stats()
         },
     })
+}
+
+/// Empties every filled guard of a unit outside `linked`, keeping its
+/// target: code another install put in the VM may run in this run, as a
+/// closure it made, and must reach the driver, which refuses it as foreign
+/// code, rather than a method its own runs cached.
+fn empty_foreign_guards<H: Host>(vm: &mut Vm<H>, linked: &UnitTable) {
+    let units = vm.units();
+    let filled = (0..units.len())
+        .filter_map(|index| u32::try_from(index).ok().map(UnitId))
+        .filter(|unit| linked.get(*unit).is_none())
+        .flat_map(|unit| {
+            units
+                .guarded_links(unit)
+                .filter(|site| site.guard != LinkGuard::Unfilled)
+                .map(move |site| (unit, site.link, site.target))
+        })
+        .collect::<Vec<_>>();
+    for (unit, link, target) in filled {
+        let emptied = vm.relink_guarded(unit, link, LinkGuard::Unfilled, target);
+        debug_assert!(emptied.is_ok(), "a guard takes the target it had");
+    }
 }
 
 /// A run's turn while the host answers the run's sends. Closing it, or
@@ -516,11 +589,45 @@ fn snapshot_links(vm: Units<'_>, units: &UnitTable) -> Vec<LinkSnapshot> {
     snapshots
 }
 
+/// Every guarded send of `units`, with what its guard caches now.
+fn snapshot_sites(vm: Units<'_>, units: &UnitTable) -> Vec<SiteSnapshot> {
+    units
+        .iter()
+        .flat_map(|(unit, code)| {
+            code.sites.iter().filter_map(move |site| {
+                let cached = vm.guarded_link(unit, site.link)?;
+                Some(SiteSnapshot {
+                    unit,
+                    link: site.link,
+                    generic: site.generic,
+                    guard: cached.guard,
+                    target: cached.target,
+                    misses: cached.misses,
+                })
+            })
+        })
+        .collect()
+}
+
+/// Fills in one run after which a unit's sends to a generic stop caching
+/// and call its dispatcher for every send: a megamorphic site would only
+/// thrash its guard. The guard stays megamorphic until an install or a run
+/// of other code empties it, as a run of the same code keeps it.
+pub const MEGAMORPHIC_FILLS: u32 = 4;
+
 fn snapshot_frames(
     mut inspection: ComputationInspection<'_>,
     units: &UnitTable,
 ) -> Vec<FrameSnapshot> {
-    let frames = inspection.frames().collect::<Vec<_>>();
+    // A guarded send's miss stub only forwards to the method it selects.
+    let frames = inspection
+        .frames()
+        .filter(|frame| {
+            !units
+                .get(frame.location.unit)
+                .is_some_and(|code| code.miss_stubs.contains(&frame.location.func))
+        })
+        .collect::<Vec<_>>();
     frames
         .into_iter()
         .map(|frame| {
@@ -566,6 +673,8 @@ struct Driver<'a> {
     /// suspends next.
     unhandled_check: Option<Obj>,
     fault: Option<ControlFault>,
+    /// How often this run filled each guarded send's guard.
+    fills: BTreeMap<(UnitId, LinkId), u32>,
 }
 
 /// One signal's handler search, alive from its `signal` request until it
@@ -642,7 +751,9 @@ impl Driver<'_> {
     /// malformed.
     fn failed_send(&self, trap: &TrapInfo) -> Option<ControlFault> {
         match &trap.trap {
-            Trap::HostCallFailed { symbol, .. } if &**symbol == CODE_DISPATCH => {
+            Trap::HostCallFailed { symbol, .. }
+                if &**symbol == CODE_DISPATCH || &**symbol == CODE_FILL =>
+            {
                 Some(match self.units.get(trap.unit) {
                     Some(_) => ControlFault::MalformedRequest,
                     None => ControlFault::ForeignCode { unit: trap.unit },
@@ -665,6 +776,8 @@ impl Driver<'_> {
             Action::Fail(ControlFault::MalformedRequest)
         } else if pending.symbol() == CODE_DISPATCH {
             return self.attributed_send(pending);
+        } else if pending.symbol() == CODE_FILL {
+            return self.fill_site(pending);
         } else if !is_control_symbol(pending.symbol()) {
             return pending.dispatch();
         } else {
@@ -754,6 +867,80 @@ impl Driver<'_> {
             .host_mut()
             .with_runtime(InterlokoHost::attribute_send);
         pending.dispatch()
+    }
+
+    /// Answers a guarded send that missed its guard ([`CODE_FILL`]) with the
+    /// method its arguments select, as a dynamic send would, and, when the
+    /// sender is the run's newest unit, fills the guard with the keys that
+    /// missed and that method while the request waits. A site this run has filled [`MEGAMORPHIC_FILLS`] times stops
+    /// caching: its guard admits every send, to the generic's newest
+    /// dispatcher.
+    fn fill_site<H: RuntimeHost>(
+        &mut self,
+        mut pending: PendingHostCall<'_, '_, H>,
+    ) -> Result<(), TrapInfo> {
+        let sender = pending.unit();
+        let Some(code) = self.units.get(sender).cloned() else {
+            self.fault
+                .get_or_insert(ControlFault::ForeignCode { unit: sender });
+            return pending.complete(&mut [], Err(HostError::Failed));
+        };
+        let args = pending
+            .arguments()
+            .map(|value| value.to_value())
+            .collect::<Vec<_>>();
+        let filled = (|| {
+            let [Value::U64(link), Value::U64(generic), rest @ ..] = args.as_slice() else {
+                return None;
+            };
+            let link = LinkId(u32::try_from(*link).ok()?);
+            let site = code.sites.iter().find(|site| site.link == link)?;
+            let cached = pending.units().guarded_link(sender, link)?;
+            if u64::from(site.generic.0) != *generic || rest.len() < cached.key_count {
+                return None;
+            }
+            let (keys, sent) = rest.split_at(cached.key_count);
+            let keys = keys
+                .iter()
+                .map(|key| match key {
+                    Value::U64(key) => Some(*key),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let mut request = Vec::with_capacity(sent.len() + 1);
+            request.push(ValueRef::U64(*generic));
+            request.extend(sent.iter().map(ValueRef::from_value));
+            let program = Arc::clone(&code.program);
+            let target = pending.host_mut().with_runtime(|runtime| {
+                runtime.attribute_send();
+                runtime.dispatch_send(program.program(), &request).ok()
+            })?;
+            // A guard names only its own unit's code, so only the newest
+            // unit's sends cache; older code still sends to the newest
+            // methods, through this request every time.
+            if Some(sender) != self.units.newest_unit() || target.unit != sender {
+                return Some(target);
+            }
+            let fills = self.fills.entry((sender, link)).or_insert(0);
+            *fills = fills.saturating_add(1);
+            let (guard, cached_target) = if *fills > MEGAMORPHIC_FILLS {
+                let dispatcher = code.generics.get(site.generic.0 as usize)?;
+                (LinkGuard::Megamorphic, FuncRef::new(sender, *dispatcher))
+            } else {
+                (LinkGuard::Keys(GuardKeys::new(&keys)?), target)
+            };
+            pending
+                .relink_guarded(sender, link, guard, cached_target)
+                .ok()?;
+            Some(target)
+        })();
+        match filled {
+            Some(target) => pending.complete(&mut [Value::Func(target)], Ok(0)),
+            None => {
+                self.fault.get_or_insert(ControlFault::MalformedRequest);
+                pending.complete(&mut [], Err(HostError::Failed))
+            }
+        }
     }
 
     /// Decides a control request while it waits, with the requesting
@@ -1024,6 +1211,7 @@ impl Driver<'_> {
         loop {
             let frames = snapshot_frames(pending.inspect(), &self.units);
             let links = snapshot_links(pending.units(), self.linked);
+            let sites = snapshot_sites(pending.units(), self.linked);
             let choice = {
                 let mut restarts = Vec::new();
                 for binding in self.state.bindings().iter().rev() {
@@ -1048,6 +1236,7 @@ impl Driver<'_> {
                         runtime,
                         frames: &frames,
                         links: &links,
+                        sites: &sites,
                         restarts: &restarts,
                         refused: refused.as_ref(),
                     })
@@ -1107,7 +1296,11 @@ impl Driver<'_> {
                 .chain(core::iter::once((unit, &*code))),
             unit,
             &code,
-            |owner, link, target| pending.relink(owner, link, target),
+            true,
+            |owner, link, guard, target| match guard {
+                None => pending.relink(owner, link, target).map(drop),
+                Some(guard) => pending.relink_guarded(owner, link, guard, target).map(drop),
+            },
         );
         if let Err(error) = relinked {
             // The unit stays in the VM though the run does not take it

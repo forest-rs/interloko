@@ -130,7 +130,9 @@ impl<'a> TypingFacts<'a> {
     /// The closed-world assumptions of every decision `records` says
     /// lowering acted on, as a code unit records them
     /// ([`crate::typing::closed_world`]), in first-use order. Closed
-    /// built-in classes are left out: no source edit can extend them.
+    /// built-in classes are left out: no source edit can extend them. A
+    /// guarded send relies on no decision: its guard is an observation the
+    /// runtime checks on every send, so it assumes nothing.
     pub(super) fn closed_world(
         &self,
         module: &sem::Module,
@@ -138,6 +140,9 @@ impl<'a> TypingFacts<'a> {
     ) -> Vec<ClosedWorld> {
         let mut out = Vec::new();
         for record in records {
+            if record.codegen == super::CheckCodegen::Guarded {
+                continue;
+            }
             let Some(owner) = self.owners.get(&record.owner) else {
                 continue;
             };

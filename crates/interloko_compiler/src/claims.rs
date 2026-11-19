@@ -168,6 +168,9 @@ pub struct ClaimTally {
     pub inlined: usize,
     /// Sends that call their method through a relinkable link.
     pub linked: usize,
+    /// Unproved sends through a guarded link: observed, not proved, so they
+    /// also count as runtime checks.
+    pub guarded: usize,
     /// Proved sites whose check the generated code still performs, as under
     /// [`CodegenPolicy::Off`].
     pub proved_kept: usize,
@@ -228,6 +231,10 @@ pub enum SiteStatus {
     ProvedKept,
     /// The runtime check decides.
     Runtime,
+    /// The runtime decides, behind a guard it fills with what it observes:
+    /// a send through a guarded link. Observed, not proved; nothing relies
+    /// on the guard holding.
+    Guarded,
     /// The check always fails when reached.
     Refuted,
     /// No value reaches the check.
@@ -236,13 +243,14 @@ pub enum SiteStatus {
 
 impl SiteStatus {
     /// Returns the stable label: `relied`, `proved-kept`, `runtime`,
-    /// `refuted`, or `unreachable`.
+    /// `guarded-observed`, `refuted`, or `unreachable`.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Relied => "relied",
             Self::ProvedKept => "proved-kept",
             Self::Runtime => "runtime",
+            Self::Guarded => "guarded-observed",
             Self::Refuted => "refuted",
             Self::Unreachable => "unreachable",
         }
@@ -441,8 +449,11 @@ fn site_status(decision: &TypingDecision, codegen: CheckCodegen) -> SiteStatus {
         TypingVerdict::Proved if decision.rule == TypingRule::Unreachable => {
             SiteStatus::Unreachable
         }
-        TypingVerdict::Proved if codegen == CheckCodegen::Kept => SiteStatus::ProvedKept,
+        TypingVerdict::Proved if matches!(codegen, CheckCodegen::Kept | CheckCodegen::Guarded) => {
+            SiteStatus::ProvedKept
+        }
         TypingVerdict::Proved => SiteStatus::Relied,
+        TypingVerdict::Checked if codegen == CheckCodegen::Guarded => SiteStatus::Guarded,
         TypingVerdict::Checked => SiteStatus::Runtime,
         TypingVerdict::Refuted => SiteStatus::Refuted,
     }
@@ -603,7 +614,7 @@ impl ClaimTally {
             SiteStatus::Unreachable => self.unreachable += 1,
             SiteStatus::Relied => self.relied += 1,
             SiteStatus::ProvedKept => self.proved_kept += 1,
-            SiteStatus::Runtime | SiteStatus::Refuted => {}
+            SiteStatus::Runtime | SiteStatus::Guarded | SiteStatus::Refuted => {}
         }
         match codegen {
             CheckCodegen::Kept if status != SiteStatus::Unreachable => self.runtime += 1,
@@ -611,6 +622,10 @@ impl ClaimTally {
             CheckCodegen::Specialized => self.specialized += 1,
             CheckCodegen::Inlined => self.inlined += 1,
             CheckCodegen::Linked => self.linked += 1,
+            CheckCodegen::Guarded if status != SiteStatus::Unreachable => {
+                self.runtime += 1;
+                self.guarded += 1;
+            }
             _ => {}
         }
         if severity == TypingSeverity::Error {
@@ -1095,7 +1110,7 @@ impl ClaimReport {
         );
         let _ = writeln!(
             out,
-            "  generated code: relies-on-proof={} (elided={} specialized={} inlined={} linked={}) proved-but-kept={} runtime-checks={} errors={}",
+            "  generated code: relies-on-proof={} (elided={} specialized={} inlined={} linked={}) proved-but-kept={} runtime-checks={} (guarded-observed={}) errors={}",
             tally.relied,
             tally.elided,
             tally.specialized,
@@ -1103,6 +1118,7 @@ impl ClaimReport {
             tally.linked,
             tally.proved_kept,
             tally.runtime,
+            tally.guarded,
             tally.errors
         );
         if self.support.is_empty() {

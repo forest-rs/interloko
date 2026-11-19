@@ -62,6 +62,28 @@ pub struct LinkSnapshot {
     pub definition: Option<Definition>,
 }
 
+/// What one guarded send of one installed unit has cached so far.
+///
+/// A guarded send calls its method through a link whose guard holds the
+/// classes of the arguments last selected ([`crate::code::SendSite`]): an
+/// observation the runtime keeps current, not a proof, so it is reported
+/// apart from [`LinkSnapshot`]s.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SiteSnapshot {
+    /// The unit whose code makes the send.
+    pub unit: UnitId,
+    /// The guarded link within that unit's program.
+    pub link: LinkId,
+    /// The generic sent to.
+    pub generic: interloko_model::GenericFunctionId,
+    /// The classes the guard admits, or that it admits any or none.
+    pub guard: execution_tape::vm::LinkGuard,
+    /// The function sends the guard admits call now.
+    pub target: FuncRef,
+    /// Sends that missed the guard since the unit was installed.
+    pub misses: u64,
+}
+
 /// A restart a chooser may select.
 #[derive(Clone, Debug)]
 pub enum OfferedRestart<'a> {
@@ -113,6 +135,8 @@ pub struct UnhandledCondition<'a> {
     /// Every link the sends of the run's units, and of units earlier runs
     /// installed, use, oldest unit first, with the function it calls now.
     pub links: &'a [LinkSnapshot],
+    /// Every guarded send of the same units, with what its guard holds.
+    pub sites: &'a [SiteSnapshot],
     /// Restarts on offer, innermost handler sites first, then the built-ins.
     pub restarts: &'a [OfferedRestart<'a>],
     /// Why the chooser's last [`Choice::Install`] was refused, if it was.

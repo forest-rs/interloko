@@ -1,14 +1,17 @@
 // codegen: off
 // expect: run 9
 // expect: diagnostics 0
-// expect: dump lowered contains select-method g0(
+// expect: dump lowered contains guarded-send g0 
 // expect: dump lowered contains region.enter [retry -> bb0]
 // expect: dump tape contains import "interloko.retry"
-// expect: dump tape contains ("interloko.code.dispatch")
+// expect: dump tape contains call.link.guard
+// expect: dump tape contains ("interloko.code.fill")
 
-// A generic send asks the runtime which method its arguments select from
-// the newest code unit and calls it indirectly, so a unit installed while
-// this run is suspended can replace `area`'s methods under it. Under the
+// A generic send calls through a guarded link, an inline cache: when its
+// argument's class misses the guard, it asks the runtime which method the
+// arguments select from the newest code unit, which also fills the guard,
+// and calls it indirectly. A unit installed while this run is suspended
+// empties the guards, so it can replace `area`'s methods under them. Under the
 // default codegen policy typing proves this send's method, and the send calls
 // it through a link instead (see linked_send.loko). Every function and method body is
 // a retry region, so a break loop can call it again with newer code.

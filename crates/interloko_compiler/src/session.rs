@@ -13378,6 +13378,10 @@ fn explain_typing_decision(
             "contract: relied on; the send calls the selected method through a link, which the \
              runtime repoints at the newest code's selection whenever a run installs a unit"
         }
+        CheckCodegen::Guarded => {
+            "contract: advisory; the send is guarded (observed): it calls the method the runtime \
+             last selected for the same argument classes, and asks the runtime when they differ"
+        }
         _ => "contract: relied on; the generated code acts on this decision instead of checking",
     };
     let _ = writeln!(out, "{contract}");
@@ -17781,7 +17785,7 @@ mod tests {
         else {
             panic!("decision facet: {:?}", decision.typing);
         };
-        assert_eq!(*codegen, CheckCodegen::Kept);
+        assert_eq!(*codegen, CheckCodegen::Guarded);
         assert_eq!(reasons.len(), 1);
         assert!(reasons[0].starts_with("contract(declared)@"), "{reasons:?}");
         assert_eq!(
@@ -17793,10 +17797,9 @@ mod tests {
         );
         let contract_id = format!("contract:{pick}");
         assert!(
-            decision
-                .inspection
-                .detail
-                .contains(&format!("depends-on={contract_id},generic:g0 codegen=kept")),
+            decision.inspection.detail.contains(&format!(
+                "depends-on={contract_id},generic:g0 codegen=guarded"
+            )),
             "{}",
             decision.inspection.detail
         );
@@ -17804,8 +17807,9 @@ mod tests {
             .explain_typing(decision.id.as_str())
             .expect("decision explanation");
         assert!(explanation.contains(&format!("depends-on: {contract_id}\n")));
-        // A checked dispatch keeps its check under the default policy too.
-        assert!(explanation.contains("codegen: kept (policy proved)\n"));
+        // A checked dispatch sends through a guard under the default policy
+        // too: observed, not proved.
+        assert!(explanation.contains("codegen: guarded (policy proved)\n"));
 
         let contract = eop_object(&objects, &contract_id);
         assert_eq!(contract.kind, EnvironmentKind::Contract);
@@ -26073,7 +26077,7 @@ end;
         assert!(
             original
                 .dump_stage(DumpStage::Lowered)
-                .contains("select-method g0(")
+                .contains("guarded-send g0 ")
         );
 
         // The first two sends select and cache `weight(<circle>)`. The signal
@@ -26094,15 +26098,16 @@ end;
         let value = call_with_chooser(&original, &mut chooser).expect("use-value resumes");
         assert_eq!(value, FunctionValue::Integer(40));
         assert_eq!(asked, 2);
-        // The host answered both sends inline, the second from its cache,
-        // and the install emptied the cache and moved it to the new unit.
+        // The sends to `weight` share one guard: the first missed it and
+        // asked the host, which cached the choice, and the second hit it.
+        // The install emptied the host's cache and moved it to the new unit.
         let cache = |unit, entries| {
             Some(interloko_runtime::SendCacheReport {
                 newest: execution_tape::value::UnitId(unit),
                 entries,
                 inline: true,
-                sends: 2,
-                hits: 1,
+                sends: 1,
+                hits: 0,
             })
         };
         assert_eq!(caches, [cache(0, 1), cache(1, 0)]);
@@ -26145,7 +26150,11 @@ end;
         )
         .expect("use-value resumes");
         assert_eq!(outcome.outputs, vec![Value::I64(10 + 10 + 20 + 20)]);
-        assert_eq!((outcome.stats.sends, outcome.stats.send_cache_hits), (4, 2));
+        // The first send fills `weight`'s guard and the second hits it. The
+        // install empties it, and the original unit's sends after it never
+        // cache the new unit's method, so each asks the host, whose own cache
+        // answers the second.
+        assert_eq!((outcome.stats.sends, outcome.stats.send_cache_hits), (3, 1));
         assert_eq!(vm.host().send_cache(), None, "a run's sends end with it");
     }
 
@@ -26215,7 +26224,7 @@ end;
         assert!(
             artifacts
                 .dump_stage(DumpStage::Lowered)
-                .contains("select-method g0("),
+                .contains("guarded-send g0 "),
             "the sends stay dynamic"
         );
         assert!(matches!(
@@ -26298,7 +26307,8 @@ end;
             )
         }));
         assert!(panicked.is_err(), "the panic leaves the run");
-        assert!(opened.is_some_and(|cache| cache.inline && cache.sends == 2));
+        // Both sends to `weight` share a guard, so only the first asked.
+        assert!(opened.is_some_and(|cache| cache.inline && cache.sends == 1));
         assert_eq!(vm.host().send_cache(), None);
         assert!(!vm.host().is_synchronous(
             interloko_runtime::code::CODE_DISPATCH,
@@ -26312,6 +26322,8 @@ end;
                 None,
             )
             .expect_err("nothing answers the send");
+        // The panic left the guards the run filled: its sends call what the
+        // run selected, and the signal after them finds no driver.
         assert!(
             matches!(
                 &trap.trap,
@@ -26319,17 +26331,19 @@ end;
                     symbol,
                     error: HostError::UnknownSymbol,
                     ..
-                } if &**symbol == interloko_runtime::code::CODE_DISPATCH
+                } if &**symbol == interloko_runtime::control::CONDITION_SIGNAL
             ),
             "{trap:?}"
         );
     }
 
     #[test]
-    fn sends_outside_a_driver_run_are_not_answered() {
+    fn sends_outside_a_driver_run_are_answered_only_by_their_guards() {
         // The host answers sends for an open run only. After the run, a
-        // send in a turn the driver does not run fails as an unknown import
-        // instead of selecting from the finished run's units.
+        // turn the driver does not run still sends through the guards the
+        // run filled, which name the methods it selected, and a send that
+        // misses fails as an unknown import instead of selecting from the
+        // finished run's units. The next driver run starts the guards over.
         let artifacts = compile_under(WEIGH_TWICE, lower::CodegenPolicy::Off);
         let tape = artifacts.tape.as_ref().expect("tape");
         let mut vm = Vm::new(
@@ -26340,14 +26354,25 @@ end;
         let main = tape_function(&artifacts, "main");
         let outputs = run_driver(&mut vm, &mut installed, main, &[], |_| Choice::Abort);
         assert_eq!(outputs, vec![Value::I64(20)]);
-        let trap = vm
-            .run(
-                execution_tape::value::FuncRef::new(installed.unit(), main),
-                &[],
-                execution_tape::trace::TraceMask::NONE,
-                None,
+        let entry = execution_tape::value::FuncRef::new(installed.unit(), main);
+        let run = |vm: &mut Vm<InterlokoHost>| {
+            vm.run(entry, &[], execution_tape::trace::TraceMask::NONE, None)
+        };
+        assert_eq!(run(&mut vm).expect("the guards answer"), [Value::I64(20)]);
+        assert_eq!(vm.host().send_cache(), None);
+        for site in &tape.code.sites {
+            vm.relink_guarded(
+                installed.unit(),
+                site.link,
+                execution_tape::vm::LinkGuard::Unfilled,
+                execution_tape::value::FuncRef::new(
+                    installed.unit(),
+                    tape.code.generics[site.generic.0 as usize],
+                ),
             )
-            .expect_err("nothing answers the send");
+            .expect("empties the guard");
+        }
+        let trap = run(&mut vm).expect_err("nothing answers the send");
         assert!(
             matches!(
                 &trap.trap,
@@ -26355,10 +26380,12 @@ end;
                     symbol,
                     error: HostError::UnknownSymbol,
                     ..
-                } if &**symbol == interloko_runtime::code::CODE_DISPATCH
+                } if &**symbol == interloko_runtime::code::CODE_FILL
             ),
             "{trap:?}"
         );
+        let outputs = run_driver(&mut vm, &mut installed, main, &[], |_| Choice::Abort);
+        assert_eq!(outputs, vec![Value::I64(20)]);
     }
 
     #[test]
@@ -26380,8 +26407,8 @@ end;
         let program = code.program.program();
         assert_eq!(
             program.links.len(),
-            code.layout.methods.len(),
-            "a link per method"
+            code.layout.methods.len() + code.layout.generics.len(),
+            "a link per method, then one per generic"
         );
         assert_eq!(
             program.link_name(execution_tape::program::LinkId(1)),
@@ -26459,6 +26486,366 @@ end;
         )
         .expect("the run completes")
         .outputs
+    }
+
+    /// Six classes under `<shape>`; `weigh` sends `weight` to whichever it
+    /// is given, so its one send site sees every class.
+    const SIX_SHAPES: &str = "define class <shape> (<object>)\nend;\n\
+         define class <a> (<shape>)\nend;\ndefine class <b> (<shape>)\nend;\n\
+         define class <c> (<shape>)\nend;\ndefine class <d> (<shape>)\nend;\n\
+         define class <e> (<shape>)\nend;\ndefine class <f> (<shape>)\nend;\n\
+         define class <aa> (<a>)\nend;\n\
+         define generic weight(s :: <shape>) => <integer>;\n\
+         define method weight(s :: <shape>) => <integer>\n  1\nend;\n\
+         define method weight(s :: <a>) => <integer>\n  10\nend;\n\
+         define method weight(s :: <aa>) => <integer>\n  100\nend;\n\
+         define function weigh(s :: <shape>) => <integer>\n  weight(s)\nend;\n\
+         define function heavy(a :: <a>) => <integer>\n  weight(a)\nend;\n\
+         define function weigh-heavy() => <integer>\n  heavy(make(<a>))\nend;\n\
+         define function main() => <integer>\n  \
+           weigh(make(<a>)) + weigh(make(<a>)) + weigh(make(<b>)) + weigh(make(<c>)) \
+           + weigh(make(<d>)) + weigh(make(<e>)) + weigh(make(<f>)) + weigh(make(<f>))\nend;";
+
+    /// The guarded link `artifacts`' sends to `weight` share.
+    fn weight_link(artifacts: &SessionArtifacts) -> execution_tape::program::LinkId {
+        let generic = generic_id(artifacts, "weight");
+        let code = &artifacts.tape.as_ref().expect("tape").code;
+        let link = code.send_link(interloko_model::GenericFunctionId(generic.0));
+        assert!(
+            code.sites.iter().any(|site| site.link == link),
+            "weight is sent to"
+        );
+        link
+    }
+
+    /// Asserts that every filled guard of every unit in `vm` names code of
+    /// its own unit.
+    fn assert_guards_stay_in_their_units(vm: &Vm<InterlokoHost>) {
+        let units = vm.units();
+        for unit in 0..units.len() {
+            let unit = execution_tape::value::UnitId(u32::try_from(unit).expect("few units"));
+            for site in units.guarded_links(unit) {
+                if site.guard != execution_tape::vm::LinkGuard::Unfilled {
+                    assert_eq!(site.target.unit, unit, "{site:?}");
+                }
+            }
+        }
+    }
+
+    /// Runs `main` of [`SEND_CACHE`] outside the driver, where nothing
+    /// answers a send that misses its guard.
+    fn assert_sends_outside_the_driver_miss(
+        vm: &mut Vm<InterlokoHost>,
+        installed: &Installed,
+        main: execution_tape::value::FuncId,
+    ) {
+        let trap = vm
+            .run(
+                execution_tape::value::FuncRef::new(installed.unit(), main),
+                &[],
+                execution_tape::trace::TraceMask::NONE,
+                None,
+            )
+            .expect_err("nothing answers the send");
+        assert!(
+            matches!(
+                &trap.trap,
+                execution_tape::vm::Trap::HostCallFailed {
+                    symbol,
+                    error: HostError::UnknownSymbol,
+                    ..
+                } if &**symbol == interloko_runtime::code::CODE_FILL
+            ),
+            "{trap:?}"
+        );
+    }
+
+    #[test]
+    fn a_turn_after_an_install_reaches_no_other_units_code_through_a_guard() {
+        // The run installs a heavier circle while `check` waits. Its sends
+        // then reach the new method, but the original unit's guards were
+        // emptied by the install and never cache another unit's code, so a
+        // turn the driver does not run still misses instead of calling it.
+        let off = lower::CodegenPolicy::Off;
+        let original = compile_under(SEND_CACHE, off);
+        let heavier = compile_under(
+            &SEND_CACHE.replace("<integer>\n  10\nend;", "<integer>\n  20\nend;"),
+            off,
+        );
+        let tape = original.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut installed = driver::install(&mut vm, &tape.code).expect("installs");
+        let main = tape_function(&original, "main");
+        let mut asked = 0;
+        let outputs = run_driver(&mut vm, &mut installed, main, &[], |_| {
+            asked += 1;
+            match asked {
+                1 => Choice::Install(heavier.code_unit().expect("tape")),
+                _ => Choice::UseValue(vec![Value::I64(0)]),
+            }
+        });
+        assert_eq!(outputs, vec![Value::I64(10 + 10 + 20)]);
+        assert_guards_stay_in_their_units(&vm);
+        let link = weight_link(&original);
+        assert_eq!(
+            vm.units()
+                .guarded_link(installed.unit(), link)
+                .expect("guarded")
+                .guard,
+            execution_tape::vm::LinkGuard::Unfilled
+        );
+        assert_sends_outside_the_driver_miss(&mut vm, &installed, main);
+    }
+
+    #[test]
+    fn a_chooser_that_panics_after_an_install_leaves_no_guard_reaching_it() {
+        // As above, but the chooser panics after its install, so the run
+        // never finishes: the install itself emptied the original unit's
+        // guards, so nothing depends on the run ending.
+        let off = lower::CodegenPolicy::Off;
+        let original = compile_under(SEND_CACHE, off);
+        let heavier = compile_under(
+            &SEND_CACHE.replace("<integer>\n  10\nend;", "<integer>\n  20\nend;"),
+            off,
+        );
+        let tape = original.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut installed = driver::install(&mut vm, &tape.code).expect("installs");
+        let main = tape_function(&original, "main");
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut asked = 0;
+            driver::run_installed(
+                &mut vm,
+                &mut installed,
+                main,
+                &[],
+                TurnOptions::default(),
+                &mut Scripted(|_: &UnhandledCondition<'_>| -> Choice {
+                    asked += 1;
+                    match asked {
+                        1 => Choice::Install(heavier.code_unit().expect("tape")),
+                        _ => panic!("the chooser fails"),
+                    }
+                }),
+            )
+        }));
+        assert!(panicked.is_err(), "the panic leaves the run");
+        assert_eq!(vm.units().len(), 2, "the install happened");
+        assert_guards_stay_in_their_units(&vm);
+        assert_sends_outside_the_driver_miss(&mut vm, &installed, main);
+    }
+
+    #[test]
+    fn another_installs_closure_sends_through_no_guard_its_runs_filled() {
+        // A closure the first install made sends `weight`. Run by the first
+        // install, it fills that unit's guard; run in a run of a second
+        // install, it is foreign code, and its send must reach the driver,
+        // which refuses it, instead of the method the guard cached.
+        let source = "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\nend;\n\
+             define generic weight(s :: <shape>) => <integer>;\n\
+             define method weight(s :: <shape>) => <integer>\n  1\nend;\n\
+             define method weight(s :: <circle>) => <integer>\n  10\nend;\n\
+             define function maker() => <function>\n  \
+               function (s :: <shape>) => <integer> weight(s) end\nend;\n\
+             define function use(f :: <function>) => <integer>\n  \
+               let r :: <integer> = apply(f, make(<circle>));\n  r\nend;\n";
+        let off = lower::CodegenPolicy::Off;
+        let first = compile_under(source, off);
+        let second = compile_under(
+            &source.replace("<integer>\n  10\nend;", "<integer>\n  20\nend;"),
+            off,
+        );
+        let tape = first.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut first_installed = driver::install(&mut vm, &tape.code).expect("installs");
+        let made = run_driver(
+            &mut vm,
+            &mut first_installed,
+            tape_function(&first, "maker"),
+            &[],
+            |_| Choice::Abort,
+        );
+        let use_first = tape_function(&first, "use");
+        let used = run_driver(&mut vm, &mut first_installed, use_first, &made, |_| {
+            Choice::Abort
+        });
+        assert_eq!(used, vec![Value::I64(10)], "the guard is warm");
+        let mut second_installed =
+            driver::install(&mut vm, &second.tape.as_ref().expect("tape").code).expect("installs");
+        let refused = driver::run_installed(
+            &mut vm,
+            &mut second_installed,
+            tape_function(&second, "use"),
+            &made,
+            TurnOptions::default(),
+            &mut Scripted(|_: &UnhandledCondition<'_>| Choice::Abort),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(RunFailure::Control {
+                    fault: ControlFault::ForeignCode { unit },
+                    ..
+                }) if unit == first_installed.unit()
+            ),
+            "{refused:?}"
+        );
+        assert_guards_stay_in_their_units(&vm);
+    }
+
+    #[test]
+    fn editing_one_function_leaves_another_functions_tape_unchanged() {
+        // Sends share one link per generic, numbered by the layout, and
+        // what they need is declared after every body, so a send added to
+        // `g` renumbers nothing `f` uses, its lazily declared host calls
+        // included.
+        let source = "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\nend;\n\
+             define generic weight(s :: <shape>) => <integer>;\n\
+             define method weight(s :: <shape>) => <integer>\n  1\nend;\n\
+             define method weight(s :: <circle>) => <integer>\n  10\nend;\n\
+             define generic pair(s :: <shape>, t :: <shape>) => <double-float>;\n\
+             define method pair(s :: <shape>, t :: <shape>) => <double-float>\n  1.0\nend;\n\
+             define method pair(s :: <circle>, t :: <shape>) => <double-float>\n  2.0\nend;\n\
+             define function f(s :: <shape>, x :: <object>) => <integer>\n  \
+               let k = as(<function>, x);\n  let r :: <integer> = apply(k, 1);\n  \
+               weight(s) + r\nend;\n\
+             define function g(s :: <shape>) => <integer>\n  1\nend;";
+        let edited = source.replace(
+            "define function g(s :: <shape>) => <integer>\n  1\nend;",
+            "define function g(s :: <shape>) => <integer>\n  \
+               if (pair(s, s) > 1.0) 2 else 1 end\nend;",
+        );
+        let bytes = |source: &str| {
+            let artifacts = compile_under(source, lower::CodegenPolicy::Proved);
+            assert_eq!(artifacts.diagnostics, Vec::new());
+            let tape = artifacts.tape.as_ref().expect("tape");
+            let f = tape_function(&artifacts, "f");
+            let g = tape_function(&artifacts, "g");
+            let program = &tape.code.program;
+            let body = |func| {
+                program
+                    .function(func)
+                    .expect("function")
+                    .bytecode()
+                    .to_vec()
+            };
+            (body(f), body(g))
+        };
+        let (f_before, g_before) = bytes(source);
+        let (f_after, g_after) = bytes(&edited);
+        assert_ne!(g_before, g_after, "g changed");
+        assert_eq!(
+            f_before, f_after,
+            "f's bytecode does not depend on g's sends"
+        );
+    }
+
+    #[test]
+    fn a_guarded_send_caches_what_it_sees_until_it_sees_too_much() {
+        let artifacts = compile_under(SIX_SHAPES, lower::CodegenPolicy::Off);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let tape = artifacts.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut installed = driver::install(&mut vm, &tape.code).expect("installs");
+        let main = tape_function(&artifacts, "main");
+        // 10 + 10 + 1 * 6.
+        let outputs = run_driver(&mut vm, &mut installed, main, &[], |_| Choice::Abort);
+        assert_eq!(outputs, vec![Value::I64(26)]);
+        let site = vm
+            .units()
+            .guarded_link(installed.unit(), weight_link(&artifacts))
+            .expect("weigh's send is guarded");
+        // <a> filled the empty guard and hit it once; <b> through <e> each
+        // missed and refilled it, and the fifth fill gave up on keys.
+        assert_eq!(site.misses, 5);
+        assert_eq!(site.guard, execution_tape::vm::LinkGuard::Megamorphic);
+        let dispatcher = tape.code.generics[0];
+        assert_eq!(
+            site.target,
+            execution_tape::value::FuncRef::new(installed.unit(), dispatcher)
+        );
+        // The next run of the same code keeps what the guard holds, so the
+        // site does not miss again.
+        let outputs = run_driver(&mut vm, &mut installed, main, &[], |_| Choice::Abort);
+        assert_eq!(outputs, vec![Value::I64(26)]);
+        let site = vm
+            .units()
+            .guarded_link(installed.unit(), weight_link(&artifacts))
+            .expect("weigh's send is guarded");
+        assert_eq!(site.misses, 5);
+    }
+
+    #[test]
+    fn a_guarded_send_starts_with_the_class_its_declared_type_names() {
+        // `heavy`'s `<a>` may be an `<aa>`, whose method differs, so typing
+        // cannot prove `weight(a)`'s method; the guard starts with `<a>` and
+        // the method it selects, so the send never misses. `heavy` is the
+        // program's only send to `weight`.
+        let source = SIX_SHAPES
+            .split_once("define function weigh(")
+            .map(|(head, _)| head)
+            .expect("weigh follows the methods")
+            .to_string()
+            + "define function heavy(a :: <a>) => <integer>\n  weight(a)\nend;\n\
+               define function weigh-heavy() => <integer>\n  heavy(make(<a>))\nend;";
+        let artifacts = compile_under(&source, lower::CodegenPolicy::Proved);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let tape = artifacts.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut installed = driver::install(&mut vm, &tape.code).expect("installs");
+        let entry = tape_function(&artifacts, "weigh-heavy");
+        let outputs = run_driver(&mut vm, &mut installed, entry, &[], |_| Choice::Abort);
+        assert_eq!(outputs, vec![Value::I64(10)]);
+        let link = weight_link(&artifacts);
+        let site = vm
+            .units()
+            .guarded_link(installed.unit(), link)
+            .expect("heavy's send is guarded");
+        assert_eq!(site.misses, 0);
+        let class_a = tape.runtime().class_id("<a>").expect("<a>");
+        assert_eq!(
+            site.guard,
+            execution_tape::vm::LinkGuard::Keys(
+                execution_tape::vm::GuardKeys::new(&[u64::from(class_a.0)]).expect("one key")
+            )
+        );
+        // The guard is an observation: the unit assumes nothing about it.
+        assert!(
+            tape.code.assumptions.is_empty(),
+            "{:?}",
+            tape.code.assumptions
+        );
+        let index = artifacts
+            .sem
+            .functions
+            .iter()
+            .position(|function| function.name == "heavy")
+            .expect("heavy");
+        let claims = artifacts
+            .explain_claims(
+                &format!("function:f{index}"),
+                crate::claims::ClaimDetail::Full,
+            )
+            .expect("claims for heavy");
+        assert!(claims.contains("(guarded-observed=1)"), "{claims}");
+        assert!(claims.contains("guarded-observed"), "{claims}");
     }
 
     #[test]

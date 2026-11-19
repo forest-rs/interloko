@@ -824,6 +824,9 @@ pub struct TypingTally {
     pub inlined: usize,
     /// Dispatches that call their method through a relinkable link.
     pub linked: usize,
+    /// Dispatches that send through a guarded link, an inline cache the
+    /// runtime fills from what it observes.
+    pub guarded: usize,
     /// Decisions reported as errors, such as a strict definition's
     /// unproved checks.
     pub errors: usize,
@@ -842,6 +845,7 @@ impl TypingTally {
             CheckCodegen::Specialized => self.specialized += 1,
             CheckCodegen::Inlined => self.inlined += 1,
             CheckCodegen::Linked => self.linked += 1,
+            CheckCodegen::Guarded => self.guarded += 1,
         }
         if snapshot.severity == TypingSeverity::Error {
             self.errors += 1;
@@ -1188,7 +1192,7 @@ impl TypingDelta {
         );
         let _ = writeln!(
             out,
-            "  codegen kept {}->{} elided {}->{} specialized {}->{} inlined {}->{} linked {}->{}",
+            "  codegen kept {}->{} elided {}->{} specialized {}->{} inlined {}->{} linked {}->{} guarded {}->{}",
             b.kept,
             a.kept,
             b.elided,
@@ -1198,7 +1202,9 @@ impl TypingDelta {
             b.inlined,
             a.inlined,
             b.linked,
-            a.linked
+            a.linked,
+            b.guarded,
+            a.guarded
         );
         let _ = writeln!(out, "  errors {}->{}", b.errors, a.errors);
         for change in &self.changes {

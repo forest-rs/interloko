@@ -2,7 +2,7 @@
 // expect: run 4.5
 // expect: diagnostics 0
 // expect: dump lowered contains i64.add_ovf
-// expect: dump lowered contains select-method
+// expect: dump lowered contains guarded-send
 
 // The narrowing applies to the then branch only. There `x + 1` adds
 // unboxed `i64`s; in the else branch `x` is any `<object>` but an

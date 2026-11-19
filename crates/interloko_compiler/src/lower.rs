@@ -161,6 +161,13 @@ pub enum CheckCodegen {
     /// The runtime repoints the link when newer code is installed, so the
     /// send still reaches the newest method.
     Linked,
+    /// A dispatch lowering did not link sends through a guarded link
+    /// ([`Instr::GuardedSend`]): an inline cache the runtime fills with the
+    /// argument classes it observes and the method they select, starting
+    /// from the classes typing expects. A send whose classes differ asks the
+    /// runtime, as an unguarded send does. Nothing relies on the guard
+    /// holding.
+    Guarded,
 }
 
 impl CheckCodegen {
@@ -173,6 +180,7 @@ impl CheckCodegen {
             Self::Specialized => "specialized",
             Self::Inlined => "inlined",
             Self::Linked => "linked",
+            Self::Guarded => "guarded",
         }
     }
 }
@@ -1656,6 +1664,28 @@ pub enum Instr {
         callee: FunctionId,
         /// The send's argument registers, in dispatcher parameter kinds.
         args: Vec<Reg>,
+        /// Source span.
+        span: Span,
+    },
+    /// A generic send through its own guarded link, an inline cache: the
+    /// method the guard's keys select when `keys` match them, and otherwise a
+    /// miss the runtime answers and caches ([`interloko_runtime::code::SendSite`]).
+    /// The link's target and miss path both take the send's arguments and
+    /// return its results unchanged.
+    GuardedSend {
+        /// Destination registers.
+        dsts: Vec<Reg>,
+        /// Generic function, by its id in the shared runtime layout.
+        generic: sem::GenericFunctionId,
+        /// `u64` class registers of the arguments the generic dispatches on,
+        /// in its dispatch plan's position order.
+        keys: Vec<Reg>,
+        /// The send's argument registers, in dispatcher parameter kinds.
+        args: Vec<Reg>,
+        /// The class ids the declared argument types expect at those
+        /// positions, and the method they select, which the guard starts
+        /// with.
+        guess: Option<(Vec<u64>, sem::MethodId)>,
         /// Source span.
         span: Span,
     },
@@ -4753,6 +4783,32 @@ impl<'module> BodyLowering<'module> {
             });
             return Ok(());
         }
+        if let Some(positions) = self.guard_positions(generic) {
+            let mut keys = Vec::with_capacity(positions.len());
+            for &position in &positions {
+                let key = self.alloc(ValueKind::U64);
+                self.instructions.push(Instr::ClassOf {
+                    dst: key.reg,
+                    object: args[position],
+                    input: dispatcher_param_kind(self.module, generic, position),
+                    span,
+                });
+                keys.push(key.reg);
+            }
+            if let Some(site) = site {
+                self.record(site, CheckCodegen::Guarded);
+            }
+            let guess = site.and_then(|site| self.send_guess(generic, &positions, site));
+            self.instructions.push(Instr::GuardedSend {
+                dsts,
+                generic: generic.id,
+                keys,
+                args,
+                guess,
+                span,
+            });
+            return Ok(());
+        }
         let callee = self.alloc(ValueKind::Function(None));
         self.instructions.push(Instr::SelectMethod {
             dst: callee.reg,
@@ -4773,6 +4829,66 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         Ok(())
+    }
+
+    /// The positions a guarded send to `generic` keys on: those its dispatch
+    /// plan selects by, when there are 1 to [`execution_tape::program::MAX_GUARD_KEYS`]
+    /// and every argument there is a runtime object or a boxed `<object>`,
+    /// whose class `obj.key` reads. `None` leaves the send to the runtime.
+    fn guard_positions(&self, generic: &sem::GenericFunction) -> Option<Vec<usize>> {
+        let plan = self.ids.dispatch.get(generic.id.0 as usize)?.as_ref()?;
+        let positions = &plan.positions;
+        let keyable = (1..=execution_tape::program::MAX_GUARD_KEYS).contains(&positions.len())
+            && positions.iter().all(|&position| {
+                position < generic.arity
+                    && matches!(
+                        dispatcher_param_kind(self.module, generic, position),
+                        ValueKind::Object(_) | ValueKind::Any
+                    )
+            });
+        keyable.then(|| positions.clone())
+    }
+
+    /// The keys a guarded send at `site` expects, and the method they select:
+    /// when typing found each keyed argument's declared type to be one class
+    /// (exactly, or that class or a subclass), the dispatch plan selects a
+    /// method for those classes, and calls it directly. Typing did not prove
+    /// the classes, so this is only where the guard starts.
+    fn send_guess(
+        &self,
+        generic: &sem::GenericFunction,
+        positions: &[usize],
+        site: sem::SiteId,
+    ) -> Option<(Vec<u64>, sem::MethodId)> {
+        let decision = self.fact(site)?;
+        if decision.actual.len() != generic.arity {
+            return None;
+        }
+        let plan = self.ids.dispatch.get(generic.id.0 as usize)?.as_ref()?;
+        let mut classes = vec![None; generic.arity];
+        for &position in positions {
+            let [atom] = decision.actual.get(position)?.atoms()? else {
+                return None;
+            };
+            let class = match atom {
+                interloko_model::types::Atom::Cone(class)
+                | interloko_model::types::Atom::Exact(class) => *class,
+                _ => return None,
+            };
+            classes[position] = Some(class);
+        }
+        let case = plan.select(
+            |index| classes.get(index).copied().flatten(),
+            |class, specializer| self.module.is_same_or_subclass(class, specializer),
+        )?;
+        if !case.direct {
+            return None;
+        }
+        let keys = positions
+            .iter()
+            .map(|&position| classes[position].map(|class| u64::from(class.0)))
+            .collect::<Option<Vec<_>>>()?;
+        Some((keys, case.method))
     }
 
     /// The method a send to `generic` at `site` may call through its link,
@@ -12266,6 +12382,24 @@ impl Module {
                 self.fmt_arg_list(f, args)?;
                 fmt_span(f, *span)
             }
+            Instr::GuardedSend {
+                dsts,
+                generic,
+                keys,
+                args,
+                guess,
+                span,
+            } => {
+                write!(f, "  ")?;
+                self.fmt_result_list(f, dsts)?;
+                write!(f, " = guarded-send g{} keys", generic.0)?;
+                self.fmt_arg_list(f, keys)?;
+                if let Some((classes, method)) = guess {
+                    write!(f, " guess {classes:?} m{}", method.0)?;
+                }
+                self.fmt_arg_list(f, args)?;
+                fmt_span(f, *span)
+            }
             Instr::CallIndirect {
                 dsts,
                 callee,
@@ -13394,10 +13528,10 @@ mod tests {
         let source = "define function main() => <integer>\n  \
             as(<integer>, as(<object>, 20) + 1)\nend;";
         let off = function_dump(&lower_with_policy(source, CodegenPolicy::Off), "main");
-        assert!(off.contains("select-method"), "{off}");
+        assert!(off.contains("guarded-send"), "{off}");
         let proved_module = lower_with_policy(source, CodegenPolicy::Proved);
         let proved = function_dump(&proved_module, "main");
-        assert!(!proved.contains("select-method"), "{proved}");
+        assert!(!proved.contains("guarded-send"), "{proved}");
         // Only the retry region calls indirectly.
         assert_eq!(proved.matches("call.indirect").count(), 1, "{proved}");
         assert!(proved.contains("unbox"), "{proved}");

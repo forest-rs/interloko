@@ -8,12 +8,19 @@
 //! unhandled. The VM keeps every unit, so a frame keeps running the code it
 //! entered; definitions resolve to the newest unit that has them.
 //!
-//! Generic sends are late-bound and dispatched by the runtime: compiled code
-//! asks [`CODE_DISPATCH`] for the method its arguments select and calls it
-//! indirectly. The host answers inline, choosing from the newest unit's
-//! [`GenericDispatch`] table, and caches the choice per argument classes
-//! until the next install ([`crate::InterlokoHost::send_cache`]), so a frame
-//! running superseded code still sends to the newest methods.
+//! Generic sends are late-bound and dispatched by the runtime. A send whose
+//! dispatched arguments are objects calls through its own guarded link
+//! ([`SendSite`]), an inline cache keyed by those arguments' classes, read
+//! with `obj.key`: a send whose classes match the guard calls the method
+//! cached there, and one that misses asks [`CODE_FILL`], which selects as a
+//! dynamic send does and caches the choice in the guard. A guard only ever
+//! names its own unit's code: an install empties every older unit's guards,
+//! and only the run's newest unit caches. Other sends ask [`CODE_DISPATCH`] for the method
+//! their arguments select and call it indirectly. The host answers inline,
+//! choosing from the newest unit's [`GenericDispatch`] table, and caches the
+//! choice per argument classes until the next install
+//! ([`crate::InterlokoHost::send_cache`]), so a frame running superseded code
+//! still sends to the newest methods.
 //! When the table cannot decide (scalar dispatch, or a method that needs its
 //! arguments converted), the answer is the newest unit's compiled dispatcher.
 //! Direct calls to source functions stay within the caller's unit.
@@ -94,6 +101,7 @@ use execution_tape::host::HostSig;
 use execution_tape::program::{LinkId, ValueType};
 use execution_tape::value::{FuncId, FuncRef, UnitId};
 use execution_tape::verifier::VerifiedProgram;
+use execution_tape::vm::{GuardKeys, LinkGuard};
 use interloko_model::contract::{Contract, ContractBreak, ContractPosition, ValueContract};
 use interloko_model::sealing::ClosedWorld;
 use interloko_model::{ClassId, GenericFunctionId, MethodId};
@@ -108,6 +116,50 @@ use crate::control::ControlLayout;
 /// arguments, for `call.indirect`: the selected method, or the generic's
 /// dispatcher.
 pub const CODE_DISPATCH: &str = "interloko.code.dispatch";
+
+/// Control request a guarded send's miss stub makes: the method its
+/// arguments select, as [`CODE_DISPATCH`] answers, which the driver also
+/// caches in the send's guarded link ([`SendSite`]) while the request waits.
+///
+/// The arguments are the site's link index in the calling program, the
+/// generic's id, the keys the guard compared, then the send's own arguments;
+/// the result is the function to call with those arguments.
+pub const CODE_FILL: &str = "interloko.code.fill";
+
+/// Host signature for [`CODE_FILL`]:
+/// `(link, generic, keys..., args...) -> function`.
+#[must_use]
+pub fn fill_signature(keys: usize, args: &[ValueType]) -> HostSig {
+    let mut all = alloc::vec![ValueType::U64; 2 + keys];
+    all.extend_from_slice(args);
+    HostSig {
+        args: all,
+        rets: alloc::vec![ValueType::Func],
+    }
+}
+
+/// A unit's dynamic sends to one generic, made through the generic's guarded
+/// link ([`CodeUnit::send_link`]): an inline cache keyed by the classes of
+/// the arguments the generic dispatches on, which the unit's sends to it
+/// share.
+///
+/// The guard starts with the classes typing expects, when every send's
+/// declared types name the same class per dispatched argument and those
+/// select a method (`guess`), and is otherwise empty. A miss asks the driver
+/// ([`CODE_FILL`]), which fills the guard with the classes it saw and the
+/// method they select, and gives up on keys for a site that keeps missing.
+/// The guard is an observation, not a proof: it never enters
+/// [`CodeUnit::assumptions`], and installs only reset it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SendSite {
+    /// The guarded link the sends call through.
+    pub link: LinkId,
+    /// The generic sent to.
+    pub generic: GenericFunctionId,
+    /// The keys the sends' declared types expect, one class id per
+    /// dispatched argument, and the method they select.
+    pub guess: Option<(Vec<u64>, MethodId)>,
+}
 
 /// Host signature for [`CODE_DISPATCH`]: `(generic, args...) -> function`.
 #[must_use]
@@ -197,6 +249,11 @@ pub struct CodeUnit {
     /// sets it read, with source names. A newer unit may take over only
     /// when every one still holds ([`CodeUnit::check_assumptions`]).
     pub assumptions: Vec<ClosedWorld>,
+    /// The program's guarded sends, by their links.
+    pub sites: Vec<SendSite>,
+    /// The miss stubs the guarded sends fall back to: plumbing between a
+    /// send and the method it selects, which frame listings leave out.
+    pub miss_stubs: Vec<FuncId>,
 }
 
 /// The [`Contract`] of each definition a [`CodeUnit`] implements, as its
@@ -425,6 +482,30 @@ impl CodeUnit {
             *self.generics.get(generic.0 as usize)?
         };
         Some(FuncRef::new(unit, func))
+    }
+
+    /// The link every guarded send to `generic` calls through: the
+    /// program declares one per generic of the layout after the method
+    /// links ([`method_link`]), so its id depends on the layout alone.
+    #[must_use]
+    pub fn send_link(&self, generic: GenericFunctionId) -> LinkId {
+        LinkId(index_u32(self.layout.methods.len()) + generic.0)
+    }
+
+    /// The guard and target a send site's link starts with once this unit,
+    /// installed as `unit`, is a run's newest code: the declared types'
+    /// guess and the target its method's link has, or an empty guard over
+    /// the generic's dispatcher.
+    #[must_use]
+    pub fn site_start(&self, unit: UnitId, site: &SendSite) -> Option<(LinkGuard, FuncRef)> {
+        let dispatcher = FuncRef::new(unit, *self.generics.get(site.generic.0 as usize)?);
+        let guessed = site.guess.as_ref().and_then(|(keys, method)| {
+            Some((
+                LinkGuard::Keys(GuardKeys::new(keys)?),
+                self.link_target(unit, *method)?,
+            ))
+        });
+        Some(guessed.unwrap_or((LinkGuard::Unfilled, dispatcher)))
     }
 
     /// The source definition `func` implements, if any.

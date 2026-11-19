@@ -104,6 +104,7 @@ pub fn is_control_symbol(symbol: &str) -> bool {
             | CONTROL_POP
             | CONTROL_PUSH_EXIT
             | CONTROL_CHECK_EXIT
+            | crate::code::CODE_FILL
     )
 }
 
