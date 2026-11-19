@@ -5457,6 +5457,24 @@ fn no_values(span: Span) -> Expr {
     }
 }
 
+/// The results to lower `expr` to where its values are discarded, as in a
+/// statement: none for a conditional or a handle, which then discards each
+/// arm's values, so the arms need not agree, and lowers each arm the same
+/// way; no expectation for anything else, whose values are dropped as they
+/// are. Only these forms take the empty expectation, since elsewhere it
+/// means the expression must produce no values, which would, say, type a
+/// block's exit or an untyped call as taking none.
+fn effect_expectation(expr: &ast::Expr) -> Option<&'static [ValueKind]> {
+    matches!(
+        expr,
+        ast::Expr::If { .. }
+            | ast::Expr::Case { .. }
+            | ast::Expr::Select { .. }
+            | ast::Expr::Handle { .. }
+    )
+    .then_some(&[])
+}
+
 /// Evaluates `expr` for its effects and produces no values.
 fn discard_values(lowering: &Lowering, expr: Expr) -> Expr {
     if lowering.expr_kinds(&expr).is_empty() {
@@ -8437,7 +8455,10 @@ impl Lowering {
             let local = match statement {
                 ast::Statement::Let(local) => local,
                 ast::Statement::Expr(expr) => {
-                    let value = self.lower_expr_expected_results(ctx, expr, None);
+                    // A statement's values are discarded, so the arms of a
+                    // conditional or a handle there need not agree.
+                    let value =
+                        self.lower_expr_expected_results(ctx, expr, effect_expectation(expr));
                     statements.push(Statement::Expr(value));
                     continue;
                 }
@@ -12651,7 +12672,9 @@ impl Lowering {
     /// tests ruled out, exactly as nested `if`s do. The chain's value is the
     /// join of its bodies. Without a default body (`else` or `otherwise`) the
     /// chain produces no values: each arm's values are discarded, and using
-    /// the chain where a value is expected is a type error there.
+    /// the chain where a value is expected is a type error there. Where no
+    /// values are expected, such as in a statement, each arm's are discarded
+    /// too, so arms that would not join are no error.
     #[expect(
         clippy::too_many_arguments,
         reason = "a conditional's written parts, plus how a select matches its keys"
@@ -12666,13 +12689,23 @@ impl Lowering {
         expected_results: Option<&[ValueKind]>,
         matcher: Option<&SelectMatcher>,
     ) -> Expr {
+        // Where no values are expected, each arm's are discarded, so the
+        // arms need not agree, as in Dylan.
+        let discarded = expected_results.is_some_and(<[ValueKind]>::is_empty);
         let Some((arm, rest)) = arms.split_first() else {
             return match default {
+                Some(body) if discarded => {
+                    let body = self.lower_body_expr(ctx, body, effect_expectation(&body.result));
+                    discard_values(self, body)
+                }
                 Some(body) => self.lower_body_expr(ctx, body, expected_results),
                 None => no_values(Span::new(span.end, span.end)),
             };
         };
-        let arm_expected = if default.is_some() {
+        // An arm whose values are discarded is lowered as a statement is.
+        let arm_expected = if discarded {
+            effect_expectation(&arm.body.result)
+        } else if default.is_some() {
             expected_results
         } else {
             None
@@ -12715,7 +12748,7 @@ impl Lowering {
             expected_results,
             matcher,
         );
-        if default.is_none() {
+        if default.is_none() || discarded {
             then_branch = discard_values(self, then_branch);
         }
         self.adopt_divergent_kinds(&mut then_branch, &else_branch);
@@ -13145,19 +13178,38 @@ impl Lowering {
         // Where fewer values are expected than an arm has, it keeps the
         // first, as a single-value position does.
         let expected_count = expected_results.map_or(0, <[ValueKind]>::len);
-        let restart_body = self.lower_expr_expected_results(ctx, &restart.body, expected_results);
+        // Where no values are expected, each arm runs for its effects: it is
+        // lowered as a statement would be and its values are discarded, so
+        // the arms need not agree.
+        let discarded = expected_results.is_some_and(<[ValueKind]>::is_empty);
+        let restart_expected = if discarded { None } else { expected_results };
+        let restart_body = self.lower_expr_expected_results(ctx, &restart.body, restart_expected);
         let restart_body = self.take_values(ctx, restart_body, expected_count);
+        // A `signal` in the body takes the restart's own values, whether or
+        // not the handle discards them.
+        let signal_kinds = self.expr_kinds(&restart_body);
+        let signal_callable_sigs = self.expr_result_callable_signatures(&restart_body);
+        let restart_body = if discarded {
+            discard_values(self, restart_body)
+        } else {
+            restart_body
+        };
         let restart_kinds = self.expr_kinds(&restart_body);
         let restart_callable_sigs = self.expr_result_callable_signatures(&restart_body);
         ctx.hide_locals_from(scope_start);
 
         ctx.push_restart(ActiveRestart {
             specializer,
-            result_kinds: restart_kinds.clone(),
-            result_callable_sigs: restart_callable_sigs.clone(),
+            result_kinds: signal_kinds,
+            result_callable_sigs: signal_callable_sigs,
         });
-        let body = self.lower_expr_expected_results(ctx, body, expected_results);
-        let mut body = self.take_values(ctx, body, expected_count);
+        let mut body = if discarded {
+            let body = self.lower_expr_expected_results(ctx, body, effect_expectation(body));
+            discard_values(self, body)
+        } else {
+            let body = self.lower_expr_expected_results(ctx, body, expected_results);
+            self.take_values(ctx, body, expected_count)
+        };
         ctx.pop_restart();
         self.adopt_divergent_kinds(&mut body, &restart_body);
 
