@@ -1,6 +1,6 @@
 // expect: diagnostics 1
 // expect: diagnostic code syntax.expected-token
-// expect: diagnostic contains expected `;` or `end`
+// expect: diagnostic contains expected `(` or `;` or `end`
 
 // A block takes one exception clause for now. Dylan allows several, each a
 // handler established around the body; nesting `block`s is the way to

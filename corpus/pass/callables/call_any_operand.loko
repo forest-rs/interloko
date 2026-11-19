@@ -1,0 +1,24 @@
+// expect: run 122
+// expect: diagnostics 0
+
+// As in Dylan, a call's operand may be any expression: a slot read, a
+// call, an element, or a parenthesized expression. The value is called
+// typed when its signature is known; an `<object>` is checked to be a
+// `<function>` and called through its boxed entry.
+
+define class <prefix> (<object>)
+  constant slot apply :: callable(<integer>) => <integer>, required-init-keyword: apply:;
+end;
+
+define function adder(n :: <integer>) => callable(<integer>) => <integer>
+  method (x :: <integer>) => <integer> x + n end
+end;
+
+define function main() => <integer>
+  let p = make(<prefix>, apply: method (a :: <integer>) => <integer> - a end);
+  let t = make(<table>);
+  t["double"] := method (x :: <integer>) => <integer> x * 2 end;
+  let o :: <object> = adder(100);
+  let doubled :: <integer> = t["double"](5);
+  p.apply(3) + adder(1)(2) + doubled + (adder)(10)(1) + o(1)
+end;

@@ -98,6 +98,7 @@
 "sem.duplicate-keyword-argument" = "[ps] keyword { $keyword }: repeated"
 "sem.keyword-argument-type-mismatch" = "[ps] { $callee } { $keyword }: expects { $expected }, got { $actual }"
 "sem.local-not-callable" = "[ps] local { $local } is { $actual }, not callable"
+"sem.value-not-callable" = "[ps] { $actual } value is not callable"
 "sem.reserved-name" = "[ps] { $name } is reserved"
 "sem.keyword-parameter-needs-default" = "[ps] #key { $keyword } :: { $type } needs a default"
 "sem.method-keyword-not-in-generic" = "[ps] { $generic } has no #key { $keyword }"

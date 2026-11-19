@@ -8220,6 +8220,24 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
                 dump_ast_expr(out, &keyword.value, indent + 4);
             }
         }
+        ast::Expr::ValueCall {
+            id,
+            callee,
+            args,
+            keywords,
+            ..
+        } => {
+            let _ = writeln!(out, "{id} value-call");
+            dump_ast_expr(out, callee, indent + 2);
+            for arg in args {
+                dump_ast_expr(out, arg, indent + 2);
+            }
+            for keyword in keywords {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "keyword {} {}", keyword.id, keyword.name);
+                dump_ast_expr(out, &keyword.value, indent + 4);
+            }
+        }
         ast::Expr::Signal { id, condition, .. } => {
             let _ = writeln!(out, "{id} signal");
             dump_ast_expr(out, condition, indent + 2);

@@ -412,6 +412,9 @@ pub enum CstKind {
     /// Element access expression `collection[key]`, Dylan's sugar for
     /// `element(collection, key)`.
     IndexExpr = 63,
+    /// Call of the value an operand evaluates to, such as `f(1)(2)` or
+    /// `node.operator.apply(x)`. A call of a name is a [`Self::CallExpr`].
+    ValueCallExpr = 71,
     /// Assignment expression: `object.slot := value`, `collection[key] :=
     /// value` or `local := value`.
     SlotAssignExpr = 29,

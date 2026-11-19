@@ -3351,7 +3351,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "postfix-expression",
-            "primary-expression (`.` member-name | index-access)*",
+            "primary-expression (`.` member-name | index-access | call-arguments)*",
             "syntax.rs:Parser::parse_postfix",
         ),
         (
@@ -3362,6 +3362,11 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         (
             "index-access",
             "`[` expression `]`",
+            "base_loko_primary::BaseLokoCstBuilder::build_postfix",
+        ),
+        (
+            "call-arguments",
+            "`(` argument-list? `)`",
             "base_loko_primary::BaseLokoCstBuilder::build_postfix",
         ),
         (
@@ -4024,7 +4029,9 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::CallName => Some("call-name"),
         CstKind::CallExpr | CstKind::ArgList => Some("argument-list"),
         CstKind::MemberName => Some("member-name"),
-        CstKind::SlotExpr | CstKind::IndexExpr => Some("postfix-expression"),
+        CstKind::SlotExpr | CstKind::IndexExpr | CstKind::ValueCallExpr => {
+            Some("postfix-expression")
+        }
         CstKind::SlotAssignExpr => Some("assignment-expression"),
         CstKind::KeywordArg => Some("keyword-argument"),
         CstKind::ArgumentKeyword => Some("argument-keyword"),
@@ -4497,7 +4504,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 91);
+        assert_eq!(grammar.effective_rules.len(), 92);
 
         assert!(
             !records
@@ -4911,9 +4918,10 @@ mod tests {
         );
         let diagnostic = report.diagnostics.first().expect("syntax diagnostic");
         assert_eq!(diagnostic.span, Span::new(31, 32));
+        // `1(…)` would call the value of `1`, as any operand may be called.
         assert_eq!(
             diagnostic_arg(diagnostic, "expected").as_deref(),
-            Some("`,` or `)`")
+            Some("`(` or `,` or `)`")
         );
     }
 

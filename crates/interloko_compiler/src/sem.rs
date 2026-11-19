@@ -395,6 +395,10 @@ impl CallableSignature {
     }
 }
 
+/// How diagnostics name the callee of a call of an operand's value, such
+/// as `f(1)(2)`, which has no name of its own.
+const VALUE_CALLEE: &str = "called value";
+
 fn slot_setter_name(slot_name: &str) -> String {
     format!("{slot_name}-setter")
 }
@@ -9276,10 +9280,10 @@ impl Lowering {
                         .map(|signature| signature.param_sigs)
                         .unwrap_or_default();
                     let lowered_args = self.lower_args_against(ctx, args, &signatures);
-                    return self.lower_local_value_call(
+                    return self.lower_value_call(
                         ctx,
                         *id,
-                        callee,
+                        Some(callee),
                         target,
                         lowered_args,
                         keywords,
@@ -9427,6 +9431,30 @@ impl Lowering {
                         .with_arg(DiagnosticArg::text("callee", callee.clone())),
                 );
                 Expr::Error { span: *span }
+            }
+            ast::Expr::ValueCall {
+                id,
+                callee,
+                args,
+                keywords,
+                span,
+            } => {
+                let target = self.lower_expr(ctx, callee);
+                let signatures = self
+                    .callable_signature_of(&target)
+                    .map(|signature| signature.param_sigs)
+                    .unwrap_or_default();
+                let args = self.lower_args_against(ctx, args, &signatures);
+                self.lower_value_call(
+                    ctx,
+                    *id,
+                    None,
+                    target,
+                    args,
+                    keywords,
+                    expected_results,
+                    *span,
+                )
             }
             ast::Expr::Signal {
                 condition, span, ..
@@ -12111,23 +12139,28 @@ impl Lowering {
         })
     }
 
-    /// Lowers a call of a local or captured binding, `target` read, as a
-    /// call through its value, whatever module-level definition of the name
-    /// it shadows: a callable value, a function or generic it names
-    /// statically, or a generic-function object. A binding of any other
-    /// type cannot be called.
+    /// Lowers a call through the value `target` evaluates to, as Dylan
+    /// calls any operand: a local or captured binding named `binding`,
+    /// whatever module-level definition of the name it shadows, or any
+    /// other operand (`binding` is `None`), such as `f(1)(2)`. A callable
+    /// value, a function or generic it names statically, and a
+    /// generic-function object are called through the value, typed when
+    /// its signature is known. An `<object>` is checked to be a
+    /// `<function>`, as a declaration would check it, and called untyped.
+    /// A value of any other type cannot be called.
     #[allow(clippy::too_many_arguments)]
-    fn lower_local_value_call(
+    fn lower_value_call(
         &mut self,
         ctx: &mut FunctionContext,
         id: AstNodeId,
-        callee: &str,
+        binding: Option<&str>,
         target: Expr,
         args: Vec<Expr>,
         keywords: &[ast::KeywordArg],
         expected_results: Option<&[ValueKind]>,
         span: Span,
     ) -> Expr {
+        let callee = binding.unwrap_or(VALUE_CALLEE);
         match self.expr_kind(&target) {
             ValueKind::Callable | ValueKind::KnownCallable(_) => self.lower_callable_value_call(
                 ctx,
@@ -12139,6 +12172,19 @@ impl Lowering {
                 expected_results,
                 span,
             ),
+            ValueKind::Any => {
+                let target = self.narrow(target, ValueKind::Callable, None);
+                self.lower_callable_value_call(
+                    ctx,
+                    id,
+                    callee,
+                    target,
+                    args,
+                    keywords,
+                    expected_results,
+                    span,
+                )
+            }
             ValueKind::GenericFunctionObject(generic) => {
                 for keyword in keywords {
                     ctx.diagnostics
@@ -12148,10 +12194,13 @@ impl Lowering {
             }
             ValueKind::Error => Expr::Error { span },
             actual => {
+                let diagnostic = match binding {
+                    Some(local) => Diagnostic::error(span, DiagnosticCode::LocalNotCallable)
+                        .with_arg(DiagnosticArg::text("local", local.to_string())),
+                    None => Diagnostic::error(target.span(), DiagnosticCode::ValueNotCallable),
+                };
                 ctx.diagnostics.push(
-                    Diagnostic::error(span, DiagnosticCode::LocalNotCallable)
-                        .with_arg(DiagnosticArg::text("local", callee.to_string()))
-                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                    diagnostic.with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
                 );
                 Expr::Error { span }
             }
