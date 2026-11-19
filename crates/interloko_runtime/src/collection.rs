@@ -229,6 +229,26 @@ impl Table {
         self.version += 1;
     }
 
+    /// Number of entry positions, present or removed: one past the last
+    /// iteration state.
+    pub(crate) fn positions(&self) -> usize {
+        self.slots.len() / 2
+    }
+
+    /// The first position at or after `from` holding an entry, or
+    /// [`Self::positions`] when none does.
+    pub(crate) fn next_position(&self, from: usize) -> usize {
+        (from..self.positions())
+            .find(|position| !matches!(self.slots[2 * position], Value::Unit))
+            .unwrap_or_else(|| self.positions())
+    }
+
+    /// The key and value at entry `position`, when it holds an entry.
+    pub(crate) fn entry_at(&self, position: usize) -> Option<(&Value, &Value)> {
+        let key = self.slots.get(2 * position)?;
+        (!matches!(key, Value::Unit)).then(|| (key, &self.slots[2 * position + 1]))
+    }
+
     /// Undoes one logged store.
     pub(crate) fn undo(&mut self, undo: TableUndo) {
         match undo {
@@ -410,6 +430,15 @@ impl InterlokoHost {
         Ok(Some(value))
     }
 
+    /// Whether `vector` is constant: a literal, or a vector the runtime
+    /// made.
+    pub(crate) fn vector_is_constant(&self, vector: Obj) -> Result<bool, HostError> {
+        match &self.object(vector)?.storage {
+            RuntimeObjectStorage::Vector { constant, .. } => Ok(*constant),
+            _ => Err(HostError::Failed),
+        }
+    }
+
     /// Adds `value` at the end of the `<stretchy-vector>` `vector` and
     /// returns the vector.
     pub(crate) fn stretchy_add(&mut self, vector: Obj, value: Value) -> Result<Value, HostError> {
@@ -544,6 +573,57 @@ impl InterlokoHost {
                 expected: crate::ValueKind::Any,
             }),
         }
+    }
+
+    /// The iteration version of `table`: [`Table::version`] as an
+    /// `<integer>`.
+    pub(crate) fn table_iteration_version(&self, table: Obj) -> Result<i64, HostError> {
+        Ok(i64::try_from(self.table(table)?.version()).unwrap_or(i64::MAX))
+    }
+
+    /// The number of entry positions of `table`, its iteration limit.
+    pub(crate) fn table_positions(&self, table: Obj) -> Result<i64, HostError> {
+        Ok(i64::try_from(self.table(table)?.positions()).unwrap_or(i64::MAX))
+    }
+
+    /// The first entry position of `table` at or after `from`, or its
+    /// number of positions when there is none; `None` when the table's
+    /// version is no longer `version`, because its keys changed since
+    /// iteration began.
+    pub(crate) fn table_next_position(
+        &self,
+        table: Obj,
+        from: i64,
+        version: i64,
+    ) -> Result<Option<i64>, HostError> {
+        let table = self.table(table)?;
+        if i64::try_from(table.version()).ok() != Some(version) {
+            return Ok(None);
+        }
+        let from = usize::try_from(from).unwrap_or(0);
+        Ok(Some(
+            i64::try_from(table.next_position(from)).unwrap_or(i64::MAX),
+        ))
+    }
+
+    /// The key (`key`) or value of the entry at `position` of `table`, or
+    /// `None` when no entry is there or the table's version is no longer
+    /// `version`.
+    pub(crate) fn table_entry_part(
+        &self,
+        table: Obj,
+        position: i64,
+        version: i64,
+        key: bool,
+    ) -> Result<Option<Value>, HostError> {
+        let table = self.table(table)?;
+        if i64::try_from(table.version()).ok() != Some(version) {
+            return Ok(None);
+        }
+        Ok(usize::try_from(position)
+            .ok()
+            .and_then(|position| table.entry_at(position))
+            .map(|(k, v)| if key { k.clone() } else { v.clone() }))
     }
 
     /// An element or key as a collection holds it: a boxed `<object>`.

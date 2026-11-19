@@ -3186,7 +3186,17 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "for-expression",
-            "`for` `(` numeric-for-clause `)` body `end`",
+            "`for` `(` trailing-list-of<for-clause, `,`> `)` body `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_for",
+        ),
+        (
+            "for-clause",
+            "collection-for-clause | numeric-for-clause",
+            "base_loko_primary::BaseLokoCstBuilder::build_for",
+        ),
+        (
+            "collection-for-clause",
+            "let-name-binding `in` expression",
             "base_loko_primary::BaseLokoCstBuilder::build_for",
         ),
         (
@@ -3989,6 +3999,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::UntilExpr => Some("until-expression"),
         CstKind::ForExpr => Some("for-expression"),
         CstKind::NumericForClause => Some("numeric-for-clause"),
+        CstKind::CollectionForClause => Some("collection-for-clause"),
         CstKind::BlockExitName => Some("block-exit-name"),
         CstKind::RestartGuard => Some("restart-guard"),
         CstKind::CleanupClause => Some("cleanup-clause"),
@@ -4429,7 +4440,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 78);
+        assert_eq!(grammar.effective_rules.len(), 80);
 
         assert!(
             !records

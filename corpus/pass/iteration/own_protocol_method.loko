@@ -1,0 +1,35 @@
+// expect: run 135
+// expect: diagnostics 0
+
+// A class whose keys are not 0 below a size defines its own
+// `forward-iteration-protocol`: one method answering the initial state,
+// the limit and the callables that step, test, and read. Here the odd
+// numbers below a bound, with each odd number its own state.
+
+define class <odds> (<object>)
+  slot below :: <integer>;
+end;
+
+define method forward-iteration-protocol (o :: <odds>)
+ => (<object>, <object>, callable(<object>, <object>) => <object>,
+     callable(<object>, <object>, <object>) => <boolean>,
+     callable(<object>, <object>) => <object>,
+     callable(<object>, <object>) => <object>, <object>)
+  values(1, o.below,
+         function (c :: <object>, s :: <object>) => <object> as(<integer>, s) + 2 end,
+         function (c :: <object>, s :: <object>, l :: <object>) => <boolean>
+           as(<integer>, s) >= as(<integer>, l)
+         end,
+         function (c :: <object>, s :: <object>) => <object> s end,
+         function (c :: <object>, s :: <object>) => <object> s end,
+         #f)
+end;
+
+define function main() => <integer>
+  let sum = 0;
+  // 1 + 3 + ... + 21 = 121, then 1 + 3 + 5 + 7 = 16, less 2
+  for (x :: <integer> in make(<odds>, below: 22)) sum := sum + x end;
+  let o :: <object> = make(<odds>, below: 8);
+  for (x :: <integer> in o) sum := sum + x end;
+  sum - 2
+end;

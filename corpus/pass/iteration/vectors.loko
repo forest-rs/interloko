@@ -1,0 +1,24 @@
+// expect: run 1366
+// expect: diagnostics 0
+// expect: dump lowered contains runtime.vector-element
+// expect: dump lowered lacks select-method
+
+// `for (x in v)` visits a vector's elements in order. Over a vector whose
+// class typing knows, the loop reads it directly: an index, the size and
+// the element each step, with no send. Each element is an `<object>`; a
+// variable annotated with another type checks each one with `as`.
+
+define function total(v :: <vector>) => <integer>
+  let sum = 0;
+  for (x :: <integer> in v)
+    sum := sum + x
+  end;
+  sum
+end;
+
+define function main() => <integer>
+  let squares = make(<vector>, size: 4, fill: 0);
+  for (i from 0 below 4) squares[i] := i * i end;
+  // 0 + 1 + 4 + 9 = 14, and the literal's 1352.
+  total(squares) + total(#[1000, 300, 52])
+end;

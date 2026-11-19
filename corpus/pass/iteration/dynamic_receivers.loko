@@ -1,0 +1,38 @@
+// expect: run 1113
+// expect: diagnostics 0
+// expect: dump lowered contains select-method
+
+// A collection typing knows nothing about pays one send at loop entry:
+// `forward-iteration-protocol` answers the iteration's states and the
+// callables that step it, and the loop calls them. The kernel's methods
+// serve vectors and tables; a program's `<sequence>` subclass iterates
+// through its own `size` and `element`, with no protocol method of its
+// own.
+
+define class <countdown> (<sequence>)
+  slot from :: <integer>;
+end;
+
+define method size (c :: <countdown>) => <integer>
+  c.from
+end;
+
+define method element (c :: <countdown>, i :: <integer>) => <object>
+  c.from - i
+end;
+
+define function total(c :: <object>) => <integer>
+  let sum = 0;
+  for (x :: <integer> in c) sum := sum + x end;
+  sum
+end;
+
+define function main() => <integer>
+  let v = make(<stretchy-vector>);
+  add!(v, 1);
+  add!(v, 2);
+  let t = make(<table>);
+  t[1] := 100;
+  // 4 + 3 + 2 + 1, 1 + 2, 100 and 1000
+  total(make(<countdown>, from: 4)) + total(v) + total(t) + total(#[1000])
+end;

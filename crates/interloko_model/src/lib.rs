@@ -127,6 +127,12 @@ pub enum BuiltinValueClass {
     /// values. Keys compare as Dylan's `<table>` compares them, by `==`,
     /// except strings, which compare by their text as with `=`.
     Table,
+    /// The abstract, open built-in `<sequence>` class: collections iterated
+    /// from first to last, whose keys are the `<integer>`s from 0 below
+    /// their size. `<vector>` is one, and a program's class may be one,
+    /// iterating through its own `size` and `element`. (`<string>` joins
+    /// once it has its own iteration method.)
+    Sequence,
 }
 
 impl BuiltinValueClass {
@@ -156,6 +162,7 @@ impl BuiltinValueClass {
         (Self::StringBuilder, "<string-builder>"),
         (Self::StretchyVector, "<stretchy-vector>"),
         (Self::Table, "<table>"),
+        (Self::Sequence, "<sequence>"),
     ];
 
     /// Returns the Loko-visible class name for this built-in value class.
@@ -186,6 +193,7 @@ impl BuiltinValueClass {
             Self::StringBuilder => "<string-builder>",
             Self::StretchyVector => "<stretchy-vector>",
             Self::Table => "<table>",
+            Self::Sequence => "<sequence>",
         }
     }
 
@@ -217,6 +225,7 @@ impl BuiltinValueClass {
             b"<string-builder>" => Some(Self::StringBuilder),
             b"<stretchy-vector>" => Some(Self::StretchyVector),
             b"<table>" => Some(Self::Table),
+            b"<sequence>" => Some(Self::Sequence),
             _ => None,
         }
     }
@@ -249,6 +258,7 @@ impl BuiltinValueClass {
             Self::StringBuilder => 21,
             Self::StretchyVector => 22,
             Self::Table => 23,
+            Self::Sequence => 24,
         }
     }
 
@@ -271,6 +281,7 @@ impl BuiltinValueClass {
             Self::Integer => Some(Self::Rational),
             Self::DoubleFloat | Self::SingleFloat => Some(Self::Float),
             Self::StretchyVector => Some(Self::Vector),
+            Self::Vector => Some(Self::Sequence),
             _ => None,
         }
     }
@@ -281,7 +292,7 @@ impl BuiltinValueClass {
     pub const fn is_abstract(self) -> bool {
         matches!(
             self,
-            Self::Number | Self::Real | Self::Rational | Self::Float | Self::Type
+            Self::Number | Self::Real | Self::Rational | Self::Float | Self::Type | Self::Sequence
         )
     }
 
@@ -608,14 +619,15 @@ mod tests {
         // them moved no built-in class's id.
         assert_eq!(
             chain(BuiltinValueClass::StretchyVector),
-            ["<stretchy-vector>", "<vector>"]
+            ["<stretchy-vector>", "<vector>", "<sequence>"]
         );
         assert_eq!(chain(BuiltinValueClass::Table), ["<table>"]);
         for class in [BuiltinValueClass::StretchyVector, BuiltinValueClass::Table] {
             assert!(!class.is_abstract() && !class.is_unboxed());
         }
+        assert!(BuiltinValueClass::Sequence.is_abstract());
         assert_eq!(
-            BuiltinValueClass::Table.index(),
+            BuiltinValueClass::Sequence.index(),
             BuiltinValueClass::ALL.len() - 1
         );
     }

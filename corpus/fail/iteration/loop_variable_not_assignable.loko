@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic contains `x` is a `for` loop variable and cannot be assigned
+
+// A collection loop's variable is not assignable either; store into the
+// collection with `c[key] := value`.
+
+define function main() => <integer>
+  for (x in #[1, 2]) x := 3 end;
+  0
+end;

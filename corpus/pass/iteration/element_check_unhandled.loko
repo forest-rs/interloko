@@ -1,0 +1,10 @@
+// expect: runtime code type-error.cast
+// expect: diagnostics 0
+
+// An annotated variable checks each element with `as`.
+
+define function main() => <integer>
+  let sum = 0;
+  for (x :: <integer> in #[1, "two"]) sum := sum + x end;
+  sum
+end;

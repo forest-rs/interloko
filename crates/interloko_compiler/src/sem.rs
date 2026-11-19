@@ -13,6 +13,7 @@ use crate::promotion;
 use crate::syntax::{self, Span};
 
 mod collection;
+mod iteration;
 pub use collection::{BUILTIN_METHODS, BuiltinMethod, CollectionFunction, MethodKey};
 mod text;
 pub use text::{NAMED_TEXT_FUNCTIONS, TextClasses, text_function_name, text_functions_for_name};
@@ -313,6 +314,18 @@ fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
         "method-specializers" => Intrinsic::MethodSpecializers,
         "key-exists?" => Intrinsic::TableKeyExists,
         "remove-key!" => Intrinsic::TableRemoveKey,
+        // The kernel's iteration protocol methods call these; a `%` cannot
+        // appear in a source name, so no program can call or shadow them.
+        "%size" => Intrinsic::CollectionSize,
+        "%vector-element" => Intrinsic::VectorElement,
+        "%vector-element-setter" => Intrinsic::VectorElementSetter,
+        "%vector-constant?" => Intrinsic::VectorConstant,
+        "%table-element-setter" => Intrinsic::TableElementSetter,
+        "%table-version" => Intrinsic::TableVersion,
+        "%table-positions" => Intrinsic::TablePositions,
+        "%table-next-position" => Intrinsic::TableNextPosition,
+        "%table-position-key" => Intrinsic::TablePositionKey,
+        "%table-position-value" => Intrinsic::TablePositionValue,
         "float-to-string" => Intrinsic::FloatToString,
         "integer-to-string" => Intrinsic::IntegerToString,
         "concatenate" => Intrinsic::Concatenate,
@@ -366,6 +379,10 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         Intrinsic::Text(function) => function.params().len(),
         Intrinsic::CharCompare(_) | Intrinsic::PositionCompare(_) => 2,
         Intrinsic::CharToInteger | Intrinsic::PositionToInteger => 1,
+        Intrinsic::TableVersion | Intrinsic::TablePositions => 1,
+        Intrinsic::TablePositionValue | Intrinsic::TablePositionKey => 3,
+        Intrinsic::VectorConstant => 1,
+        Intrinsic::TableNextPosition => 3,
         Intrinsic::FloatToString | Intrinsic::IntegerToString => 1,
     }
 }
@@ -397,6 +414,21 @@ fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
         (Intrinsic::VectorElement | Intrinsic::VectorElementOr, 0)
         | (Intrinsic::VectorElementSetter, 1) => "<vector>",
         (Intrinsic::StretchyAdd, 0) => "<stretchy-vector>",
+        (
+            Intrinsic::TableVersion
+            | Intrinsic::TablePositions
+            | Intrinsic::TableNextPosition
+            | Intrinsic::TablePositionValue
+            | Intrinsic::TablePositionKey,
+            0,
+        ) => "<table>",
+        (
+            Intrinsic::TableNextPosition
+            | Intrinsic::TablePositionValue
+            | Intrinsic::TablePositionKey,
+            _,
+        ) => "<integer>",
+        (Intrinsic::VectorConstant, 0) => "<vector>",
         (
             Intrinsic::TableElement
             | Intrinsic::TableElementOr
@@ -690,9 +722,10 @@ pub enum GenericFunctionOrigin {
         /// Operator the generic implements.
         operator: promotion::NumericOperator,
     },
-    /// Built-in open collection generic, `size`, `element` or
-    /// `element-setter`, with the kernel's methods from
-    /// [`BUILTIN_METHODS`]. It is sealed only over the kernel classes those
+    /// Built-in open collection generic, `size`, `element`,
+    /// `element-setter`, `add!` or `forward-iteration-protocol`, with the
+    /// kernel's methods from [`BUILTIN_METHODS`] (or, for the protocol, the
+    /// `iteration` module). It is sealed only over the kernel classes those
     /// methods specialize on.
     Collection {
         /// The generic.
@@ -718,6 +751,25 @@ impl GenericFunctionOrigin {
                 !specializers.iter().all(|specializer| {
                     specializer.is_some_and(|class| module.is_same_or_subclass(class, real))
                 })
+            }
+            Self::Collection {
+                function: CollectionFunction::ForwardIterationProtocol,
+            } => {
+                // Sealed over the kernel classes with methods of their own,
+                // and over `<sequence>` itself: a program's sequence class
+                // may replace the default for its own instances, but not
+                // for every sequence.
+                let collection = specializers.first().copied().flatten();
+                let sequence = module.builtin_value_class(BuiltinValueClass::Sequence);
+                collection != sequence
+                    && !iteration::SEALED_ITERATION_CLASSES.iter().any(|kernel| {
+                        module
+                            .builtin_value_class(*kernel)
+                            .zip(collection)
+                            .is_some_and(|(kernel, class)| {
+                                module.is_same_or_subclass(class, kernel)
+                            })
+                    })
             }
             Self::Collection { function } => {
                 // A method on a kernel class the generic has a method for,
@@ -937,7 +989,8 @@ impl Module {
                     | BuiltinValueClass::SubclassType
                     | BuiltinValueClass::StringBuilder
                     | BuiltinValueClass::StretchyVector
-                    | BuiltinValueClass::Table,
+                    | BuiltinValueClass::Table
+                    | BuiltinValueClass::Sequence,
             } => Some(ValueKind::Object(class)),
             ClassOrigin::ObjectRoot
             | ClassOrigin::Native
@@ -2275,6 +2328,108 @@ fn compare_numbers(
 }
 
 /// Converts an operand of numeric kind `from` to the promoted kind `to`.
+/// One clause's part of a `for` loop ([`Lowering::lower_for`]).
+struct ForPlan {
+    /// `#t` while the clause has another value.
+    test: Expr,
+    /// Hidden statements at the top of each iteration, such as reading the
+    /// element, before the variables are bound.
+    each: Vec<Statement>,
+    /// The hidden local the variable is bound to each iteration.
+    value: String,
+    /// Whether the value is an `<object>` an annotated variable checks
+    /// with `as`.
+    checked: bool,
+    /// Moves the clause's state on, after the body.
+    step: Expr,
+    /// The hidden local `step` assigns.
+    state: LocalId,
+}
+
+impl ForPlan {
+    /// A clause that could not be planned, for which a diagnostic was
+    /// reported: it ends the loop at once.
+    fn error(binding: &ast::LetBinding, span: Span) -> Self {
+        Self {
+            test: Expr::Error { span },
+            each: Vec::new(),
+            value: hidden_for_name(binding, "collection"),
+            checked: false,
+            step: Expr::Error { span },
+            state: LocalId(u32::MAX),
+        }
+    }
+
+    /// The value the clause binds `binding` to, as the body's first `let`
+    /// writes it: the hidden local, cast to the variable's annotation when
+    /// it is an `<object>` that needs checking.
+    fn binding_value(
+        &self,
+        id: crate::identity::AstNodeId,
+        binding: &ast::LetBinding,
+    ) -> ast::Expr {
+        let name = ast::Expr::Name {
+            id,
+            name: self.value.clone(),
+            span: binding.span,
+        };
+        match (&binding.type_annotation, self.checked) {
+            (Some(target), true) => ast::Expr::Cast {
+                id,
+                target: target.clone(),
+                value: Box::new(name),
+                span: binding.span,
+            },
+            _ => name,
+        }
+    }
+}
+
+/// The name of one of a `for` loop's hidden locals, for the variable
+/// `binding`. A `#` cannot appear in a source name, so no source can name
+/// it.
+fn hidden_for_name(binding: &ast::LetBinding, role: &str) -> String {
+    format!("{}#for-{role}", binding.name)
+}
+
+/// A read of the hidden local `local`.
+const fn hidden_local(local: LocalId, kind: ValueKind, span: Span) -> Expr {
+    Expr::Local {
+        local,
+        result_kind: kind,
+        callable_signature: None,
+        span,
+    }
+}
+
+/// The `let` binding the hidden local `local` to `value`.
+fn hidden_let(local: LocalId, value: Expr, span: Span) -> Statement {
+    Statement::Let(Let {
+        local,
+        locals: vec![local],
+        value,
+        span,
+    })
+}
+
+/// `local := current + by`, for the `<integer>` hidden local `local`.
+fn hidden_increment(local: LocalId, current: Expr, by: Expr, span: Span) -> Expr {
+    Expr::AssignLocal {
+        local,
+        result_kind: ValueKind::I64,
+        callable_signature: None,
+        value: Box::new(Expr::Binary {
+            site: None,
+            op: BinaryOp::Add,
+            kind: NumericKind::Integer,
+            lhs: Box::new(current),
+            rhs: Box::new(by),
+            span,
+        }),
+        span,
+    }
+}
+
 fn promote_operand(operand: Expr, from: NumericKind, to: NumericKind) -> Expr {
     if from == to || matches!(operand, Expr::Error { .. }) {
         return operand;
@@ -3578,6 +3733,28 @@ pub enum Intrinsic {
     MakeStretchyVector,
     /// `make(<table>)`: a new empty `<table>`. It has no name of its own.
     MakeTable,
+    /// A `<table>`'s iteration version, which changes whenever its keys do.
+    /// It has no name of its own: `for` reads it.
+    TableVersion,
+    /// A `<table>`'s number of entry positions, the limit of a `for` over
+    /// it. It has no name of its own.
+    TablePositions,
+    /// `(table, from, version)`: the table's first entry position at or
+    /// after `from`, or its number of positions. A table whose version is
+    /// no longer `version` signals a `<collection-modified-error>`. It has
+    /// no name of its own.
+    TableNextPosition,
+    /// `(table, position, version)`: the value of a `<table>`'s entry at a
+    /// position. A table whose version is no longer `version`, or a
+    /// position holding no entry, signals a `<collection-modified-error>`.
+    /// It has no name of its own.
+    TablePositionValue,
+    /// The key of a `<table>`'s entry at a position, as
+    /// [`Self::TablePositionValue`] reads its value.
+    TablePositionKey,
+    /// Whether a vector is constant, as a literal is. It has no name of
+    /// its own.
+    VectorConstant,
     /// Renders a float as its shortest round-trip literal text, such as
     /// `1.0`, `2.5e-7`, `inf`, or `nan`; a `<single-float>` carries its
     /// `f32` suffix, as in `0.1f32`.
@@ -5551,8 +5728,11 @@ impl Lowering {
             if superclass == "<object>" {
                 continue;
             }
+            // `<sequence>` is the one built-in class a program extends: its
+            // instances iterate through their own `size` and `element`.
             if matches!(superclass, "<integer>" | "<boolean>")
-                || BuiltinValueClass::from_name(superclass).is_some()
+                || BuiltinValueClass::from_name(superclass)
+                    .is_some_and(|class| class != BuiltinValueClass::Sequence)
             {
                 self.diagnostics.push(
                     Diagnostic::error(
@@ -8226,8 +8406,11 @@ impl Lowering {
                 ..
             } => self.lower_loop(ctx, *kind, test, body, *span),
             ast::Expr::For {
-                clause, body, span, ..
-            } => self.lower_for(ctx, clause, body, *span),
+                clauses,
+                body,
+                span,
+                ..
+            } => self.lower_for(ctx, clauses, body, *span),
             ast::Expr::Handle {
                 body,
                 restart,
@@ -8699,20 +8882,15 @@ impl Lowering {
         let id = GenericFunctionId(u32::try_from(self.generics.len()).unwrap_or(u32::MAX));
         let name = function.name();
         let arity = function.arity();
-        let result_kinds = vec![match function {
-            CollectionFunction::Size => ValueKind::I64,
-            CollectionFunction::Element
-            | CollectionFunction::ElementSetter
-            | CollectionFunction::Add => ValueKind::Any,
-        }];
+        let (result_kinds, result_sigs) = self.collection_results(function);
         self.generic_symbols.push(GenericSymbol {
             name: name.into(),
             id,
             param_kinds: vec![None; arity],
             param_ranges: vec![None; arity],
             return_kinds: result_kinds.clone(),
-            return_callable_sigs: vec![None],
-            return_ranges: vec![None],
+            return_callable_sigs: result_sigs.clone(),
+            return_ranges: vec![None; result_kinds.len()],
             return_annotation: Some(result_kinds.clone()),
             dispatch_param: function.collection_index(),
             span: Span::default(),
@@ -8736,9 +8914,9 @@ impl Lowering {
             arity,
             dispatch_param: function.collection_index(),
             dispatch_params: (0..arity).collect(),
+            result_ranges: vec![None; result_kinds.len()],
             result_kinds: result_kinds.clone(),
-            result_callable_sigs: vec![None],
-            result_ranges: vec![None],
+            result_callable_sigs: result_sigs,
             return_annotation: Some(result_kinds),
             span: Span::default(),
             origin: GenericFunctionOrigin::Collection { function },
@@ -8749,11 +8927,115 @@ impl Lowering {
         id
     }
 
+    /// The results a collection generic declares, with their callable
+    /// signatures: `forward-iteration-protocol`'s seven, whose callables
+    /// take and return `<object>`s (`finished-state?` a `<boolean>`).
+    fn collection_results(
+        &self,
+        function: CollectionFunction,
+    ) -> (Vec<ValueKind>, Vec<Option<CallableSignature>>) {
+        let kind = match function {
+            CollectionFunction::Size => ValueKind::I64,
+            CollectionFunction::Element
+            | CollectionFunction::ElementSetter
+            | CollectionFunction::Add => ValueKind::Any,
+            CollectionFunction::ForwardIterationProtocol => {
+                let callable = |params: usize, result: ValueKind| {
+                    Some(CallableSignature {
+                        params: vec![ValueKind::Any; params],
+                        param_sigs: vec![None; params],
+                        param_ranges: vec![None; params],
+                        results: vec![result],
+                        result_sigs: vec![None],
+                        result_ranges: vec![None],
+                    })
+                };
+                let sigs = vec![
+                    None,
+                    None,
+                    callable(2, ValueKind::Any),
+                    callable(3, ValueKind::Bool),
+                    callable(2, ValueKind::Any),
+                    callable(2, ValueKind::Any),
+                    None,
+                ];
+                let kinds = sigs
+                    .iter()
+                    .map(|sig| {
+                        if sig.is_some() {
+                            ValueKind::Callable
+                        } else {
+                            ValueKind::Any
+                        }
+                    })
+                    .collect();
+                return (kinds, sigs);
+            }
+        };
+        (vec![kind], vec![None])
+    }
+
+    /// Generates the kernel methods of `forward-iteration-protocol`, one per
+    /// class in [`iteration::ITERATION_CLASSES`], by lowering the syntax
+    /// trees [`iteration::KernelTree`] writes for them.
+    fn collect_iteration_methods(&mut self, generic: GenericFunctionId) {
+        let function = CollectionFunction::ForwardIterationProtocol;
+        for class_kind in iteration::ITERATION_CLASSES {
+            let Some(class) = self.builtin_value_class(*class_kind) else {
+                continue;
+            };
+            let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+            let definition = DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Method,
+                function.name(),
+                &format!("collection:{}", class_kind.name()),
+            );
+            let kind = self
+                .kind_for_builtin_class(class)
+                .unwrap_or(ValueKind::Object(class));
+            let mut ctx = FunctionContext::new();
+            let param = ctx.add_local(
+                self.local_definition(definition, "c"),
+                "c".into(),
+                kind,
+                None,
+                Span::default(),
+            );
+            let tree = iteration::KernelTree::new(self.source_file, class_kind.name())
+                .protocol_body(*class_kind, definition);
+            let body = self.lower_block(&mut ctx, &tree, None);
+            self.diagnostics.append(&mut ctx.diagnostics);
+            let (result_kinds, _) = self.collection_results(function);
+            self.methods.push(Method {
+                id,
+                definition,
+                generic,
+                specializer: class,
+                specializers: vec![Some(class)],
+                param,
+                params: vec![param],
+                locals: ctx.locals,
+                body,
+                result_ranges: vec![None; result_kinds.len()],
+                result_kinds: result_kinds.clone(),
+                return_annotation: Some(result_kinds),
+                span: Span::default(),
+                origin: MethodOrigin::Collection { function },
+                strict: false,
+            });
+        }
+    }
+
     /// Generates the kernel methods of every collection generic created so
     /// far, from [`BUILTIN_METHODS`]: each runs its row's operation on its
     /// parameters.
     fn collect_collection_methods(&mut self) {
         for (function, generic) in self.collection_generics.clone() {
+            if function == CollectionFunction::ForwardIterationProtocol {
+                self.collect_iteration_methods(generic);
+                continue;
+            }
             for builtin in collection::builtin_methods(function) {
                 let classes = function
                     .params()
@@ -9360,6 +9642,11 @@ impl Lowering {
             Intrinsic::Text(function) => self.text_classes().map_or(ValueKind::Error, |classes| {
                 classes.result_kind(function.result())
             }),
+            Intrinsic::TableVersion | Intrinsic::TablePositions | Intrinsic::TableNextPosition => {
+                ValueKind::I64
+            }
+            Intrinsic::TablePositionValue | Intrinsic::TablePositionKey => ValueKind::Any,
+            Intrinsic::VectorConstant => ValueKind::Bool,
             Intrinsic::MakeVector => self
                 .builtin_value_class(BuiltinValueClass::Vector)
                 .map_or(ValueKind::Error, ValueKind::Vector),
@@ -9492,6 +9779,23 @@ impl Lowering {
             (Intrinsic::CollectionSize, 0) => self.collection_kind(actual).is_some(),
             (Intrinsic::VectorElement | Intrinsic::VectorElementOr, 0)
             | (Intrinsic::VectorElementSetter, 1) => {
+                self.collection_kind(actual) == Some(CollectionKind::Vector)
+            }
+            (
+                Intrinsic::TableVersion
+                | Intrinsic::TablePositions
+                | Intrinsic::TableNextPosition
+                | Intrinsic::TablePositionValue
+                | Intrinsic::TablePositionKey,
+                0,
+            ) => self.collection_kind(actual) == Some(CollectionKind::Table),
+            (
+                Intrinsic::TableNextPosition
+                | Intrinsic::TablePositionValue
+                | Intrinsic::TablePositionKey,
+                _,
+            ) => actual == ValueKind::I64,
+            (Intrinsic::VectorConstant, 0) => {
                 self.collection_kind(actual) == Some(CollectionKind::Vector)
             }
             (Intrinsic::StretchyAdd, 0) => {
@@ -12143,54 +12447,157 @@ impl Lowering {
         }
     }
 
-    /// Lowers `for (name from start (to|below|above bound)? (by step)?) body
-    /// end` to a `while` loop over a counter only the loop can name.
+    /// Lowers a `for` loop to a `while` loop over state only the loop can
+    /// name, one clause at a time ([`ForPlan`]): the loop runs while every
+    /// clause has another value, testing them in order, and steps each
+    /// after the body.
     ///
-    /// `start`, `bound` and `step` are evaluated once, in that order, into
-    /// hidden locals (a constant bound or step is used directly). Each
-    /// iteration binds `name` afresh to the counter, as `let name =
-    /// counter;` at the top of the body would, except that `:=` may not
-    /// assign it, so a closure may always capture it, capturing that
-    /// iteration's value. The counter then steps with checked `<integer>`
-    /// arithmetic. The loop produces no values.
+    /// Each clause's expressions are evaluated once, before the loop, in
+    /// clause order. Each iteration binds every variable afresh, as `let
+    /// name = value;` at the top of the body would, except that `:=` may
+    /// not assign it, so a closure may always capture it, capturing that
+    /// iteration's value. The loop produces no values.
     fn lower_for(
         &mut self,
         ctx: &mut FunctionContext,
-        clause: &ast::NumericFor,
+        clauses: &[ast::ForClause],
         body: &ast::Block,
         span: Span,
     ) -> Expr {
         let scope = ctx.scope_start();
-        let name = &clause.binding.name;
         let mut statements = Vec::new();
+        let plans = clauses
+            .iter()
+            .map(|clause| match clause {
+                ast::ForClause::Numeric(clause) => {
+                    self.plan_numeric_for(ctx, clause, &mut statements)
+                }
+                ast::ForClause::Collection(clause) => {
+                    self.plan_collection_for(ctx, clause, &mut statements)
+                }
+            })
+            .collect::<Vec<_>>();
+        // Every clause has to have a value for the body to run; the first
+        // that has none ends the loop.
+        let test = plans
+            .iter()
+            .rev()
+            .map(|plan| plan.test.clone())
+            .reduce(|rest, test| Expr::If {
+                span: test.span(),
+                condition: Box::new(test),
+                refinement: None,
+                then_branch: Box::new(rest),
+                else_branch: Box::new(Expr::ConstBool { value: false, span }),
+            })
+            .unwrap_or(Expr::ConstBool { value: true, span });
+        // The body is lowered as if it began with a `let` per variable, so a
+        // variable's annotation and range check are a `let`'s; only its
+        // assignability differs.
+        let body_scope = ctx.scope_start();
+        // Every local of one name shares a definition, so a variable is a
+        // loop variable only while its body is lowered: a later `let` of
+        // the same name is assignable.
+        let loop_variables = ctx.loop_variables.len();
+        let mut each = Vec::new();
+        let mut bindings = Vec::new();
+        for (clause, plan) in clauses.iter().zip(&plans) {
+            let mut binding = clause.binding().clone();
+            // An element is an `<object>`, which `as` checks against a class
+            // or limited type; there is no `as` to a callable type.
+            if plan.checked
+                && let Some(annotation @ ast::TypeExpr::Callable { .. }) = &binding.type_annotation
+            {
+                ctx.diagnostics.push(
+                    Diagnostic::error(annotation.span(), DiagnosticCode::ForClauseTypeMismatch)
+                        .with_arg(DiagnosticArg::text("word", "in"))
+                        .with_arg(DiagnosticArg::text(
+                            "expected",
+                            "a class or limited type for its elements",
+                        ))
+                        .with_arg(DiagnosticArg::text("actual", annotation.to_string())),
+                );
+                binding.type_annotation = None;
+            }
+            let binding = &binding;
+            each.extend(plan.each.iter().cloned());
+            ctx.loop_variables
+                .push(self.local_definition(binding.definition, &binding.name));
+            bindings.push(ast::Statement::Let(Box::new(ast::Let {
+                id: body.id,
+                definition: binding.definition,
+                name: binding.name.clone(),
+                type_annotation: binding.type_annotation.clone(),
+                pattern: ast::LetPattern::Name(binding.clone()),
+                value: plan.binding_value(body.id, binding),
+                span: binding.span,
+            })));
+        }
+        let mut iteration = body.clone();
+        iteration.statements.splice(0..0, bindings);
+        let mut lowered = self.lower_block(ctx, &iteration, None);
+        ctx.hide_locals_from(body_scope);
+        ctx.loop_variables.truncate(loop_variables);
+        lowered.statements.splice(0..0, each);
+        let result = core::mem::replace(&mut lowered.result, no_values(span));
+        lowered.statements.push(Statement::Expr(result));
+        for plan in plans {
+            lowered.statements.push(Statement::Expr(plan.step));
+            ctx.note_assignment(plan.state);
+        }
+        ctx.hide_locals_from(scope);
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements,
+                result: Expr::Loop {
+                    kind: LoopKind::While,
+                    test: Box::new(test),
+                    body: Box::new(lowered),
+                    span,
+                },
+                span,
+            }),
+            cleanup: None,
+            span,
+        }
+    }
+
+    /// Plans a numeric clause, `name from start (to|below|above bound)? (by
+    /// step)?`: a counter, with the start, and a bound or step that is not
+    /// a constant, in hidden locals evaluated once. The counter steps with
+    /// checked `<integer>` arithmetic.
+    fn plan_numeric_for(
+        &mut self,
+        ctx: &mut FunctionContext,
+        clause: &ast::NumericFor,
+        statements: &mut Vec<Statement>,
+    ) -> ForPlan {
+        let binding = &clause.binding;
         let start = self.lower_for_integer(ctx, "from", &clause.start);
-        let counter = self.hidden_for_local(ctx, clause, "counter", start, &mut statements);
+        let counter =
+            self.hidden_for_local(ctx, binding, "counter", ValueKind::I64, start, statements);
         let bound = clause.bound.as_ref().map(|(kind, bound)| {
             let value = self.lower_for_integer(ctx, kind.word(), bound);
             (
                 *kind,
-                self.hidden_for_operand(ctx, clause, "bound", value, &mut statements),
+                self.hidden_for_operand(ctx, binding, "bound", value, statements),
             )
         });
         let step = match &clause.step {
             Some(step) => {
                 let value = self.lower_for_integer(ctx, "by", step);
-                self.hidden_for_operand(ctx, clause, "step", value, &mut statements)
+                self.hidden_for_operand(ctx, binding, "step", value, statements)
             }
             None => Expr::ConstI64 {
                 value: 1,
                 span: clause.span,
             },
         };
-        let local = |local: LocalId| Expr::Local {
-            local,
-            result_kind: ValueKind::I64,
-            callable_signature: None,
-            span: clause.span,
-        };
+        let local = hidden_local(counter, ValueKind::I64, clause.span);
         let compare =
             |lowering: &mut Self, ctx: &mut FunctionContext, op: ast::CompareOp, bound: &Expr| {
-                lowering.lower_compare(ctx, op, local(counter), bound.clone(), clause.span)
+                lowering.lower_compare(ctx, op, local.clone(), bound.clone(), clause.span)
             };
         let test = match &bound {
             None => Expr::ConstBool {
@@ -12227,39 +12634,12 @@ impl Lowering {
                 }
             },
         };
-        // The body is lowered as if it began `let name = counter;`, so the
-        // variable's annotation and range check are a `let`'s; only its
-        // assignability differs.
-        // Every local of one name shares a definition, so the variable is a
-        // loop variable only while its body is lowered: a later `let` of
-        // the same name is assignable.
-        let loop_variables = ctx.loop_variables.len();
-        ctx.loop_variables
-            .push(self.local_definition(clause.binding.definition, name));
-        let binding = ast::Let {
-            id: body.id,
-            definition: clause.binding.definition,
-            name: name.clone(),
-            type_annotation: clause.binding.type_annotation.clone(),
-            pattern: ast::LetPattern::Name(clause.binding.clone()),
-            value: ast::Expr::Name {
-                id: body.id,
-                name: self.hidden_for_name(clause, "counter"),
-                span: clause.binding.span,
-            },
-            span: clause.binding.span,
-        };
-        let mut iteration = body.clone();
-        iteration
-            .statements
-            .insert(0, ast::Statement::Let(Box::new(binding)));
-        let body_scope = ctx.scope_start();
-        let mut lowered = self.lower_block(ctx, &iteration, None);
-        ctx.hide_locals_from(body_scope);
-        ctx.loop_variables.truncate(loop_variables);
-        let result = core::mem::replace(
-            &mut lowered.result,
-            Expr::AssignLocal {
+        ForPlan {
+            test,
+            each: Vec::new(),
+            value: hidden_for_name(binding, "counter"),
+            checked: false,
+            step: Expr::AssignLocal {
                 local: counter,
                 result_kind: ValueKind::I64,
                 callable_signature: None,
@@ -12267,30 +12647,251 @@ impl Lowering {
                     site: None,
                     op: BinaryOp::Add,
                     kind: NumericKind::Integer,
-                    lhs: Box::new(local(counter)),
+                    lhs: Box::new(local),
                     rhs: Box::new(step),
                     span: clause.span,
                 }),
                 span: clause.span,
             },
-        );
-        lowered.statements.push(Statement::Expr(result));
-        ctx.note_assignment(counter);
-        ctx.hide_locals_from(scope);
-        Expr::Block {
-            exit: None,
-            body: Box::new(Block {
-                statements,
-                result: Expr::Loop {
-                    kind: LoopKind::While,
-                    test: Box::new(test),
-                    body: Box::new(lowered),
-                    span,
-                },
-                span,
-            }),
-            cleanup: None,
+            state: counter,
+        }
+    }
+
+    /// Plans a collection clause, `name in collection`, by the collection's
+    /// static class: a vector or table the loop reads directly, and any
+    /// other collection through the iteration protocol it answers to
+    /// `forward-iteration-protocol`. Its elements are `<object>`s; a
+    /// variable annotated with another type checks each one with `as`.
+    fn plan_collection_for(
+        &mut self,
+        ctx: &mut FunctionContext,
+        clause: &ast::CollectionFor,
+        statements: &mut Vec<Statement>,
+    ) -> ForPlan {
+        let binding = &clause.binding;
+        let span = clause.span;
+        let collection = self.lower_expr(ctx, &clause.collection);
+        let kind = self.expr_kind(&collection);
+        let collection_local =
+            self.hidden_for_local(ctx, binding, "collection", kind, collection, statements);
+        let c = hidden_local(collection_local, kind, span);
+        let int = |value| Expr::ConstI64 { value, span };
+        let call = |lowering: &Self, intrinsic, args| Expr::IntrinsicCall {
+            intrinsic,
+            args,
+            result_kind: lowering.intrinsic_result_kind(intrinsic),
             span,
+        };
+        let element = |lowering: &Self, ctx: &mut FunctionContext| {
+            let name = hidden_for_name(binding, "element");
+            ctx.add_local(
+                lowering.local_definition(binding.definition, &name),
+                name,
+                ValueKind::Any,
+                None,
+                span,
+            )
+        };
+        match self.collection_kind(kind) {
+            Some(CollectionKind::Vector) => {
+                let index = self.hidden_for_local(
+                    ctx,
+                    binding,
+                    "index",
+                    ValueKind::I64,
+                    int(0),
+                    statements,
+                );
+                let i = hidden_local(index, ValueKind::I64, span);
+                let size = call(self, Intrinsic::CollectionSize, vec![c.clone()]);
+                let test = self.lower_compare(ctx, ast::CompareOp::Lt, i.clone(), size, span);
+                let read = call(self, Intrinsic::VectorElement, vec![c, i.clone()]);
+                let local = element(self, ctx);
+                ForPlan {
+                    test,
+                    each: vec![hidden_let(local, read, span)],
+                    value: hidden_for_name(binding, "element"),
+                    checked: true,
+                    step: hidden_increment(index, i, int(1), span),
+                    state: index,
+                }
+            }
+            Some(CollectionKind::Table) => {
+                let version_value = call(self, Intrinsic::TableVersion, vec![c.clone()]);
+                let version = self.hidden_for_local(
+                    ctx,
+                    binding,
+                    "version",
+                    ValueKind::I64,
+                    version_value,
+                    statements,
+                );
+                let v = hidden_local(version, ValueKind::I64, span);
+                let limit_value = call(self, Intrinsic::TablePositions, vec![c.clone()]);
+                let limit = self.hidden_for_local(
+                    ctx,
+                    binding,
+                    "limit",
+                    ValueKind::I64,
+                    limit_value,
+                    statements,
+                );
+                let first = call(
+                    self,
+                    Intrinsic::TableNextPosition,
+                    vec![c.clone(), int(0), v.clone()],
+                );
+                let position = self.hidden_for_local(
+                    ctx,
+                    binding,
+                    "position",
+                    ValueKind::I64,
+                    first,
+                    statements,
+                );
+                let p = hidden_local(position, ValueKind::I64, span);
+                let test = self.lower_compare(
+                    ctx,
+                    ast::CompareOp::Lt,
+                    p.clone(),
+                    hidden_local(limit, ValueKind::I64, span),
+                    span,
+                );
+                let read = call(
+                    self,
+                    Intrinsic::TablePositionValue,
+                    vec![c.clone(), p.clone(), v.clone()],
+                );
+                let local = element(self, ctx);
+                let after = Expr::Binary {
+                    site: None,
+                    op: BinaryOp::Add,
+                    kind: NumericKind::Integer,
+                    lhs: Box::new(p),
+                    rhs: Box::new(int(1)),
+                    span,
+                };
+                let next = call(self, Intrinsic::TableNextPosition, vec![c, after, v]);
+                ForPlan {
+                    test,
+                    each: vec![hidden_let(local, read, span)],
+                    value: hidden_for_name(binding, "element"),
+                    checked: true,
+                    step: Expr::AssignLocal {
+                        local: position,
+                        result_kind: ValueKind::I64,
+                        callable_signature: None,
+                        value: Box::new(next),
+                        span,
+                    },
+                    state: position,
+                }
+            }
+            None => self.plan_protocol_for(ctx, clause, c, statements),
+        }
+    }
+
+    /// Plans a collection clause over a collection whose class is not a
+    /// `<vector>` or `<table>` statically: one `forward-iteration-protocol`
+    /// send before the loop, then calls through the callables it answers:
+    /// `finished-state?` before each iteration, `current-element` to bind
+    /// the variable, and `next-state` after the body.
+    fn plan_protocol_for(
+        &mut self,
+        ctx: &mut FunctionContext,
+        clause: &ast::CollectionFor,
+        collection: Expr,
+        statements: &mut Vec<Statement>,
+    ) -> ForPlan {
+        let binding = &clause.binding;
+        let span = clause.span;
+        let id = clause.collection.id();
+        let function = CollectionFunction::ForwardIterationProtocol;
+        let generic = self.collection_generic(function);
+        let Some(symbol) = self
+            .generic_symbols
+            .iter()
+            .find(|symbol| symbol.id == generic)
+            .cloned()
+        else {
+            return ForPlan::error(binding, span);
+        };
+        let send = self.lower_generic_send(ctx, &symbol, vec![collection], function.name(), span);
+        let (kinds, sigs) = self.collection_results(function);
+        let roles = [
+            "state", "limit", "next", "finished", "key", "current", "setter",
+        ];
+        let locals = roles
+            .iter()
+            .zip(kinds.iter().zip(sigs))
+            .map(|(role, (kind, sig))| {
+                let name = hidden_for_name(binding, role);
+                ctx.add_local(
+                    self.local_definition(binding.definition, &name),
+                    name,
+                    *kind,
+                    sig,
+                    binding.span,
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = locals[0];
+        statements.push(Statement::Let(Let {
+            local: state,
+            locals,
+            value: send,
+            span,
+        }));
+        ctx.allow_assignment(state);
+        let name = |role: &str| ast::Expr::Name {
+            id,
+            name: hidden_for_name(binding, role),
+            span,
+        };
+        let call = |callee: &str, args: Vec<ast::Expr>| ast::Expr::Call {
+            id,
+            callee: hidden_for_name(binding, callee),
+            args,
+            keywords: Vec::new(),
+            span,
+        };
+        let finished = call(
+            "finished",
+            vec![name("collection"), name("state"), name("limit")],
+        );
+        let finished = self.lower_expr(ctx, &finished);
+        let test = Expr::If {
+            condition: Box::new(finished),
+            refinement: None,
+            then_branch: Box::new(Expr::ConstBool { value: false, span }),
+            else_branch: Box::new(Expr::ConstBool { value: true, span }),
+            span,
+        };
+        let current = call("current", vec![name("collection"), name("state")]);
+        let read = self.lower_expr(ctx, &current);
+        let element_name = hidden_for_name(binding, "element");
+        let element = ctx.add_local(
+            self.local_definition(binding.definition, &element_name),
+            element_name,
+            ValueKind::Any,
+            None,
+            span,
+        );
+        let next = ast::Expr::Assign {
+            id,
+            name: hidden_for_name(binding, "state"),
+            name_span: span,
+            value: Box::new(call("next", vec![name("collection"), name("state")])),
+            span,
+        };
+        let step = self.lower_expr(ctx, &next);
+        ForPlan {
+            test,
+            each: vec![hidden_let(element, read, span)],
+            value: hidden_for_name(binding, "element"),
+            checked: true,
+            step,
+            state,
         }
     }
 
@@ -12326,36 +12927,27 @@ impl Lowering {
         }
     }
 
-    /// The name of one of a `for` loop's hidden locals. A `#` cannot appear
-    /// in a source name, so no source can name it.
-    fn hidden_for_name(&self, clause: &ast::NumericFor, role: &str) -> String {
-        format!("{}#for-{role}", clause.binding.name)
-    }
-
-    /// Binds `value` to a new hidden `<integer>` local of the `for` loop
-    /// `clause`, evaluated once before the loop.
+    /// Binds `value` to a new hidden local of kind `kind` for the `for`
+    /// variable `binding`, evaluated once before the loop.
     fn hidden_for_local(
         &mut self,
         ctx: &mut FunctionContext,
-        clause: &ast::NumericFor,
+        binding: &ast::LetBinding,
         role: &str,
+        kind: ValueKind,
         value: Expr,
         statements: &mut Vec<Statement>,
     ) -> LocalId {
-        let name = self.hidden_for_name(clause, role);
+        let name = hidden_for_name(binding, role);
+        let span = binding.span;
         let local = ctx.add_local(
-            self.local_definition(clause.binding.definition, &name),
+            self.local_definition(binding.definition, &name),
             name,
-            ValueKind::I64,
+            kind,
             None,
-            clause.span,
+            span,
         );
-        statements.push(Statement::Let(Let {
-            local,
-            locals: vec![local],
-            value,
-            span: clause.span,
-        }));
+        statements.push(hidden_let(local, value, span));
         local
     }
 
@@ -12364,7 +12956,7 @@ impl Lowering {
     fn hidden_for_operand(
         &mut self,
         ctx: &mut FunctionContext,
-        clause: &ast::NumericFor,
+        binding: &ast::LetBinding,
         role: &str,
         value: Expr,
         statements: &mut Vec<Statement>,
@@ -12372,13 +12964,8 @@ impl Lowering {
         if matches!(value, Expr::ConstI64 { .. } | Expr::Error { .. }) {
             return value;
         }
-        let local = self.hidden_for_local(ctx, clause, role, value, statements);
-        Expr::Local {
-            local,
-            result_kind: ValueKind::I64,
-            callable_signature: None,
-            span: clause.span,
-        }
+        let local = self.hidden_for_local(ctx, binding, role, ValueKind::I64, value, statements);
+        hidden_local(local, ValueKind::I64, binding.span)
     }
 
     fn lower_slot_assign(
@@ -12901,7 +13488,8 @@ impl Lowering {
                     | BuiltinValueClass::SubclassType
                     | BuiltinValueClass::StringBuilder
                     | BuiltinValueClass::StretchyVector
-                    | BuiltinValueClass::Table,
+                    | BuiltinValueClass::Table
+                    | BuiltinValueClass::Sequence,
             } => Some(ValueKind::Object(class)),
             ClassOrigin::ObjectRoot
             | ClassOrigin::Native
@@ -14958,7 +15546,10 @@ mod tests {
         let immutable = class(&module, "<immutable-collection-error>");
         assert_eq!(immutable.superclass, Some(error));
         assert_eq!(immutable.id.0, not_found.id.0 + 1);
-        assert_eq!(immutable.id.0 as usize, module.classes.len() - 1);
+        let modified = class(&module, "<collection-modified-error>");
+        assert_eq!(modified.superclass, Some(error));
+        assert_eq!(modified.id.0, immutable.id.0 + 1);
+        assert_eq!(modified.id.0 as usize, module.classes.len() - 1);
         assert_eq!(
             not_found
                 .effective_slots

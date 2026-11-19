@@ -80,10 +80,12 @@
 //! `cell access` is what one read and one write of the total cost when a
 //! closure captures it, so it lives in a shared cell, against the same loop
 //! with the total in a register.
-//! `vector element` is one `as(<integer>, v[i])` of a `<vector>` in such a
-//! loop, against the loop making the vector alone: a checked element read
-//! and an unbox. `table lookup` is one `as(<integer>, t[i])` of a
-//! `<table>` with integer keys, against filling the table alone.
+//! `vector element` is one `as(<integer>, v[i])` of a `<vector>` in a loop
+//! testing `i < size(v)`, against making the vector alone: a size read, a
+//! checked element read and an unbox. `table lookup` is one `as(<integer>, t[i])` of a
+//! `<table>` with integer keys, against filling the table alone. `vector
+//! for` is `vector element`'s loop written `for (x :: <integer> in v)`,
+//! which reads the vector the same way, so the two rows should agree.
 //!
 //! `character scan` is one iteration of a loop over a 256-character ASCII
 //! `<string>` by position: `s[p]`, a `<character>` compare and
@@ -395,9 +397,18 @@ define function vector-read(d :: <integer>) => <integer>
   let v = make(<vector>, size: 256, fill: 1);
   let total = 0;
   let i = 0;
-  while (i < 256)
+  while (i < size(v))
     total := total + as(<integer>, v[i]);
     i := i + 1
+  end;
+  total
+end;
+
+define function vector-for(d :: <integer>) => <integer>
+  let v = make(<vector>, size: 256, fill: 1);
+  let total = 0;
+  for (x :: <integer> in v)
+    total := total + x
   end;
   total
 end;
@@ -549,6 +560,7 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("scan + digit?", net("scanned-digits", "unlooped")),
         ("for iteration", net("for-looped", "unlooped")),
         ("vector element", net("vector-read", "vector-made")),
+        ("vector for", net("vector-for", "vector-made")),
         ("table lookup", net("table-read", "table-filled")),
     ]
 }
