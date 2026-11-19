@@ -2178,8 +2178,8 @@ impl<'tree> Lowering<'tree> {
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_function_params(child_node);
-                    // An anonymous function is only called through a
-                    // callable value, which passes no keywords yet.
+                    // Anonymous functions take no keywords yet; a defined
+                    // function can be passed as a value instead.
                     for keyword in child_node.child_nodes(CstKind::KeywordParameter) {
                         self.diagnostics.push(Diagnostic::error(
                             keyword.span,

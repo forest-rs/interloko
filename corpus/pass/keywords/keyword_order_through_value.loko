@@ -1,0 +1,14 @@
+// expect: run 23
+// expect: diagnostics 0
+// A call through a value matches its keywords by name, whatever order it
+// passes them in.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2, plus :: <integer> = 1) => <integer>
+  x * by + plus
+end;
+
+define function main() => <integer>
+  let f :: <callable> = scale;
+  let r :: <integer> = f(3, plus: 2, by: 7);
+  r
+end;

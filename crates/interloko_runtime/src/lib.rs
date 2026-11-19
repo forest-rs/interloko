@@ -168,6 +168,8 @@ pub const VECTOR_REF: &str = "interloko.vector_ref";
 /// call does not pass when the keyword has no default: one object, made
 /// with the host, that nothing else is `==`.
 pub const UNSUPPLIED: &str = "interloko.unsupplied";
+/// Host-call symbol for testing whether a boxed value is `$unsupplied`.
+pub const IS_UNSUPPLIED: &str = "interloko.is_unsupplied";
 /// Host-call symbol for rendering a float as its shortest round-trip literal.
 pub const FLOAT_TO_STRING: &str = "interloko.float_to_string";
 /// Host-call symbol for rendering an integer in decimal.
@@ -2218,6 +2220,15 @@ impl Host for InterlokoHost {
                 });
                 Ok(0)
             }
+            IS_UNSUPPLIED => {
+                let [value] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::Bool(
+                    self.unsupplied.is_some() && self.value_object(*value) == self.unsupplied,
+                );
+                Ok(0)
+            }
             UNSUPPLIED => {
                 let [] = args else {
                     return Err(HostError::Failed);
@@ -3295,6 +3306,15 @@ pub fn string_literal_signature() -> HostSig {
     HostSig {
         args: vec![ValueType::Str],
         rets: vec![object_type()],
+    }
+}
+
+/// Host signature for [`IS_UNSUPPLIED`].
+#[must_use]
+pub fn is_unsupplied_signature() -> HostSig {
+    HostSig {
+        args: vec![any_type()],
+        rets: vec![ValueType::Bool],
     }
 }
 

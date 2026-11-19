@@ -261,15 +261,54 @@ pub enum ValueKind {
     MethodObject(Option<sem::MethodId>),
     /// Slot descriptor metaobject.
     SlotDescriptorObject,
+    /// A tape string, such as a keyword's name: not a Loko `<string>`.
+    Str,
+    /// A tape array, such as the keyword tail of a boxed call.
+    Array(ArrayKind),
+}
+
+/// The elements of a [`ValueKind::Array`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ArrayKind {
+    /// Tape strings: the keywords a boxed call passes, in source order.
+    Str,
+    /// Boxed `<object>` values: the values of those keywords.
+    Any,
+}
+
+impl ArrayKind {
+    /// The kind of one element.
+    #[must_use]
+    pub const fn element(self) -> ValueKind {
+        match self {
+            Self::Str => ValueKind::Str,
+            Self::Any => ValueKind::Any,
+        }
+    }
 }
 
 /// Typed call ABI for a first-class callable value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableSignature {
-    /// Argument value categories in call order.
+    /// Argument value categories in call order: the required parameters,
+    /// then one boxed [`ValueKind::Any`] per keyword.
     pub params: Vec<ValueKind>,
     /// Return value categories in order.
     pub rets: Vec<ValueKind>,
+    /// The `#key` parameters the last `keywords.len()` arguments pass, in
+    /// declaration order, each `$unsupplied` when the call does not pass
+    /// it. The value's typed entry fills defaults and checks the types.
+    pub keywords: Vec<CallableKeyword>,
+}
+
+/// One `#key` parameter of a [`CallableSignature`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallableKeyword {
+    /// The keyword, without its colon.
+    pub name: String,
+    /// The value category the callee declares for it, which its typed
+    /// entry checks.
+    pub kind: ValueKind,
 }
 
 /// A lowered module ready for backend emission.
@@ -456,6 +495,10 @@ pub enum RuntimeOp {
     VectorElementOr,
     /// Returns `$unsupplied`.
     Unsupplied,
+    /// Returns whether a boxed value is `$unsupplied`.
+    IsUnsupplied,
+    /// Interns the symbol a tape string names.
+    InternSymbol,
     /// Renders a float as literal text.
     FloatToString,
     /// Renders a `<single-float>` as suffixed literal text.
@@ -1702,6 +1745,68 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Loads a tape string constant.
+    ConstStr {
+        /// Destination [`ValueKind::Str`] register.
+        dst: Reg,
+        /// The string.
+        value: String,
+        /// Source span.
+        span: Span,
+    },
+    /// Tape string equality.
+    StrEq {
+        /// Destination boolean register.
+        dst: Reg,
+        /// Left operand register.
+        lhs: Reg,
+        /// Right operand register.
+        rhs: Reg,
+        /// Source span.
+        span: Span,
+    },
+    /// Makes a tape array of `values`.
+    ArrayNew {
+        /// Destination [`ValueKind::Array`] register.
+        dst: Reg,
+        /// The elements' kind.
+        kind: ArrayKind,
+        /// Element registers, in order.
+        values: Vec<Reg>,
+        /// Source span.
+        span: Span,
+    },
+    /// Reads a tape array's length, as a `u64`.
+    ArrayLen {
+        /// Destination `u64` register.
+        dst: Reg,
+        /// Array register.
+        array: Reg,
+        /// Source span.
+        span: Span,
+    },
+    /// Reads one element of a tape array; an index outside it traps.
+    ArrayGet {
+        /// Destination register, of the array's element kind.
+        dst: Reg,
+        /// Array register.
+        array: Reg,
+        /// `u64` index register.
+        index: Reg,
+        /// Source span.
+        span: Span,
+    },
+    /// Unsigned integer addition, wrapping.
+    AddU64 {
+        /// Destination register.
+        dst: Reg,
+        /// Left operand register.
+        lhs: Reg,
+        /// Right operand register.
+        rhs: Reg,
+        /// Source span.
+        span: Span,
+    },
     /// Unsigned integer equality.
     EqU64 {
         /// Destination register.
@@ -2033,7 +2138,22 @@ struct KnownCallableThunk {
     /// parameter, the site of its check; checks without one always stay.
     entry_sites: Option<(DefinitionId, Vec<Option<sem::SiteId>>)>,
     rets: Vec<ValueKind>,
+    /// The target's `#key` parameters, its last ones, which `call_params`
+    /// takes boxed.
+    keywords: Vec<KnownKeyword>,
     span: Span,
+}
+
+/// One `#key` parameter of a [`KnownCallableThunk`]'s target.
+#[derive(Clone, Debug)]
+struct KnownKeyword {
+    name: String,
+    /// The kind the target takes it at.
+    kind: ValueKind,
+    range: Option<IntRange>,
+    /// The default function, called for `$unsupplied`; without one, the
+    /// keyword takes `$unsupplied` itself.
+    default: Option<sem::FunctionId>,
 }
 
 #[derive(Default)]
@@ -2075,6 +2195,7 @@ impl<'module> Lowering<'module> {
                 &function.result_kinds,
                 &function.result_callable_sigs,
             )?;
+            let signature = with_keywords(signature, &keyword_names(&function.keywords));
             let sig = intern_callable_signature(&mut ids.call_sigs, signature);
             ids.function_sigs.push(sig);
             next = next.saturating_add(1);
@@ -2552,6 +2673,8 @@ impl<'module> Lowering<'module> {
             .enumerate()
             .map(|(index, _)| body.push_param(&format!("value{index}"), BOXED_WIRE))
             .collect::<Vec<_>>();
+        let (keywords, _) = body.push_keyword_tail();
+        body.reject_keywords(keywords, span)?;
         let token = body.alloc(ValueKind::U64);
         body.instructions.extend([
             Instr::CaptureGet {
@@ -2744,12 +2867,31 @@ impl<'module> Lowering<'module> {
             .get(function.id.0 as usize)
             .copied()
             .ok_or_else(|| invalid_semantic("function signature id is out of range"))?;
-        let call_params = function
+        let mut call_params = function
             .param_kinds
             .iter()
             .copied()
             .map(value_kind)
             .collect::<Result<Vec<_>, _>>()?;
+        let required = call_params.len().saturating_sub(function.keywords.len());
+        let keywords = function
+            .keywords
+            .iter()
+            .enumerate()
+            .map(|(index, keyword)| KnownKeyword {
+                name: keyword.name.clone(),
+                kind: call_params[required + index],
+                range: function
+                    .param_ranges
+                    .get(required + index)
+                    .copied()
+                    .flatten(),
+                default: keyword.default,
+            })
+            .collect::<Vec<_>>();
+        for param in &mut call_params[required..] {
+            *param = ValueKind::Any;
+        }
         let sites = function
             .params
             .iter()
@@ -2771,6 +2913,7 @@ impl<'module> Lowering<'module> {
             param_ranges: function.param_ranges.clone(),
             entry_sites: Some((function.definition, sites)),
             rets: self.value_kinds(&function.result_kinds)?,
+            keywords,
             span: function.span,
         })
     }
@@ -2792,6 +2935,31 @@ impl<'module> Lowering<'module> {
             .get(generic.id.0 as usize)
             .copied()
             .ok_or_else(|| invalid_semantic("generic signature id is out of range"))?;
+        let required = generic.arity.saturating_sub(generic.keywords.len());
+        let keywords = generic
+            .keywords
+            .iter()
+            .enumerate()
+            .map(|(index, keyword)| {
+                Ok(KnownKeyword {
+                    name: keyword.name.clone(),
+                    kind: value_kind(
+                        generic
+                            .param_kinds
+                            .get(required + index)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(sem::ValueKind::Any),
+                    )?,
+                    range: generic
+                        .param_ranges
+                        .get(required + index)
+                        .copied()
+                        .flatten(),
+                    default: keyword.default,
+                })
+            })
+            .collect::<Result<Vec<_>, LowerError>>()?;
         Ok(KnownCallableThunk {
             id,
             name: format!("{}#closure", generic.name),
@@ -2799,11 +2967,18 @@ impl<'module> Lowering<'module> {
             target: self.lower_generic_id(generic.id)?,
             sig,
             call_params: (0..generic.arity)
-                .map(|index| dispatcher_param_kind(self.module, generic, index))
+                .map(|index| {
+                    if index < required {
+                        dispatcher_param_kind(self.module, generic, index)
+                    } else {
+                        ValueKind::Any
+                    }
+                })
                 .collect(),
             param_ranges: generic.param_ranges.clone(),
             entry_sites: None,
             rets: self.value_kinds(&generic.result_kinds)?,
+            keywords,
             span: generic.span,
         })
     }
@@ -2834,6 +3009,7 @@ impl<'module> Lowering<'module> {
             param_ranges: vec![None],
             entry_sites: None,
             rets: vec![self.value_kind(slot.kind)?],
+            keywords: Vec::new(),
             span: slot.span,
         })
     }
@@ -2892,6 +3068,9 @@ impl<'module> Lowering<'module> {
         spec: &KnownCallableThunk,
         checks: &mut Vec<CheckCodegenRecord>,
     ) -> Result<Function, LowerError> {
+        if !spec.keywords.is_empty() {
+            return self.lower_keyword_thunk(spec);
+        }
         let mut params = Vec::with_capacity(spec.call_params.len() + 1);
         params.push(Param {
             source: None,
@@ -3019,6 +3198,171 @@ impl<'module> Lowering<'module> {
         })
     }
 
+    /// Lowers the typed entry of the callable values of a function or
+    /// generic that takes keywords. It takes the required arguments at the
+    /// target's kinds, checked as [`Self::lower_known_callable_thunk`]
+    /// checks them, and each keyword boxed: `$unsupplied` takes the
+    /// keyword's default, from its default function called with the
+    /// required arguments and the keywords before it, in declaration order,
+    /// and any other value is checked and unboxed to the keyword's kind.
+    /// Then it calls, or sends to, the target with every argument.
+    fn lower_keyword_thunk(&self, spec: &KnownCallableThunk) -> Result<Function, LowerError> {
+        let span = spec.span;
+        let mut body = BodyLowering::new(self.module, &self.ids, &[]);
+        let _env = body.push_param("$env", ValueKind::Aggregate);
+        let required = spec.call_params.len().saturating_sub(spec.keywords.len());
+        let mut args = Vec::with_capacity(spec.call_params.len());
+        let sends = matches!(spec.callable, sem::KnownCallable::GenericFunction(_));
+        for (index, kind) in spec.call_params[..required].iter().enumerate() {
+            let param = body.push_param(&format!("arg{index}"), *kind);
+            let target = match spec.param_ranges.get(index).copied().flatten() {
+                Some(range) if *kind == ValueKind::I64 => Some(sem::EntryTarget::Range(range)),
+                _ if sends => None,
+                _ => entry_target(*kind),
+            };
+            let Some(target) = target else {
+                args.push(param);
+                continue;
+            };
+            let site = entry_site_name(&spec.name, index);
+            let checked = entry_check(&mut body.code(), target, param.reg, *kind, site, span);
+            body.next_reg = register_at(body.register_kinds.len());
+            args.push(Value {
+                reg: checked,
+                ..param
+            });
+        }
+        let boxed = spec
+            .keywords
+            .iter()
+            .enumerate()
+            .map(|(index, keyword)| {
+                body.push_param(&format!("{}#{index}", keyword.name), ValueKind::Any)
+            })
+            .collect::<Vec<_>>();
+        for (index, (keyword, value)) in spec.keywords.iter().zip(boxed).enumerate() {
+            let result = body.alloc(keyword.kind);
+            let unsupplied = body.alloc(ValueKind::Bool);
+            let (absent, given, join) =
+                (body.alloc_label(), body.alloc_label(), body.alloc_label());
+            body.instructions.extend([
+                Instr::RuntimeCall {
+                    dst: unsupplied.reg,
+                    op: RuntimeOp::IsUnsupplied,
+                    args: vec![value.reg],
+                    kind: ValueKind::Bool,
+                    span,
+                },
+                Instr::Branch {
+                    cond: unsupplied.reg,
+                    then_label: absent,
+                    else_label: given,
+                    span,
+                },
+                Instr::Label { label: given },
+            ]);
+            let site = entry_site_name(&spec.name, required + index);
+            let checked = body.unwire(value, keyword.kind, keyword.range, &site, span)?;
+            body.instructions.extend([
+                Instr::Move {
+                    dst: result.reg,
+                    src: checked.reg,
+                    span,
+                },
+                Instr::Jump { label: join, span },
+                Instr::Label { label: absent },
+            ]);
+            let default = match keyword.default {
+                Some(function) => {
+                    let callee = self
+                        .module
+                        .functions
+                        .get(function.0 as usize)
+                        .ok_or_else(|| invalid_semantic("keyword default id is out of range"))?;
+                    let mut default_args = Vec::with_capacity(callee.param_kinds.len());
+                    for (arg, kind) in args.iter().zip(&callee.param_kinds) {
+                        let kind = self.value_kind(*kind)?;
+                        default_args.push(body.coerce_value(*arg, kind, span)?.reg);
+                    }
+                    let default = body.alloc(
+                        self.value_kind(
+                            callee
+                                .result_kinds
+                                .first()
+                                .copied()
+                                .unwrap_or(sem::ValueKind::Any),
+                        )?,
+                    );
+                    body.instructions.push(Instr::Call {
+                        dsts: vec![default.reg],
+                        callee: self.lower_function_id(function)?,
+                        args: default_args,
+                        span,
+                    });
+                    body.coerce_value(default, keyword.kind, span)?
+                }
+                // A keyword without a default is an `<object>`, which takes
+                // `$unsupplied` itself.
+                None => body.coerce_value(value, keyword.kind, span)?,
+            };
+            body.instructions.extend([
+                Instr::Move {
+                    dst: result.reg,
+                    src: default.reg,
+                    span,
+                },
+                Instr::Jump { label: join, span },
+                Instr::Label { label: join },
+            ]);
+            args.push(result);
+        }
+        let results = spec
+            .rets
+            .iter()
+            .map(|kind| body.alloc(*kind))
+            .collect::<Vec<_>>();
+        let dsts = results.iter().map(|result| result.reg).collect::<Vec<_>>();
+        match spec.callable {
+            sem::KnownCallable::GenericFunction(generic) => {
+                let generic = self
+                    .module
+                    .generics
+                    .get(generic.0 as usize)
+                    .ok_or_else(|| invalid_semantic("generic id is out of range"))?;
+                let mut sent = Vec::with_capacity(args.len());
+                for (index, arg) in args.into_iter().enumerate() {
+                    let kind = dispatcher_param_kind(self.module, generic, index);
+                    sent.push(body.coerce_value(arg, kind, span)?);
+                }
+                body.send(generic, sent, dsts, span, None)?;
+            }
+            _ => body.instructions.push(Instr::Call {
+                dsts,
+                callee: spec.target,
+                args: args.iter().map(|arg| arg.reg).collect(),
+                span,
+            }),
+        }
+        body.instructions.push(Instr::Return {
+            values: results.iter().map(|result| result.reg).collect(),
+            span,
+        });
+        Ok(Function {
+            id: spec.id,
+            name: spec.name.clone(),
+            kind: FunctionKind::CallableThunk {
+                callable: spec.callable,
+            },
+            register_kinds: body.register_kinds,
+            params: body.params,
+            ret: spec.rets.first().copied().unwrap_or(ValueKind::Any),
+            rets: spec.rets.clone(),
+            locals: Vec::new(),
+            instructions: body.instructions,
+            span,
+        })
+    }
+
     /// Lowers the boxed entry of the callable values of a function, generic
     /// or slot accessor: under the boxed callable ABI ([`BOXED_WIRE`]),
     /// it checks and unboxes each argument as the target takes it
@@ -3037,13 +3381,19 @@ impl<'module> Lowering<'module> {
         id: FunctionId,
     ) -> Result<Function, LowerError> {
         let mut body = BodyLowering::new(self.module, &self.ids, &[]);
-        let call_params = self.adapted_params(&spec.call_params, spec.sig);
-        let _env = body.push_param("$env", ValueKind::Aggregate);
+        let mut call_params = self.adapted_params(&spec.call_params, spec.sig);
+        // Keywords come in the tail, not as positional wires.
+        call_params.truncate(call_params.len().saturating_sub(spec.keywords.len()));
+        let env = body.push_param("$env", ValueKind::Aggregate);
         let wires = call_params
             .iter()
             .enumerate()
             .map(|(index, _)| body.push_param(&format!("arg{index}"), BOXED_WIRE))
             .collect::<Vec<_>>();
+        let (keyword_names, keyword_values) = body.push_keyword_tail();
+        if spec.keywords.is_empty() {
+            body.reject_keywords(keyword_names, spec.span)?;
+        }
         let generic = match spec.callable {
             sem::KnownCallable::GenericFunction(generic) => Some(
                 self.module
@@ -3080,15 +3430,45 @@ impl<'module> Lowering<'module> {
             .map(|kind| body.alloc(*kind))
             .collect::<Vec<_>>();
         let dsts = results.iter().map(|result| result.reg).collect::<Vec<_>>();
-        match generic {
-            // A first-class generic sends like a call site.
-            Some(generic) => body.send(generic, args, dsts, spec.span, None)?,
-            None => body.instructions.push(Instr::Call {
+        if spec.keywords.is_empty() {
+            match generic {
+                // A first-class generic sends like a call site.
+                Some(generic) => body.send(generic, args, dsts, spec.span, None)?,
+                None => body.instructions.push(Instr::Call {
+                    dsts,
+                    callee: spec.target,
+                    args: args.iter().map(|arg| arg.reg).collect(),
+                    span: spec.span,
+                }),
+            }
+        } else {
+            // The typed entry fills the keywords' defaults and checks them.
+            let names = spec
+                .keywords
+                .iter()
+                .map(|keyword| keyword.name.clone())
+                .collect::<Vec<_>>();
+            let keywords = body.parse_keywords(keyword_names, keyword_values, &names, spec.span)?;
+            let mut call_args = vec![env.reg];
+            for (index, (arg, kind)) in args.into_iter().zip(&spec.call_params).enumerate() {
+                // A generic's object-handle parameter stays boxed above,
+                // for dispatch; the typed entry takes the object.
+                let arg = if arg.kind == BOXED_WIRE && matches!(kind, ValueKind::Object(None)) {
+                    let site = entry_site_name(&spec.name, index);
+                    let object = ValueKind::Object(Some(sem::OBJECT_CLASS_ID));
+                    body.unwire(arg, object, None, &site, spec.span)?
+                } else {
+                    arg
+                };
+                call_args.push(body.coerce_value(arg, *kind, spec.span)?.reg);
+            }
+            call_args.extend(keywords.iter().map(|keyword| keyword.reg));
+            body.instructions.push(Instr::Call {
                 dsts,
-                callee: spec.target,
-                args: args.iter().map(|arg| arg.reg).collect(),
+                callee: spec.id,
+                args: call_args,
                 span: spec.span,
-            }),
+            });
         }
         let values = results
             .into_iter()
@@ -3192,6 +3572,8 @@ impl<'module> Lowering<'module> {
             .enumerate()
             .map(|(index, _)| body.push_param(&format!("arg{index}"), BOXED_WIRE))
             .collect::<Vec<_>>();
+        let (keywords, _) = body.push_keyword_tail();
+        body.reject_keywords(keywords, closure.span)?;
         let mut args = vec![env.reg];
         for (index, (wire, kind)) in wires.into_iter().zip(&sig.params).enumerate() {
             let site = closure
@@ -3280,10 +3662,21 @@ impl<'module> Lowering<'module> {
             kind: ValueKind::Entry,
             span,
         });
-        let wired = params
+        // The keywords, `$unsupplied` for those the call does not pass, go
+        // in the tail, which the value's boxed entry reads.
+        let mut params = params;
+        let keyword_values = params.split_off(params.len().saturating_sub(sig.keywords.len()));
+        let mut wired = params
             .into_iter()
             .map(|param| body.wire_value(param, span))
             .collect::<Result<Vec<_>, _>>()?;
+        let names = sig
+            .keywords
+            .iter()
+            .map(|keyword| keyword.name.clone())
+            .collect::<Vec<_>>();
+        let (tail_names, tail_values) = body.keyword_tail(&names, &keyword_values, span);
+        wired.extend([tail_names, tail_values]);
         let rets = vec![BOXED_WIRE; sig.rets.len()];
         let results = rets
             .iter()
@@ -3724,7 +4117,39 @@ fn callable_signature_from_sem(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(CallableSignature { params, rets })
+    Ok(CallableSignature {
+        params,
+        rets,
+        keywords: Vec::new(),
+    })
+}
+
+/// `signature`, whose last `names.len()` parameters are `#key` parameters
+/// named `names`, with those taken as boxed values and recorded as its
+/// keywords, at their declared kinds.
+fn with_keywords(mut signature: CallableSignature, names: &[String]) -> CallableSignature {
+    let required = signature.params.len().saturating_sub(names.len());
+    let kinds = signature.params.split_off(required);
+    signature
+        .params
+        .extend(kinds.iter().map(|_| ValueKind::Any));
+    signature.keywords = names
+        .iter()
+        .zip(kinds)
+        .map(|(name, kind)| CallableKeyword {
+            name: name.clone(),
+            kind,
+        })
+        .collect();
+    signature
+}
+
+/// The names of `keywords`.
+fn keyword_names(keywords: &[sem::KeywordParam]) -> Vec<String> {
+    keywords
+        .iter()
+        .map(|keyword| keyword.name.clone())
+        .collect()
 }
 
 fn value_kind_with_sem_callable_signature(
@@ -3743,14 +4168,31 @@ fn intern_sem_callable_signature(
     signatures: &mut Vec<CallableSignature>,
     signature: &sem::CallableSignature,
 ) -> Result<CallableSigId, LowerError> {
-    let lowered = callable_signature_from_sem(
+    let mut lowered = callable_signature_from_sem(
         signatures,
         &signature.params,
         &signature.param_sigs,
         &signature.results,
         &signature.result_sigs,
     )?;
+    lowered
+        .params
+        .extend(signature.keywords.iter().map(|_| ValueKind::Any));
+    lowered.keywords = lowered_keywords(&signature.keywords)?;
     Ok(intern_callable_signature(signatures, lowered))
+}
+
+/// `keywords` at their lowered kinds.
+fn lowered_keywords(keywords: &[sem::CallableKeyword]) -> Result<Vec<CallableKeyword>, LowerError> {
+    keywords
+        .iter()
+        .map(|keyword| {
+            Ok(CallableKeyword {
+                name: keyword.name.clone(),
+                kind: value_kind(keyword.kind)?,
+            })
+        })
+        .collect()
 }
 
 /// Returns the id [`intern_sem_callable_signature`] gave `signature`; every
@@ -3772,6 +4214,7 @@ fn sem_callable_signature_id(
             .iter()
             .enumerate()
             .map(|(index, param)| kind(*param, signature.param_sig(index)))
+            .chain(signature.keywords.iter().map(|_| Ok(ValueKind::Any)))
             .collect::<Result<Vec<_>, _>>()?,
         rets: signature
             .results
@@ -3779,6 +4222,7 @@ fn sem_callable_signature_id(
             .enumerate()
             .map(|(index, result)| kind(*result, signature.result_sig(index)))
             .collect::<Result<Vec<_>, _>>()?,
+        keywords: lowered_keywords(&signature.keywords)?,
     };
     ids.call_sigs
         .iter()
@@ -3858,6 +4302,7 @@ fn accessor_callable_signature(
     Ok(CallableSignature {
         params: vec![ValueKind::Object(Some(accessor.class))],
         rets: vec![value_kind(slot.kind)?],
+        keywords: Vec::new(),
     })
 }
 
@@ -3865,17 +4310,33 @@ fn generic_callable_signature(
     module: &sem::Module,
     generic: &sem::GenericFunction,
 ) -> Result<CallableSignature, LowerError> {
-    Ok(CallableSignature {
+    let required = generic.arity.saturating_sub(generic.keywords.len());
+    let signature = CallableSignature {
         params: (0..generic.arity)
-            .map(|index| dispatcher_param_kind(module, generic, index))
-            .collect(),
+            .map(|index| {
+                if index < required {
+                    Ok(dispatcher_param_kind(module, generic, index))
+                } else {
+                    value_kind(
+                        generic
+                            .param_kinds
+                            .get(index)
+                            .copied()
+                            .flatten()
+                            .unwrap_or(sem::ValueKind::Any),
+                    )
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         rets: generic
             .result_kinds
             .iter()
             .copied()
             .map(value_kind)
             .collect::<Result<Vec<_>, _>>()?,
-    })
+        keywords: Vec::new(),
+    };
+    Ok(with_keywords(signature, &keyword_names(&generic.keywords)))
 }
 
 fn intern_callable_signature(
@@ -3971,6 +4432,276 @@ struct BodyLowering<'module> {
 }
 
 impl<'module> BodyLowering<'module> {
+    /// Pushes a boxed entry's keyword tail ([`BOXED_WIRE`]): the names of
+    /// the keywords the call passes, as tape strings, and their values,
+    /// boxed, in the same order.
+    fn push_keyword_tail(&mut self) -> (Value, Value) {
+        (
+            self.push_param("$keywords", ValueKind::Array(ArrayKind::Str)),
+            self.push_param("$keyword-values", ValueKind::Array(ArrayKind::Any)),
+        )
+    }
+
+    /// Makes the keyword tail of a boxed call passing `names` with `values`,
+    /// already boxed.
+    fn keyword_tail(&mut self, names: &[String], values: &[Value], span: Span) -> (Value, Value) {
+        let name_regs = names
+            .iter()
+            .map(|name| {
+                let reg = self.alloc(ValueKind::Str);
+                self.instructions.push(Instr::ConstStr {
+                    dst: reg.reg,
+                    value: name.clone(),
+                    span,
+                });
+                reg.reg
+            })
+            .collect();
+        let tail_names = self.alloc(ValueKind::Array(ArrayKind::Str));
+        self.instructions.push(Instr::ArrayNew {
+            dst: tail_names.reg,
+            kind: ArrayKind::Str,
+            values: name_regs,
+            span,
+        });
+        let tail_values = self.alloc(ValueKind::Array(ArrayKind::Any));
+        self.instructions.push(Instr::ArrayNew {
+            dst: tail_values.reg,
+            kind: ArrayKind::Any,
+            values: values.iter().map(|value| value.reg).collect(),
+            span,
+        });
+        (tail_names, tail_values)
+    }
+
+    /// Signals `<unknown-keyword-error>` for the keyword the tape string
+    /// `name` names. A handler that returns ignores the keyword.
+    fn signal_unknown_keyword(&mut self, name: Reg, span: Span) -> Result<(), LowerError> {
+        let class = self
+            .module
+            .condition_class(sem::ConditionClass::UnknownKeywordError)
+            .ok_or_else(|| invalid_semantic("the <unknown-keyword-error> class is missing"))?;
+        let slot = self
+            .module
+            .classes
+            .get(class.0 as usize)
+            .and_then(|class| class.effective_slots.first())
+            .ok_or_else(|| invalid_semantic("<unknown-keyword-error> has no keyword slot"))?;
+        let slot_kind = value_kind(slot.kind)?;
+        let symbol = self.alloc(slot_kind);
+        self.instructions.push(Instr::RuntimeCall {
+            dst: symbol.reg,
+            op: RuntimeOp::InternSymbol,
+            args: vec![name],
+            kind: slot_kind,
+            span,
+        });
+        let condition = self.alloc(ValueKind::Object(Some(class)));
+        self.instructions.push(Instr::MakeObject {
+            dst: condition.reg,
+            class,
+            fields: vec![symbol.reg],
+            span,
+        });
+        self.instructions.push(Instr::Signal {
+            dsts: Vec::new(),
+            condition: condition.reg,
+            span,
+        });
+        Ok(())
+    }
+
+    /// Signals for the first keyword of a boxed call to a callable that
+    /// takes none, when it passed any.
+    fn reject_keywords(&mut self, names: Value, span: Span) -> Result<(), LowerError> {
+        let len = self.alloc(ValueKind::U64);
+        let zero = self.alloc(ValueKind::U64);
+        let none = self.alloc(ValueKind::Bool);
+        let (passed, done) = (self.alloc_label(), self.alloc_label());
+        self.instructions.extend([
+            Instr::ArrayLen {
+                dst: len.reg,
+                array: names.reg,
+                span,
+            },
+            Instr::ConstU64 {
+                dst: zero.reg,
+                value: 0,
+                span,
+            },
+            Instr::EqU64 {
+                dst: none.reg,
+                lhs: len.reg,
+                rhs: zero.reg,
+                span,
+            },
+            Instr::Branch {
+                cond: none.reg,
+                then_label: done,
+                else_label: passed,
+                span,
+            },
+            Instr::Label { label: passed },
+        ]);
+        let name = self.alloc(ValueKind::Str);
+        self.instructions.push(Instr::ArrayGet {
+            dst: name.reg,
+            array: names.reg,
+            index: zero.reg,
+            span,
+        });
+        self.signal_unknown_keyword(name.reg, span)?;
+        self.instructions.extend([
+            Instr::Jump { label: done, span },
+            Instr::Label { label: done },
+        ]);
+        Ok(())
+    }
+
+    /// Reads a boxed call's keyword tail into one boxed value per keyword
+    /// in `declared`, `$unsupplied` for each the call does not pass, and
+    /// signals `<unknown-keyword-error>` for each it passes that is not
+    /// declared. A keyword passed twice takes its last value; calls that
+    /// name their keywords never pass one twice.
+    fn parse_keywords(
+        &mut self,
+        names: Value,
+        values: Value,
+        declared: &[String],
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        let unsupplied = self.alloc(ValueKind::Any);
+        self.instructions.push(Instr::RuntimeCall {
+            dst: unsupplied.reg,
+            op: RuntimeOp::Unsupplied,
+            args: Vec::new(),
+            kind: ValueKind::Any,
+            span,
+        });
+        let slots = declared
+            .iter()
+            .map(|_| {
+                let slot = self.alloc(ValueKind::Any);
+                self.instructions.push(Instr::Move {
+                    dst: slot.reg,
+                    src: unsupplied.reg,
+                    span,
+                });
+                slot
+            })
+            .collect::<Vec<_>>();
+        let constants = declared
+            .iter()
+            .map(|name| {
+                let reg = self.alloc(ValueKind::Str);
+                self.instructions.push(Instr::ConstStr {
+                    dst: reg.reg,
+                    value: name.clone(),
+                    span,
+                });
+                reg
+            })
+            .collect::<Vec<_>>();
+        let len = self.alloc(ValueKind::U64);
+        let index = self.alloc(ValueKind::U64);
+        let one = self.alloc(ValueKind::U64);
+        let finished = self.alloc(ValueKind::Bool);
+        let (head, body, next, done) = (
+            self.alloc_label(),
+            self.alloc_label(),
+            self.alloc_label(),
+            self.alloc_label(),
+        );
+        self.instructions.extend([
+            Instr::ArrayLen {
+                dst: len.reg,
+                array: names.reg,
+                span,
+            },
+            Instr::ConstU64 {
+                dst: index.reg,
+                value: 0,
+                span,
+            },
+            Instr::ConstU64 {
+                dst: one.reg,
+                value: 1,
+                span,
+            },
+            Instr::Jump { label: head, span },
+            Instr::Label { label: head },
+            Instr::EqU64 {
+                dst: finished.reg,
+                lhs: index.reg,
+                rhs: len.reg,
+                span,
+            },
+            Instr::Branch {
+                cond: finished.reg,
+                then_label: done,
+                else_label: body,
+                span,
+            },
+            Instr::Label { label: body },
+        ]);
+        let name = self.alloc(ValueKind::Str);
+        let value = self.alloc(ValueKind::Any);
+        self.instructions.extend([
+            Instr::ArrayGet {
+                dst: name.reg,
+                array: names.reg,
+                index: index.reg,
+                span,
+            },
+            Instr::ArrayGet {
+                dst: value.reg,
+                array: values.reg,
+                index: index.reg,
+                span,
+            },
+        ]);
+        for (slot, constant) in slots.iter().zip(&constants) {
+            let same = self.alloc(ValueKind::Bool);
+            let (matched, unmatched) = (self.alloc_label(), self.alloc_label());
+            self.instructions.extend([
+                Instr::StrEq {
+                    dst: same.reg,
+                    lhs: name.reg,
+                    rhs: constant.reg,
+                    span,
+                },
+                Instr::Branch {
+                    cond: same.reg,
+                    then_label: matched,
+                    else_label: unmatched,
+                    span,
+                },
+                Instr::Label { label: matched },
+                Instr::Move {
+                    dst: slot.reg,
+                    src: value.reg,
+                    span,
+                },
+                Instr::Jump { label: next, span },
+                Instr::Label { label: unmatched },
+            ]);
+        }
+        self.signal_unknown_keyword(name.reg, span)?;
+        self.instructions.extend([
+            Instr::Jump { label: next, span },
+            Instr::Label { label: next },
+            Instr::AddU64 {
+                dst: index.reg,
+                lhs: index.reg,
+                rhs: one.reg,
+                span,
+            },
+            Instr::Jump { label: head, span },
+            Instr::Label { label: done },
+        ]);
+        Ok(slots)
+    }
+
     fn for_function(
         module: &'module sem::Module,
         ids: &'module LowerIds,
@@ -5784,6 +6515,7 @@ impl<'module> BodyLowering<'module> {
                 callable,
                 args,
                 arg_kinds,
+                keywords,
                 result_kinds,
                 span,
                 ..
@@ -5793,7 +6525,15 @@ impl<'module> BodyLowering<'module> {
                         "multiple-value callable call used in a scalar expression",
                     ));
                 }
-                self.lower_callable_call(callable, args, arg_kinds, result_kinds[0], *span)
+                let mut results = self.lower_callable_results(
+                    callable,
+                    args,
+                    arg_kinds,
+                    keywords,
+                    result_kinds,
+                    *span,
+                )?;
+                Ok(results.remove(0))
             }
             sem::Expr::Signal {
                 condition,
@@ -6561,10 +7301,18 @@ impl<'module> BodyLowering<'module> {
                 callable,
                 args,
                 arg_kinds,
+                keywords,
                 result_kinds,
                 span,
                 ..
-            } => self.lower_callable_results(callable, args, arg_kinds, result_kinds, *span),
+            } => self.lower_callable_results(
+                callable,
+                args,
+                arg_kinds,
+                keywords,
+                result_kinds,
+                *span,
+            ),
             sem::Expr::Signal {
                 condition,
                 condition_class,
@@ -7204,7 +7952,12 @@ impl<'module> BodyLowering<'module> {
             .call_sigs
             .get(sig.0 as usize)
             .ok_or_else(|| invalid_semantic("callable signature id is out of range"))?;
-        let shape = callable_shape(&self.ids.call_sigs, &signature.params, &signature.rets);
+        let shape = callable_shape(
+            &self.ids.call_sigs,
+            &signature.params,
+            &signature.keywords,
+            &signature.rets,
+        );
         let result = self.alloc(ValueKind::Closure(Some(sig)));
         self.proven_callables.push(result.reg);
         self.instructions.push(Instr::CallableNew {
@@ -7356,19 +8109,6 @@ impl<'module> BodyLowering<'module> {
             .collect()
     }
 
-    fn lower_callable_call(
-        &mut self,
-        callable: &sem::Expr,
-        args: &[sem::Expr],
-        arg_kinds: &[sem::ValueKind],
-        result_kind: sem::ValueKind,
-        span: Span,
-    ) -> Result<Value, LowerError> {
-        let mut results =
-            self.lower_callable_results(callable, args, arg_kinds, &[result_kind], span)?;
-        Ok(results.remove(0))
-    }
-
     /// Calls the callable value `callable` with `args`, each first taken at
     /// its `arg_kinds` kind, and returns its results at `result_kinds`.
     ///
@@ -7383,11 +8123,15 @@ impl<'module> BodyLowering<'module> {
         callable: &sem::Expr,
         args: &[sem::Expr],
         arg_kinds: &[sem::ValueKind],
+        keywords: &[String],
         result_kinds: &[sem::ValueKind],
         span: Span,
     ) -> Result<Vec<Value>, LowerError> {
+        // A generic that takes keywords is called through its typed entry,
+        // which fills the defaults of those passed as `$unsupplied`.
         if let sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic)) =
             self.module.expr_kind(callable)
+            && keywords.is_empty()
         {
             return self.lower_known_generic_call(callable, generic, args, result_kinds, span);
         }
@@ -7402,11 +8146,27 @@ impl<'module> BodyLowering<'module> {
             values.push(self.coerce_value(value, expected, arg.span())?);
         }
         let kinds = self.value_kinds(result_kinds)?;
+        // Sem passes a typed callable every keyword of its signature, in
+        // declaration order; keywords in any other arrangement are an
+        // untyped call's, whatever the value is known to be here.
+        let typed_keywords = |sig: CallableSigId| {
+            self.ids
+                .call_sigs
+                .get(sig.0 as usize)
+                .is_some_and(|signature| {
+                    signature.keywords.len() == keywords.len()
+                        && signature
+                            .keywords
+                            .iter()
+                            .zip(keywords)
+                            .all(|(declared, passed)| declared.name == *passed)
+                })
+        };
         match callee.kind {
-            ValueKind::Closure(Some(sig)) => {
+            ValueKind::Closure(Some(sig)) if typed_keywords(sig) => {
                 self.call_typed_entry(callee, values, sig, &kinds, span)
             }
-            ValueKind::Closure(None) => self.call_untyped(callee, values, &kinds, span),
+            ValueKind::Closure(_) => self.call_untyped(callee, values, keywords, &kinds, span),
             _ => Err(invalid_semantic(
                 "callable call target is not a callable value",
             )),
@@ -7480,16 +8240,53 @@ impl<'module> BodyLowering<'module> {
     fn call_untyped(
         &mut self,
         callee: Value,
-        args: Vec<Value>,
+        mut args: Vec<Value>,
+        keywords: &[String],
         kinds: &[ValueKind],
         span: Span,
     ) -> Result<Vec<Value>, LowerError> {
-        let arg_kinds = args.iter().map(|arg| arg.kind).collect::<Vec<_>>();
-        let shape = callable_shape(&self.ids.call_sigs, &arg_kinds, kinds);
         let results = kinds
             .iter()
             .map(|kind| self.alloc(*kind))
             .collect::<Vec<_>>();
+        let arg_kinds = args.iter().map(|arg| arg.kind).collect::<Vec<_>>();
+        let shape = callable_shape(&self.ids.call_sigs, &arg_kinds, &[], kinds);
+        // A value whose signature lowering knows has a shape known here
+        // too, and the tape checks a call of its typed entry against it.
+        let known_mismatch = match callee.kind {
+            ValueKind::Closure(Some(sig)) => {
+                self.ids
+                    .call_sigs
+                    .get(sig.0 as usize)
+                    .is_none_or(|signature| {
+                        callable_shape(
+                            &self.ids.call_sigs,
+                            &signature.params,
+                            &signature.keywords,
+                            &signature.rets,
+                        ) != shape
+                    })
+            }
+            _ => false,
+        };
+        // A call passing keywords knows their names but not the types the
+        // callee declares, which its typed entry's shape includes, so it
+        // always crosses boxed.
+        if !keywords.is_empty() || known_mismatch {
+            let keyword_values = args.split_off(args.len().saturating_sub(keywords.len()));
+            let mut wired = Vec::with_capacity(args.len() + 2);
+            for arg in args {
+                wired.push(self.wire_value(arg, span)?);
+            }
+            let mut boxed_values = Vec::with_capacity(keyword_values.len());
+            for value in keyword_values {
+                boxed_values.push(self.wire_value(value, span)?);
+            }
+            let (tail_names, tail_values) = self.keyword_tail(keywords, &boxed_values, span);
+            wired.extend([tail_names, tail_values]);
+            self.call_boxed_entry(callee, wired, &results, span)?;
+            return Ok(results);
+        }
         let [Some(typed_entry), _, Some(actual)] =
             self.open_callable(callee.reg, [true, false, true], span)
         else {
@@ -7527,17 +8324,36 @@ impl<'module> BodyLowering<'module> {
             Instr::Jump { label: join, span },
             Instr::Label { label: boxed },
         ]);
+        let mut wired = Vec::with_capacity(args.len() + 2);
+        for arg in args {
+            wired.push(self.wire_value(arg, span)?);
+        }
+        let (tail_names, tail_values) = self.keyword_tail(&[], &[], span);
+        wired.extend([tail_names, tail_values]);
+        self.call_boxed_entry(callee, wired, &results, span)?;
+        self.instructions.extend([
+            Instr::Jump { label: join, span },
+            Instr::Label { label: join },
+        ]);
+        Ok(results)
+    }
+
+    /// Calls `callee`'s boxed entry with `wired`, the boxed arguments and
+    /// the keyword tail, and moves each result, unboxed, into `results`.
+    fn call_boxed_entry(
+        &mut self,
+        callee: Value,
+        wired: Vec<Value>,
+        results: &[Value],
+        span: Span,
+    ) -> Result<(), LowerError> {
         let [_, Some(boxed_entry), _] = self.open_callable(callee.reg, [false, true, false], span)
         else {
             return Err(invalid_semantic(
                 "opening a callable dropped its boxed entry",
             ));
         };
-        let mut wired = Vec::with_capacity(args.len());
-        for arg in args {
-            wired.push(self.wire_value(arg, span)?);
-        }
-        let rets = vec![BOXED_WIRE; kinds.len()];
+        let rets = vec![BOXED_WIRE; results.len()];
         let boxed_results = rets
             .iter()
             .map(|kind| self.alloc(*kind))
@@ -7559,11 +8375,7 @@ impl<'module> BodyLowering<'module> {
                 span,
             });
         }
-        self.instructions.extend([
-            Instr::Jump { label: join, span },
-            Instr::Label { label: join },
-        ]);
-        Ok(results)
+        Ok(())
     }
 
     /// The exit point `callable` names, when it is the local a `block`
@@ -9806,7 +10618,8 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         | RuntimeOp::TypeName => index == 0,
         RuntimeOp::VectorRef => index == 0,
         RuntimeOp::VectorElementOr => index != 1,
-        RuntimeOp::Unsupplied => false,
+        RuntimeOp::Unsupplied | RuntimeOp::InternSymbol => false,
+        RuntimeOp::IsUnsupplied => true,
         RuntimeOp::InstanceOfType => true,
         RuntimeOp::LimitedIntegerType => false,
         RuntimeOp::ClassMetaObject
@@ -9972,6 +10785,8 @@ fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         | ValueKind::Entry
         | ValueKind::Aggregate
         | ValueKind::Exn
+        | ValueKind::Str
+        | ValueKind::Array(_)
         | ValueKind::Object(None) => None,
     }
 }
@@ -10243,6 +11058,9 @@ const BOXED_WIRE: ValueKind = ValueKind::Any;
 /// is passed having that signature's typed entry. A callable result is any
 /// callable value, which an untyped caller takes as one.
 ///
+/// A signature's keywords, names and declared kinds, are part of its
+/// shape: its typed entry takes them boxed after the required parameters.
+///
 /// The hash is of the signature's text, so units compiled apart agree on
 /// it. Two different signatures with the same hash would let the caller
 /// call the typed entry with registers the tape refuses, a trap, never a
@@ -10250,11 +11068,21 @@ const BOXED_WIRE: ValueKind = ValueKind::Any;
 fn callable_shape(
     signatures: &[CallableSignature],
     params: &[ValueKind],
+    keywords: &[CallableKeyword],
     rets: &[ValueKind],
 ) -> u64 {
     let mut text = String::new();
     for kind in params {
         shape_text(signatures, *kind, true, &mut text);
+    }
+    if !keywords.is_empty() {
+        text.push_str("#key");
+        for keyword in keywords {
+            text.push_str(&keyword.name);
+            text.push(':');
+            shape_text(signatures, keyword.kind, true, &mut text);
+            text.push(';');
+        }
     }
     text.push_str("->");
     for kind in rets {
@@ -10301,6 +11129,9 @@ fn shape_text(signatures: &[CallableSignature], kind: ValueKind, full: bool, tex
         ValueKind::Function(_) => "F",
         ValueKind::Aggregate => "g",
         ValueKind::Exn => "x",
+        ValueKind::Str => "t",
+        ValueKind::Array(ArrayKind::Str) => "[t]",
+        ValueKind::Array(ArrayKind::Any) => "[a]",
     };
     text.push_str(code);
     text.push(',');
@@ -10588,6 +11419,8 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::VectorRef => "vector-ref",
         RuntimeOp::VectorElementOr => "vector-element-or",
         RuntimeOp::Unsupplied => "unsupplied",
+        RuntimeOp::IsUnsupplied => "unsupplied?",
+        RuntimeOp::InternSymbol => "intern-symbol",
         RuntimeOp::FloatToString | RuntimeOp::SingleFloatToString => "float-to-string",
         RuntimeOp::IntegerToString => "integer-to-string",
         RuntimeOp::Concatenate => "concatenate",
@@ -11209,6 +12042,61 @@ impl Module {
                 write!(f, "  %{dst} = u64.eq %{lhs}, %{rhs}")?;
                 fmt_span(f, *span)
             }
+            Instr::AddU64 {
+                dst,
+                lhs,
+                rhs,
+                span,
+            } => {
+                write!(f, "  %{dst} = u64.add %{lhs}, %{rhs}")?;
+                fmt_span(f, *span)
+            }
+            Instr::ConstStr { dst, value, span } => {
+                write!(f, "  %{dst} = const.str {value:?}")?;
+                fmt_span(f, *span)
+            }
+            Instr::StrEq {
+                dst,
+                lhs,
+                rhs,
+                span,
+            } => {
+                write!(f, "  %{dst} = str.eq %{lhs}, %{rhs}")?;
+                fmt_span(f, *span)
+            }
+            Instr::ArrayNew {
+                dst,
+                kind,
+                values,
+                span,
+            } => {
+                let element = match kind {
+                    ArrayKind::Str => "str",
+                    ArrayKind::Any => "any",
+                };
+                write!(f, "  %{dst} = array.new {element}[")?;
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "%{value}")?;
+                }
+                write!(f, "]")?;
+                fmt_span(f, *span)
+            }
+            Instr::ArrayLen { dst, array, span } => {
+                write!(f, "  %{dst} = array.len %{array}")?;
+                fmt_span(f, *span)
+            }
+            Instr::ArrayGet {
+                dst,
+                array,
+                index,
+                span,
+            } => {
+                write!(f, "  %{dst} = array.get %{array}[%{index}]")?;
+                fmt_span(f, *span)
+            }
             Instr::Branch {
                 cond,
                 then_label,
@@ -11371,6 +12259,9 @@ impl Module {
             ValueKind::Bool => write!(f, "bool"),
             ValueKind::Aggregate => write!(f, "agg"),
             ValueKind::Exn => write!(f, "exn"),
+            ValueKind::Str => write!(f, "str"),
+            ValueKind::Array(ArrayKind::Str) => write!(f, "array(str)"),
+            ValueKind::Array(ArrayKind::Any) => write!(f, "array(any)"),
             ValueKind::Function(Some(sig)) => {
                 if let Some(signature) = self.callable_signature(sig) {
                     write!(f, "function(")?;
@@ -11624,12 +12515,14 @@ mod tests {
         assert!(module.call_sigs.contains(&CallableSignature {
             params: vec![ValueKind::I64],
             rets: vec![ValueKind::I64],
+            keywords: Vec::new(),
         }));
         assert_eq!(
             module.call_sigs[0],
             CallableSignature {
                 params: vec![ValueKind::I64],
                 rets: vec![ValueKind::I64],
+                keywords: Vec::new(),
             }
         );
         assert_eq!(
@@ -11702,6 +12595,7 @@ mod tests {
         assert!(module.call_sigs.contains(&CallableSignature {
             params: vec![ValueKind::I64],
             rets: vec![ValueKind::I64],
+            keywords: Vec::new(),
         }));
         assert_eq!(module.functions[1].params[0].kind, ValueKind::Closure(None));
         let dump = module.dump();
@@ -11711,12 +12605,17 @@ mod tests {
         // lands.
         assert!(dump.contains("%r4, _, %r5 = callable.open %r1"));
         assert!(dump.contains("%r3 = call.indirect %r4(%r2): i64"));
-        assert!(dump.contains("%r9 = box.any %r2: i64"));
-        assert!(dump.contains("%r10 = call.indirect %r8(%r9): any"));
-        assert!(dump.contains("unbox <integer>, %r10: i64 else type-error.cast <integer>"));
+        // The boxed call passes an empty keyword tail.
+        assert!(dump.contains("%r8 = box.any %r2: i64"));
+        assert!(dump.contains("%r9 = array.new str[]"));
+        assert!(dump.contains("%r12 = call.indirect %r11(%r8, %r9, %r10): any"));
+        assert!(dump.contains("unbox <integer>, %r12: i64 else type-error.cast <integer>"));
         assert!(dump.contains("callable.new l3 boxed l4"));
         assert!(dump.contains("fn l3 inc#closure(%r1 $env: agg, %r2 arg0: i64) -> i64"));
-        assert!(dump.contains("fn l4 inc#closure#boxed(%r1 $env: agg, %r2 arg0: any) -> any"));
+        assert!(dump.contains(
+            "fn l4 inc#closure#boxed(%r1 $env: agg, %r2 arg0: any, \
+             %r3 $keywords: array(str), %r4 $keyword-values: array(any)) -> any"
+        ));
         assert!(dump.contains("unbox <integer>, %r2: i64 else type-error.entry <integer>"));
     }
 

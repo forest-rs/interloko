@@ -13,6 +13,7 @@
 //!       <type-error>
 //!       <no-applicable-method>
 //!       <select-error>
+//!       <unknown-keyword-error>
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
@@ -22,8 +23,10 @@
 //! send that found no method for its arguments: the generic, the arguments
 //! and the stable code [`NO_APPLICABLE_METHOD_CODE`]. A `<select-error>`
 //! reports a `select` without `otherwise` whose target matched no key: the
-//! target value. Their slots are
-//! read-only, so they add no setter generics to a program.
+//! target value. An `<unknown-keyword-error>` reports a call through a
+//! callable value that passed a keyword its callee does not take: the
+//! keyword, as a symbol. Their slots are read-only, so they add no setter
+//! generics to a program.
 //!
 //! A send never finds several equally specific methods: a module whose
 //! methods could be ambiguous for some arguments does not compile
@@ -46,6 +49,9 @@ pub enum ConditionClass {
     /// `<select-error>`: a `select` without `otherwise` found no key that
     /// matched its target.
     SelectError,
+    /// `<unknown-keyword-error>`: a call through a callable value passed a
+    /// keyword its callee does not take.
+    UnknownKeywordError,
 }
 
 impl ConditionClass {
@@ -59,6 +65,7 @@ impl ConditionClass {
         Self::TypeError,
         Self::NoApplicableMethod,
         Self::SelectError,
+        Self::UnknownKeywordError,
     ];
 
     /// Returns the Loko-visible class name.
@@ -70,6 +77,7 @@ impl ConditionClass {
             Self::TypeError => "<type-error>",
             Self::NoApplicableMethod => "<no-applicable-method>",
             Self::SelectError => "<select-error>",
+            Self::UnknownKeywordError => "<unknown-keyword-error>",
         }
     }
 
@@ -82,6 +90,7 @@ impl ConditionClass {
             b"<type-error>" => Some(Self::TypeError),
             b"<no-applicable-method>" => Some(Self::NoApplicableMethod),
             b"<select-error>" => Some(Self::SelectError),
+            b"<unknown-keyword-error>" => Some(Self::UnknownKeywordError),
             _ => None,
         }
     }
@@ -93,7 +102,10 @@ impl ConditionClass {
         match self {
             Self::Condition => None,
             Self::Error => Some(Self::Condition),
-            Self::TypeError | Self::NoApplicableMethod | Self::SelectError => Some(Self::Error),
+            Self::TypeError
+            | Self::NoApplicableMethod
+            | Self::SelectError
+            | Self::UnknownKeywordError => Some(Self::Error),
         }
     }
 
@@ -105,6 +117,7 @@ impl ConditionClass {
             Self::TypeError => &TYPE_ERROR_SLOTS,
             Self::NoApplicableMethod => &NO_APPLICABLE_METHOD_SLOTS,
             Self::SelectError => &SELECT_ERROR_SLOTS,
+            Self::UnknownKeywordError => &UNKNOWN_KEYWORD_ERROR_SLOTS,
         }
     }
 }
@@ -194,6 +207,14 @@ pub const NO_APPLICABLE_METHOD_SLOTS: [ConditionSlot; 3] = [
         init_keyword: "code",
     },
 ];
+
+/// The slot of `<unknown-keyword-error>`: the keyword the call passed, as
+/// a `<symbol>`.
+pub const UNKNOWN_KEYWORD_ERROR_SLOTS: [ConditionSlot; 1] = [ConditionSlot {
+    name: "unknown-keyword-error-keyword",
+    type_name: "<symbol>",
+    init_keyword: "keyword",
+}];
 
 /// The slot of `<select-error>`: the target value that matched no key, as
 /// an `<object>`.

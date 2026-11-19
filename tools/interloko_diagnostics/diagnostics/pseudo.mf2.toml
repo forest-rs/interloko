@@ -100,8 +100,6 @@
 "sem.method-keyword-not-in-generic" = "[ps] { $generic } has no #key { $keyword }"
 "sem.method-keyword-default" = "[ps] method #key { $keyword } has a default"
 "sem.method-keyword-type-mismatch" = "[ps] #key { $keyword } is { $expected }, not { $actual }"
-"sem.keyword-callable-value" = "[ps] { $callee } has keywords, not a callable value"
-"sem.callable-keyword-argument" = "[ps] callable { $callee } given { $keyword }:"
 "sem.collection-method-overrides-kernel" = "[ps] { $function } kernel method for { $class } cannot be overridden"
 "sem.slot-default-type-mismatch" = "[ps] slot { $slot } default got { $actual }, need { $expected }"
 "sem.slot-default-binds-locals" = "[ps] slot { $slot } default binds local { $local }"

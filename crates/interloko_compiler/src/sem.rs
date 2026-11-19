@@ -29,6 +29,30 @@ pub use interloko_model::{
 };
 pub use interloko_runtime::FloatFunction;
 
+/// The keyword names of `signature`, in declaration order.
+fn keyword_names(signature: &KeywordSignature) -> Vec<String> {
+    signature
+        .keywords
+        .iter()
+        .map(|slot| slot.name.clone())
+        .collect()
+}
+
+/// `signature`, whose last `names.len()` parameters are keyword
+/// parameters named `names`, with those moved to its keywords.
+fn split_keywords(mut signature: CallableSignature, names: Vec<String>) -> CallableSignature {
+    let required = signature.params.len().saturating_sub(names.len());
+    let kinds = signature.params.split_off(required);
+    signature.param_sigs.truncate(required);
+    signature.param_ranges.truncate(required);
+    signature.keywords = names
+        .into_iter()
+        .zip(kinds)
+        .map(|(name, kind)| CallableKeyword { name, kind })
+        .collect();
+    signature
+}
+
 /// `call` after the hidden `let`s a keyword call evaluates its arguments
 /// into, when it needs any.
 fn with_lets(lets: Vec<Let>, call: Expr, span: Span) -> Expr {
@@ -275,6 +299,20 @@ pub struct CallableSignature {
     /// Ranges of `limited(<integer>, ...)` results, parallel to `results`;
     /// `None` where a result is not one.
     pub result_ranges: Vec<Option<IntRange>>,
+    /// `#key` parameters after `params`, in declaration order. A call
+    /// through the value passes each as a boxed `<object>`, `$unsupplied`
+    /// when it does not pass it, and the value's entry fills its default
+    /// and checks its type.
+    pub keywords: Vec<CallableKeyword>,
+}
+
+/// One `#key` parameter of a [`CallableSignature`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallableKeyword {
+    /// The keyword, without its colon.
+    pub name: String,
+    /// The parameter's value category.
+    pub kind: ValueKind,
 }
 
 impl CallableSignature {
@@ -289,6 +327,7 @@ impl CallableSignature {
             result_ranges: vec![None; results.len()],
             params,
             results,
+            keywords: Vec::new(),
         }
     }
 
@@ -2643,6 +2682,9 @@ pub struct GenericFunction {
     /// `define strict generic`: every method of the generic is held to
     /// strict typing. Built-in generics are never strict.
     pub strict: bool,
+    /// The `#key` parameters, the last of `params`, in declaration order;
+    /// dispatch looks only at the parameters before them.
+    pub keywords: Vec<KeywordParam>,
 }
 
 /// Origin of a semantic method metaobject.
@@ -2766,11 +2808,24 @@ pub struct Function {
     /// Checks the function's indirect entry makes, when the function is
     /// used as a value; empty otherwise. Direct calls trust its contract.
     pub entry_checks: Vec<EntryCheck>,
+    /// The `#key` parameters, the last of `params`, in declaration order.
+    pub keywords: Vec<KeywordParam>,
     /// `define strict function`: typing must prove the checks the compiler
     /// inserts into the body (see [`crate::typing`]).
     pub strict: bool,
     /// Source span.
     pub span: Span,
+}
+
+/// One `#key` parameter of a function or generic, which follows its
+/// required parameters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeywordParam {
+    /// The keyword, without its colon.
+    pub name: String,
+    /// What a call that does not pass the keyword gets: the result of the
+    /// owner's default function for it, or `$unsupplied`.
+    pub default: Option<FunctionId>,
 }
 
 /// A check a callable's indirect entry makes on one parameter before its
@@ -3765,6 +3820,12 @@ pub enum Expr {
         args: Vec<Expr>,
         /// Expected argument categories for this indirect call.
         arg_kinds: Vec<ValueKind>,
+        /// The keywords the last `keywords.len()` arguments pass, each a
+        /// boxed `<object>`: for a typed callable, every keyword of its
+        /// signature in declaration order, `$unsupplied` for one the call
+        /// does not pass; for an untyped one, those the call passes, in
+        /// source order.
+        keywords: Vec<String>,
         /// Result value categories in return order.
         result_kinds: Vec<ValueKind>,
         /// Typed callable signatures for callable results, when known.
@@ -5045,6 +5106,7 @@ impl Lowering {
         lowering.collect_host_functions();
         lowering.collect_generics(module);
         lowering.collect_functions(module);
+        lowering.collect_generic_keywords();
         lowering.collect_constant_symbols(module);
         lowering.collect_slot_init_values(module);
         lowering.finalize_classes();
@@ -5917,6 +5979,8 @@ impl Lowering {
                 origin: GenericFunctionOrigin::Source,
                 sealing: generic.sealing,
                 strict: generic.strict,
+                // Filled once the default functions are known.
+                keywords: Vec::new(),
             });
         }
     }
@@ -6017,6 +6081,7 @@ impl Lowering {
                 origin,
                 sealing: Sealing::Open,
                 strict: false,
+                keywords: Vec::new(),
             });
         }
     }
@@ -6078,6 +6143,7 @@ impl Lowering {
             origin: GenericFunctionOrigin::Numeric { operator },
             sealing: Sealing::Open,
             strict: false,
+            keywords: Vec::new(),
         });
         self.numeric_generics.push((operator, id));
         id
@@ -7263,9 +7329,47 @@ impl Lowering {
             result_ranges,
             return_annotation,
             entry_checks: Vec::new(),
+            keywords: self.keyword_params(self.keyword_functions.iter(), &function.name),
             strict: function.strict,
             span: function.span,
         }
+    }
+
+    /// Records each source generic's keyword parameters, whose defaults are
+    /// functions [`Self::collect_functions`] collected.
+    fn collect_generic_keywords(&mut self) {
+        for index in 0..self.generics.len() {
+            let name = self.generics[index].name.clone();
+            let keywords = self.keyword_params(self.keyword_generics.iter(), &name);
+            self.generics[index].keywords = keywords;
+        }
+    }
+
+    /// The keyword parameters `table` records for `owner`, with their
+    /// default functions' ids.
+    fn keyword_params<'a>(
+        &self,
+        mut table: impl Iterator<Item = &'a (String, KeywordSignature)>,
+        owner: &str,
+    ) -> Vec<KeywordParam> {
+        table
+            .find(|(name, _)| name == owner)
+            .map(|(_, signature)| {
+                signature
+                    .keywords
+                    .iter()
+                    .map(|slot| KeywordParam {
+                        name: slot.name.clone(),
+                        default: match &slot.default {
+                            KeywordDefault::Function(name) => {
+                                self.resolve_function(name).map(|function| function.id)
+                            }
+                            KeywordDefault::Unsupplied | KeywordDefault::Missing => None,
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn lower_block(
@@ -7768,15 +7872,13 @@ impl Lowering {
                     return self
                         .lower_keyword_call(ctx, *id, callee, &signature, args, keywords, *span);
                 }
-                // No other call takes keyword arguments.
-                for keyword in keywords {
-                    ctx.diagnostics.push(if callable_value {
-                        Diagnostic::error(keyword.span, DiagnosticCode::CallableKeywordArgument)
-                            .with_arg(DiagnosticArg::text("callee", callee.clone()))
-                            .with_arg(DiagnosticArg::text("keyword", keyword.name.clone()))
-                    } else {
-                        Self::unexpected_keyword(callee, keyword)
-                    });
+                // A call through a callable value passes its keywords to the
+                // value's entry; no other call takes keyword arguments.
+                if !callable_value {
+                    for keyword in keywords {
+                        ctx.diagnostics
+                            .push(Self::unexpected_keyword(callee, keyword));
+                    }
                 }
                 if callee == "apply" {
                     return self.lower_apply(ctx, args, expected_results, *span);
@@ -7803,10 +7905,13 @@ impl Lowering {
                 }
                 if let Some(target) = self.local_callable_target(ctx, callee, *span) {
                     let lowered_args = args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
-                    return self.lower_applied_dynamic_callable_call(
+                    return self.lower_callable_value_call(
                         ctx,
+                        *id,
+                        callee,
                         target,
                         lowered_args,
+                        keywords,
                         expected_results,
                         *span,
                     );
@@ -8163,19 +8268,6 @@ impl Lowering {
                 span,
             };
         }
-        // Calls through callable values pass no keywords yet.
-        let kernel_keywords = self.resolve_generic(name).is_some_and(|symbol| {
-            self.collection_generics
-                .iter()
-                .any(|(function, id)| *id == symbol.id && !function.keywords().is_empty())
-        });
-        if kernel_keywords || self.keyword_signature(name).is_some() {
-            ctx.diagnostics.push(
-                Diagnostic::error(span, DiagnosticCode::KeywordCallableValue)
-                    .with_arg(DiagnosticArg::text("callee", name)),
-            );
-            return Expr::Error { span };
-        }
         if let Some(symbol) = self.resolve_function(name) {
             return Expr::KnownCallable {
                 callable: KnownCallable::DirectFunction(symbol.id),
@@ -8402,6 +8494,7 @@ impl Lowering {
             results: result_kinds,
             result_sigs: result_callable_sigs,
             result_ranges,
+            keywords: Vec::new(),
         };
         Expr::Closure {
             closure: id,
@@ -8429,6 +8522,21 @@ impl Lowering {
             .iter()
             .map(|arg| self.lower_expr(ctx, arg))
             .collect::<Vec<_>>();
+        // A function or generic that takes keywords is called through its
+        // value's typed entry, which fills the defaults `apply` leaves out.
+        if self
+            .callable_signature_of(&target)
+            .is_some_and(|signature| !signature.keywords.is_empty())
+        {
+            return self.lower_applied_dynamic_callable_call(
+                ctx,
+                target,
+                lowered_args,
+                Vec::new(),
+                expected_results,
+                span,
+            );
+        }
         match self.expr_kind(&target) {
             ValueKind::KnownCallable(KnownCallable::DirectFunction(function)) => {
                 self.lower_applied_direct_call(ctx, target, function, lowered_args, span)
@@ -8444,6 +8552,7 @@ impl Lowering {
                 ctx,
                 target,
                 lowered_args,
+                Vec::new(),
                 expected_results,
                 span,
             ),
@@ -8475,6 +8584,27 @@ impl Lowering {
             .iter()
             .find(|(owner, _)| owner == name)
             .map_or(arity, |(_, signature)| signature.required)
+    }
+
+    /// The keyword names of `generic`, a source or kernel collection
+    /// generic, in declaration order.
+    fn generic_keyword_names(&self, generic: &GenericSymbol) -> Vec<String> {
+        if let Some((function, _)) = self
+            .collection_generics
+            .iter()
+            .find(|(_, id)| *id == generic.id)
+        {
+            return function
+                .keywords()
+                .iter()
+                .map(|name| (*name).into())
+                .collect();
+        }
+        self.keyword_generics
+            .iter()
+            .find(|(owner, _)| *owner == generic.name)
+            .map(|(_, signature)| keyword_names(signature))
+            .unwrap_or_default()
     }
 
     /// The keyword parameters of the function or generic a call of `name`
@@ -8993,6 +9123,14 @@ impl Lowering {
             origin: GenericFunctionOrigin::Collection { function },
             sealing: Sealing::Open,
             strict: false,
+            keywords: function
+                .keywords()
+                .iter()
+                .map(|name| KeywordParam {
+                    name: (*name).into(),
+                    default: None,
+                })
+                .collect(),
         });
         self.collection_generics.push((function, id));
         id
@@ -9558,6 +9696,7 @@ impl Lowering {
             callable: Box::new(target),
             args,
             arg_kinds: symbol.param_kinds.clone(),
+            keywords: Vec::new(),
             result_kinds: symbol.return_kinds.clone(),
             result_callable_sigs: symbol.return_callable_sigs.clone(),
             span,
@@ -9616,6 +9755,7 @@ impl Lowering {
             callable: Box::new(target),
             args,
             arg_kinds: vec![ValueKind::Object(class)],
+            keywords: Vec::new(),
             result_kinds: vec![slot_info.kind],
             result_callable_sigs: vec![None],
             span,
@@ -9659,10 +9799,174 @@ impl Lowering {
             arg_kinds: (0..symbol.arity())
                 .map(|index| self.generic_callable_arg_kind(generic, index))
                 .collect(),
+            keywords: Vec::new(),
             result_kinds: symbol.return_kinds.clone(),
             result_callable_sigs: symbol.return_callable_sigs.clone(),
             span,
         }
+    }
+
+    /// Lowers a call through the callable value `target` with the
+    /// positional arguments `args`, already lowered, and the keyword
+    /// arguments `keywords`, of the call `id` that names the value `callee`.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_callable_value_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        callee: &str,
+        target: Expr,
+        args: Vec<Expr>,
+        keywords: &[ast::KeywordArg],
+        expected_results: Option<&[ValueKind]>,
+        span: Span,
+    ) -> Expr {
+        if keywords.is_empty() {
+            return self.lower_applied_dynamic_callable_call(
+                ctx,
+                target,
+                args,
+                Vec::new(),
+                expected_results,
+                span,
+            );
+        }
+        let mut valid = true;
+        for (index, keyword) in keywords.iter().enumerate() {
+            if keywords[..index]
+                .iter()
+                .any(|earlier| earlier.name == keyword.name)
+            {
+                ctx.diagnostics.push(
+                    Diagnostic::error(keyword.span, DiagnosticCode::DuplicateKeywordArgument)
+                        .with_arg(DiagnosticArg::text("keyword", keyword.name.clone())),
+                );
+                valid = false;
+            }
+        }
+        let signature = self.callable_signature_of(&target);
+        if let Some(signature) = &signature {
+            for keyword in keywords {
+                if !signature
+                    .keywords
+                    .iter()
+                    .any(|known| known.name == keyword.name)
+                {
+                    ctx.diagnostics
+                        .push(Self::unexpected_keyword(callee, keyword));
+                    valid = false;
+                }
+            }
+        }
+        let scope = ctx.scope_start();
+        let values = keywords
+            .iter()
+            .map(|keyword| self.lower_expr(ctx, &keyword.value))
+            .collect::<Vec<_>>();
+        if !valid {
+            ctx.hide_locals_from(scope);
+            return Expr::Error { span };
+        }
+        let Some(signature) = signature else {
+            // An untyped callable takes the keywords as the call passes
+            // them, in source order; its entry finds out which it takes.
+            let mut args = args;
+            args.extend(values);
+            let names = keywords
+                .iter()
+                .map(|keyword| keyword.name.clone())
+                .collect();
+            ctx.hide_locals_from(scope);
+            return self.lower_applied_dynamic_callable_call(
+                ctx,
+                target,
+                args,
+                names,
+                expected_results,
+                span,
+            );
+        };
+        // A typed callable takes every keyword of its signature, in
+        // declaration order: the call passes `$unsupplied` for those it
+        // does not pass, and evaluates what it passes in source order.
+        for (keyword, value) in keywords.iter().zip(&values) {
+            let Some(known) = signature
+                .keywords
+                .iter()
+                .find(|known| known.name == keyword.name)
+            else {
+                continue;
+            };
+            let actual = self.expr_kind(value);
+            if !self.kinds_match(known.kind, actual) {
+                ctx.diagnostics.push(
+                    Diagnostic::error(value.span(), DiagnosticCode::KeywordArgumentTypeMismatch)
+                        .with_arg(DiagnosticArg::text("callee", callee.to_string()))
+                        .with_arg(DiagnosticArg::text("keyword", keyword.name.clone()))
+                        .with_arg(DiagnosticArg::text("expected", self.kind_name(known.kind)))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                );
+            }
+        }
+        let positions = keywords
+            .iter()
+            .filter_map(|keyword| {
+                signature
+                    .keywords
+                    .iter()
+                    .position(|known| known.name == keyword.name)
+            })
+            .collect::<Vec<_>>();
+        let in_order = positions.windows(2).all(|pair| pair[0] < pair[1]);
+        let mut lets = Vec::new();
+        let (mut args, mut values) = (args, values);
+        if !in_order {
+            args = args
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    let name = format!("{callee} #arg {index}@{}", span.start);
+                    self.hidden_read(ctx, &mut lets, id, &name, value, span)
+                })
+                .collect();
+            values = values
+                .into_iter()
+                .zip(keywords)
+                .map(|(value, keyword)| {
+                    let name = format!("{callee} #key {}@{}", keyword.name, span.start);
+                    self.hidden_read(ctx, &mut lets, id, &name, value, span)
+                })
+                .collect();
+        }
+        let mut slots = signature.keywords.iter().map(|_| None).collect::<Vec<_>>();
+        for (position, value) in positions.into_iter().zip(values) {
+            slots[position] = Some(value);
+        }
+        args.extend(
+            slots
+                .into_iter()
+                .map(|slot| slot.unwrap_or_else(|| self.unsupplied(span))),
+        );
+        ctx.hide_locals_from(scope);
+        let call = self.lower_applied_dynamic_callable_call(
+            ctx,
+            target,
+            args,
+            Vec::new(),
+            expected_results,
+            span,
+        );
+        with_lets(lets, call, span)
+    }
+
+    /// The signature of the callable `target` evaluates to, when known:
+    /// its own, or that of the function or generic it is statically.
+    fn callable_signature_of(&self, target: &Expr) -> Option<CallableSignature> {
+        self.expr_callable_signature(target)
+            .or_else(|| match self.expr_kind(target) {
+                ValueKind::KnownCallable(callable) => self.known_callable_signature(callable),
+                _ => None,
+            })
     }
 
     fn lower_applied_dynamic_callable_call(
@@ -9670,10 +9974,18 @@ impl Lowering {
         ctx: &mut FunctionContext,
         target: Expr,
         mut args: Vec<Expr>,
+        untyped_keywords: Vec<String>,
         expected_results: Option<&[ValueKind]>,
         span: Span,
     ) -> Expr {
-        if let Some(signature) = self.expr_callable_signature(&target) {
+        if let Some(signature) = self.callable_signature_of(&target) {
+            // Keyword arguments, `$unsupplied` for those the call does not
+            // pass, follow the positional ones; `apply` passes none.
+            let keyword_count = signature.keywords.len();
+            if keyword_count > 0 && args.len() == signature.params.len() {
+                args.extend((0..keyword_count).map(|_| self.unsupplied(span)));
+            }
+            let keyword_args = args.split_off(args.len().saturating_sub(keyword_count));
             if signature.params.len() != args.len() {
                 ctx.diagnostics.push(
                     Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
@@ -9715,6 +10027,7 @@ impl Lowering {
                     ));
                 }
             }
+            args.extend(keyword_args);
             // A block's exit procedure never returns, so nothing relies on
             // its results.
             if ctx.is_block_exit(&target) {
@@ -9723,6 +10036,7 @@ impl Lowering {
                     callable: Box::new(target),
                     args,
                     arg_kinds: signature.params,
+                    keywords: Vec::new(),
                     result_kinds: signature.results,
                     result_callable_sigs: vec![None; result_len],
                     span,
@@ -9773,22 +10087,24 @@ impl Lowering {
             ValueKind::I32 | ValueKind::U32 => ValueKind::I64,
             kind => kind,
         };
-        let arg_kinds = args
+        let positional = args.len().saturating_sub(untyped_keywords.len());
+        let arg_kinds = args[..positional]
             .iter()
             .map(|arg| as_integer(self.expr_kind(arg)))
             .collect::<Vec<_>>();
-        self.checked_callable_call(
-            ctx,
-            target,
-            args,
-            CallableSignature::flat(arg_kinds, result_kinds.to_vec()),
-            Self::untyped_result_check,
-            span,
-        )
-        .unwrap_or_else(|diagnostic| {
-            ctx.diagnostics.push(diagnostic);
-            Expr::Error { span }
-        })
+        let mut called = CallableSignature::flat(arg_kinds, result_kinds.to_vec());
+        called.keywords = untyped_keywords
+            .into_iter()
+            .map(|name| CallableKeyword {
+                name,
+                kind: ValueKind::Any,
+            })
+            .collect();
+        self.checked_callable_call(ctx, target, args, called, Self::untyped_result_check, span)
+            .unwrap_or_else(|diagnostic| {
+                ctx.diagnostics.push(diagnostic);
+                Expr::Error { span }
+            })
     }
 
     /// Builds a call through a `<callable>` value as `called`: arguments at
@@ -9823,10 +10139,19 @@ impl Lowering {
                 ),
             );
         };
+        // Keyword arguments cross boxed: the value's entry checks each, and
+        // fills the default of one passed as `$unsupplied`.
+        let mut arg_kinds = called.params.clone();
+        arg_kinds.extend(called.keywords.iter().map(|_| ValueKind::Any));
         let call = Expr::CallableCall {
             callable: Box::new(target),
             args,
-            arg_kinds: called.params.clone(),
+            arg_kinds,
+            keywords: called
+                .keywords
+                .iter()
+                .map(|keyword| keyword.name.clone())
+                .collect(),
             result_callable_sigs: called.result_sigs.clone(),
             result_kinds: checks.iter().map(CallableResultCheck::wire_kind).collect(),
             span,
@@ -12544,6 +12869,7 @@ impl Lowering {
                         results: results.kinds,
                         result_sigs: results.callable_sigs,
                         result_ranges: results.ranges,
+                        keywords: Vec::new(),
                     }),
                     range: None,
                 }
@@ -13004,30 +13330,44 @@ impl Lowering {
     fn known_callable_signature(&self, callable: KnownCallable) -> Option<CallableSignature> {
         match callable {
             KnownCallable::DirectFunction(function) => {
-                self.functions
-                    .get(function.0 as usize)
-                    .map(|function| CallableSignature {
-                        params: function.param_kinds.clone(),
-                        param_sigs: function.param_callable_sigs.clone(),
-                        param_ranges: function.param_ranges.clone(),
-                        results: function.return_kinds.clone(),
-                        result_sigs: function.return_callable_sigs.clone(),
-                        result_ranges: function.return_ranges.clone(),
-                    })
+                self.functions.get(function.0 as usize).map(|function| {
+                    let names = self
+                        .keyword_functions
+                        .iter()
+                        .find(|(owner, _)| *owner == function.name)
+                        .map(|(_, signature)| keyword_names(signature))
+                        .unwrap_or_default();
+                    split_keywords(
+                        CallableSignature {
+                            params: function.param_kinds.clone(),
+                            param_sigs: function.param_callable_sigs.clone(),
+                            param_ranges: function.param_ranges.clone(),
+                            results: function.return_kinds.clone(),
+                            result_sigs: function.return_callable_sigs.clone(),
+                            result_ranges: function.return_ranges.clone(),
+                            keywords: Vec::new(),
+                        },
+                        names,
+                    )
+                })
             }
             KnownCallable::GenericFunction(generic) => {
                 self.generic_symbols.get(generic.0 as usize).map(|generic| {
                     let params = (0..generic.arity())
                         .map(|index| self.generic_callable_arg_kind(generic.id, index))
                         .collect::<Vec<_>>();
-                    CallableSignature {
-                        param_sigs: vec![None; params.len()],
-                        param_ranges: generic.param_ranges.clone(),
-                        params,
-                        results: generic.return_kinds.clone(),
-                        result_sigs: generic.return_callable_sigs.clone(),
-                        result_ranges: generic.return_ranges.clone(),
-                    }
+                    split_keywords(
+                        CallableSignature {
+                            param_sigs: vec![None; params.len()],
+                            param_ranges: generic.param_ranges.clone(),
+                            params,
+                            results: generic.return_kinds.clone(),
+                            result_sigs: generic.return_callable_sigs.clone(),
+                            result_ranges: generic.return_ranges.clone(),
+                            keywords: Vec::new(),
+                        },
+                        self.generic_keyword_names(generic),
+                    )
                 })
             }
             KnownCallable::SlotAccessor { class, slot, .. } => {
@@ -13040,6 +13380,7 @@ impl Lowering {
                     results: vec![slot.kind],
                     result_sigs: vec![slot.callable_signature.clone()],
                     result_ranges: vec![slot.range],
+                    keywords: Vec::new(),
                 })
             }
         }
@@ -13078,8 +13419,11 @@ impl Lowering {
         expected: &CallableSignature,
         actual: &CallableSignature,
     ) -> Option<SignatureMismatch> {
+        // A value's typed entry takes its keywords, boxed, after its
+        // required parameters, so callers must agree on them exactly.
         if expected.params.len() != actual.params.len()
             || expected.results.len() != actual.results.len()
+            || expected.keywords != actual.keywords
         {
             return Some(SignatureMismatch::Incompatible);
         }
@@ -13293,10 +13637,18 @@ impl Lowering {
     }
 
     fn callable_signature_name(&self, signature: &CallableSignature) -> String {
-        let params = (0..signature.params.len())
+        let mut params = (0..signature.params.len())
             .map(|index| self.signature_value_name(signature.param_value(index)))
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>();
+        for (index, keyword) in signature.keywords.iter().enumerate() {
+            let prefix = if index == 0 { "#key " } else { "" };
+            params.push(format!(
+                "{prefix}{} :: {}",
+                keyword.name,
+                self.kind_name(keyword.kind)
+            ));
+        }
+        let params = params.join(", ");
         let results = (0..signature.results.len())
             .map(|index| self.signature_value_name(signature.result_value(index)))
             .collect::<Vec<_>>();
@@ -14445,7 +14797,21 @@ mod tests {
         let select_error = class(&module, "<select-error>");
         assert_eq!(select_error.superclass, Some(error));
         assert_eq!(select_error.id.0, no_method.id.0 + 1);
-        assert_eq!(select_error.id.0 as usize, module.classes.len() - 1);
+        let unknown_keyword = class(&module, "<unknown-keyword-error>");
+        assert_eq!(unknown_keyword.superclass, Some(error));
+        assert_eq!(unknown_keyword.id.0, select_error.id.0 + 1);
+        assert_eq!(unknown_keyword.id.0 as usize, module.classes.len() - 1);
+        assert_eq!(
+            unknown_keyword
+                .effective_slots
+                .iter()
+                .map(|slot| (slot.name.as_str(), slot.kind))
+                .collect::<Vec<_>>(),
+            [(
+                "unknown-keyword-error-keyword",
+                ValueKind::Symbol(class_id(&module, "<symbol>"))
+            )]
+        );
         assert_eq!(
             select_error
                 .effective_slots
