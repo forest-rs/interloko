@@ -6661,12 +6661,22 @@ impl<'module> BodyLowering<'module> {
     ) -> Result<Value, LowerError> {
         let expected = self.value_kind_with_callable_signature(kind, callable_signature)?;
         let value = self.lower_expr(value)?;
-        let value = self.coerce_value(value, expected, span)?;
+        let mut value = self.coerce_value(value, expected, span)?;
         let home = self
             .local_regs
             .get(local.0 as usize)
             .and_then(|value| *value)
             .ok_or_else(|| invalid_semantic("local was assigned before its binding"))?;
+        // A callable of a known signature, such as a named function, goes
+        // into a local of the plain kind as it is: the register is the same,
+        // and the local promises only its own kind.
+        if matches!(
+            (value.kind, home.kind),
+            (ValueKind::Function(Some(_)), ValueKind::Function(None))
+                | (ValueKind::Closure(Some(_)), ValueKind::Closure(None))
+        ) {
+            value.kind = home.kind;
+        }
         if self.current_local(local).is_some_and(|local| local.shared) {
             self.instructions.push(Instr::CellSet {
                 cell: home.reg,

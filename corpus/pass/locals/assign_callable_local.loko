@@ -1,0 +1,19 @@
+// expect: run 6
+// expect: diagnostics 0
+
+// A `<function>` parameter or local may be assigned a named function or a
+// `method`, whose signatures it does not need to know.
+
+define function one() => <integer> 1 end;
+define function two() => <integer> 2 end;
+
+define function swapped(f :: <function>) => <integer>
+  let g :: <function> = f;
+  f := two;
+  g := method () => <integer> 3 end;
+  f() + g()
+end;
+
+define function main() => <integer>
+  swapped(one) + one()
+end;
