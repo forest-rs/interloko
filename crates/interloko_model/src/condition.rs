@@ -17,6 +17,7 @@
 //!       <immutable-collection-error>
 //!       <collection-modified-error>
 //!       <constant-cycle-error>
+//!       <unknown-keyword-error>
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
@@ -34,8 +35,10 @@
 //! while a `for` loop iterated it ([`COLLECTION_MODIFIED_CODE`]). A
 //! `<constant-cycle-error>` reports a constant read while its own
 //! initializer was running: the constant, the definition whose code read
-//! it, and the stable code [`CONSTANT_CYCLE_CODE`]. Their slots are
-//! read-only, so they add no setter generics to a program.
+//! it, and the stable code [`CONSTANT_CYCLE_CODE`]. An
+//! `<unknown-keyword-error>` reports a call through a callable value that
+//! passed a keyword its callee does not take: the keyword, as a symbol.
+//! Their slots are read-only, so they add no setter generics to a program.
 //!
 //! A send never finds several equally specific methods: a module whose
 //! methods could be ambiguous for some arguments does not compile
@@ -73,6 +76,9 @@ pub enum ConditionClass {
     /// `<division-by-zero-error>`: an integer division's divisor was zero.
     /// Its `use-value` restart supplies the division's results.
     DivisionByZeroError,
+    /// `<unknown-keyword-error>`: a call through a callable value passed a
+    /// keyword its callee does not take.
+    UnknownKeywordError,
 }
 
 impl ConditionClass {
@@ -91,6 +97,7 @@ impl ConditionClass {
         Self::CollectionModifiedError,
         Self::ConstantCycleError,
         Self::DivisionByZeroError,
+        Self::UnknownKeywordError,
     ];
 
     /// Returns the Loko-visible class name.
@@ -107,6 +114,7 @@ impl ConditionClass {
             Self::CollectionModifiedError => "<collection-modified-error>",
             Self::ConstantCycleError => "<constant-cycle-error>",
             Self::DivisionByZeroError => "<division-by-zero-error>",
+            Self::UnknownKeywordError => "<unknown-keyword-error>",
         }
     }
 
@@ -124,6 +132,7 @@ impl ConditionClass {
             b"<collection-modified-error>" => Some(Self::CollectionModifiedError),
             b"<constant-cycle-error>" => Some(Self::ConstantCycleError),
             b"<division-by-zero-error>" => Some(Self::DivisionByZeroError),
+            b"<unknown-keyword-error>" => Some(Self::UnknownKeywordError),
             _ => None,
         }
     }
@@ -142,7 +151,8 @@ impl ConditionClass {
             | Self::ImmutableCollectionError
             | Self::CollectionModifiedError
             | Self::ConstantCycleError
-            | Self::DivisionByZeroError => Some(Self::Error),
+            | Self::DivisionByZeroError
+            | Self::UnknownKeywordError => Some(Self::Error),
         }
     }
 
@@ -159,6 +169,7 @@ impl ConditionClass {
             Self::CollectionModifiedError => &COLLECTION_MODIFIED_ERROR_SLOTS,
             Self::ConstantCycleError => &CONSTANT_CYCLE_ERROR_SLOTS,
             Self::DivisionByZeroError => &DIVISION_BY_ZERO_ERROR_SLOTS,
+            Self::UnknownKeywordError => &UNKNOWN_KEYWORD_ERROR_SLOTS,
         }
     }
 }
@@ -248,6 +259,14 @@ pub const NO_APPLICABLE_METHOD_SLOTS: [ConditionSlot; 3] = [
         init_keyword: "code",
     },
 ];
+
+/// The slot of `<unknown-keyword-error>`: the keyword the call passed, as
+/// a `<symbol>`.
+pub const UNKNOWN_KEYWORD_ERROR_SLOTS: [ConditionSlot; 1] = [ConditionSlot {
+    name: "unknown-keyword-error-keyword",
+    type_name: "<symbol>",
+    init_keyword: "keyword",
+}];
 
 /// The slot of `<select-error>`: the target value that matched no key, as
 /// an `<object>`.

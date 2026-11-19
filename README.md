@@ -243,10 +243,16 @@ The current slices include:
   #key scale :: <integer> = 1)`), a send fills the defaults from the
   generic, a method binds any of them under the generic's types and gives
   none of its own, and dispatch looks only at the required parameters.
-  Calls through callable values pass no keywords yet, so an anonymous
-  function cannot declare them and a function or generic that takes them
-  cannot be used as a value; a keyword its callee does not take, or one
-  passed twice, is an error;
+  A function or generic that takes keywords is a value like any other:
+  a call through a value of known signature passes every keyword, boxed
+  and in declaration order, `$unsupplied` for those it leaves out, and the
+  value's entry fills their defaults and checks their types; a call
+  through an untyped `<callable>` passes the keywords it names, by name, in
+  a tail every boxed entry takes, and a value that does not take one
+  signals `<unknown-keyword-error>`, which holds the keyword, rather than
+  dropping it. `apply` passes no keywords. Statically, a keyword its
+  callee does not take, or one passed twice, is an error. Anonymous
+  functions cannot declare keywords yet;
 - Dylan's class and generic adjectives: `define abstract class` (no direct
   instances, so `make` refuses it), `define sealed class` and `define
   sealed generic`, with `open` and `concrete` as the explicit defaults.
@@ -487,12 +493,12 @@ The current slices include:
   collection whatever `c` is, and a program's method takes it as `#key
   default`, testing `default == $unsupplied` when the call passed none. A
   typed `c[k]` runs the kernel's plain operation inline, without testing
-  for a default. Like any generic that takes keywords, `element` cannot be
-  used as a value yet;
+  for a default;
 - recoverable condition/restart forms, with `<condition>`, `<error>`,
   `<type-error>`, `<no-applicable-method>`, `<select-error>`,
   `<not-found-error>`, `<immutable-collection-error>`,
-  `<collection-modified-error>` and `<constant-cycle-error>` defined by
+  `<collection-modified-error>`, `<constant-cycle-error>` and
+  `<unknown-keyword-error>` defined by
   the kernel: a runtime check that fails (a cast, a callable value's argument or result,
   a range, an overflow) signals a `<type-error>` naming the value, the
   expected type (a type object: a class, a `<limited-integer>` or a

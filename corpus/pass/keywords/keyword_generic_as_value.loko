@@ -1,0 +1,20 @@
+// expect: run 15
+// expect: diagnostics 0
+// A generic that takes keywords is a value too: its entry fills the
+// generic's defaults and sends.
+
+define generic area (s, #key scale :: <integer> = 1) => <integer>;
+
+define method area (s :: <integer>, #key scale :: <integer>) => <integer>
+  s * scale
+end;
+
+define function use(f :: <callable>) => <integer>
+  let a :: <integer> = f(3);
+  let b :: <integer> = f(3, scale: 4);
+  a + b
+end;
+
+define function main() => <integer>
+  use(area)
+end;

@@ -81,8 +81,8 @@ pub enum DiagnosticCode {
     AstInvalidSignal,
     /// `:=` was used with something other than a local name or an object slot.
     AstInvalidSlotAssignment,
-    /// An anonymous function declares `#key` parameters, which no call
-    /// through a callable value can pass yet.
+    /// An anonymous function declares `#key` parameters, which only
+    /// defined functions take yet.
     AstAnonymousKeywordParameter,
     /// A definition repeats an adjective, as in `define sealed sealed class`.
     AstDuplicateAdjective,
@@ -261,12 +261,6 @@ pub enum DiagnosticCode {
     /// A method declares a keyword parameter with a type other than its
     /// generic's.
     MethodKeywordTypeMismatch,
-    /// A function or generic that takes keyword parameters is used as a
-    /// callable value, whose calls pass no keywords yet.
-    KeywordCallableValue,
-    /// A call through a callable value passes a keyword argument, which
-    /// callable values do not take yet.
-    CallableKeywordArgument,
     /// A method of a built-in collection generic specializes on a kernel
     /// class the generic already has a kernel method for.
     CollectionMethodOverridesKernel,
@@ -488,8 +482,6 @@ impl DiagnosticCode {
         Self::MethodKeywordNotInGeneric,
         Self::MethodKeywordDefault,
         Self::MethodKeywordTypeMismatch,
-        Self::KeywordCallableValue,
-        Self::CallableKeywordArgument,
         Self::CollectionMethodOverridesKernel,
         Self::ForClauseTypeMismatch,
         Self::SlotDefaultTypeMismatch,
@@ -649,8 +641,6 @@ impl DiagnosticCode {
             Self::MethodKeywordNotInGeneric => "sem.method-keyword-not-in-generic",
             Self::MethodKeywordDefault => "sem.method-keyword-default",
             Self::MethodKeywordTypeMismatch => "sem.method-keyword-type-mismatch",
-            Self::KeywordCallableValue => "sem.keyword-callable-value",
-            Self::CallableKeywordArgument => "sem.callable-keyword-argument",
             Self::CollectionMethodOverridesKernel => "sem.collection-method-overrides-kernel",
             Self::ForClauseTypeMismatch => "sem.for-clause-type-mismatch",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
@@ -811,8 +801,6 @@ impl DiagnosticCode {
             "sem.method-keyword-not-in-generic" => Self::MethodKeywordNotInGeneric,
             "sem.method-keyword-default" => Self::MethodKeywordDefault,
             "sem.method-keyword-type-mismatch" => Self::MethodKeywordTypeMismatch,
-            "sem.keyword-callable-value" => Self::KeywordCallableValue,
-            "sem.callable-keyword-argument" => Self::CallableKeywordArgument,
             "sem.collection-method-overrides-kernel" => Self::CollectionMethodOverridesKernel,
             "sem.for-clause-type-mismatch" => Self::ForClauseTypeMismatch,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,

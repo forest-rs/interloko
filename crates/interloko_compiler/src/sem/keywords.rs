@@ -38,9 +38,22 @@
 //! keyword was passed declares it without a default and compares it with
 //! `$unsupplied` using `==`.
 //!
-//! An anonymous function cannot take keyword parameters, and a function or
-//! generic that takes them cannot be used as a callable value: calls through
-//! callable values pass no keywords yet.
+//! # Keyword callables as values
+//!
+//! A function or generic that takes keywords is a callable value like any
+//! other. Its value's signature lists its keywords after its parameters,
+//! and its typed entry takes each boxed: a call through a value of known
+//! signature passes every keyword in declaration order, `$unsupplied` for
+//! those it does not pass, and the entry calls the default function of
+//! each `$unsupplied` one, in declaration order, and checks the type of
+//! each other. A call through an untyped `<callable>` passes the keywords
+//! it names in its boxed entry's keyword tail: their names and values, in
+//! source order. Every boxed entry takes a tail; a value that takes
+//! keywords reads it by name, and any value signals
+//! `<unknown-keyword-error>` for a keyword it does not take. `apply`
+//! passes no keywords.
+//!
+//! An anonymous function cannot take keyword parameters yet.
 //!
 //! [`desugar`] rewrites an AST module into this convention before semantic
 //! lowering: keyword parameters become trailing required parameters, and

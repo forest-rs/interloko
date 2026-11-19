@@ -1,0 +1,28 @@
+// expect: run 99
+// expect: diagnostics 0
+// A call through a value that passes a keyword its callee does not take
+// signals `<unknown-keyword-error>`, holding the keyword, rather than
+// dropping it.
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function pass-by(f :: <callable>) => <integer>
+  let r :: <integer> = f(1, by: 2);
+  r
+end;
+
+define function call(f :: <callable>) => <integer>
+  block (done)
+    handle
+      pass-by(f)
+    with restart e :: <unknown-keyword-error>
+      done(if (unknown-keyword-error-keyword(e) == #by) 99 else 0 end)
+    end
+  end
+end;
+
+define function main() => <integer>
+  call(inc)
+end;

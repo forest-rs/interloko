@@ -127,15 +127,15 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
             args: function
                 .params
                 .iter()
-                .map(|param| abi_ref(param.kind, abi.callable))
+                .map(|param| abi_ref(param.kind, abi.kinds))
                 .collect(),
             rets: function
                 .rets
                 .iter()
-                .map(|kind| abi_ref(*kind, abi.callable))
+                .map(|kind| abi_ref(*kind, abi.kinds))
                 .collect(),
         };
-        if let Some(environment) = closure_env_contract(function, abi.callable, &mut builder)? {
+        if let Some(environment) = closure_env_contract(function, abi.kinds, &mut builder)? {
             signature.args[0] = environment.into();
         }
         let func = builder.declare_function(signature).map_err(build_error)?;
@@ -248,6 +248,8 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
         lower::ValueKind::Entry => ValueType::Closure,
         lower::ValueKind::Aggregate => ValueType::Agg,
         lower::ValueKind::Exn => ValueType::Exn,
+        lower::ValueKind::Str => ValueType::Str,
+        lower::ValueKind::Array(_) => ValueType::Agg,
         lower::ValueKind::Object(_) => runtime::object_type(),
         lower::ValueKind::ClassObject(_)
         | lower::ValueKind::GenericFunctionObject(_)
@@ -256,12 +258,60 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
     }
 }
 
+/// The contracts of the registers whose kind alone does not say what they
+/// hold: callable values and tape arrays.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct KindContracts {
+    /// Every callable value register's ([`callable_contract`]).
+    callable: ContractId,
+    /// An array of tape strings, and its element type.
+    str_array: (ElemTypeId, ContractId),
+    /// An array of boxed `<object>` values, and its element type.
+    any_array: (ElemTypeId, ContractId),
+}
+
+impl KindContracts {
+    fn declare(builder: &mut ProgramBuilder) -> Result<Self, TapeError> {
+        let mut array = |element: ValueType| {
+            let elem_type_id = builder.array_elem(element);
+            let element = builder
+                .contract(Contract::Kind(element))
+                .map_err(build_error)?;
+            let array = builder
+                .contract(Contract::Array {
+                    elem_type_id,
+                    element,
+                })
+                .map_err(build_error)?;
+            Ok::<_, TapeError>((elem_type_id, array))
+        };
+        let str_array = array(ValueType::Str)?;
+        let any_array = array(runtime::any_type())?;
+        Ok(Self {
+            callable: callable_contract(builder)?,
+            str_array,
+            any_array,
+        })
+    }
+
+    /// The element type of an array of `kind`.
+    const fn elem(self, kind: lower::ArrayKind) -> ElemTypeId {
+        match kind {
+            lower::ArrayKind::Str => self.str_array.0,
+            lower::ArrayKind::Any => self.any_array.0,
+        }
+    }
+}
+
 /// What a register of `kind` holds at a function or call boundary: its
 /// kind, or for a callable value the `callable` contract, so the code that
-/// receives one can open it ([`lower::FunctionKind::CallableParts`]).
-fn abi_ref(kind: lower::ValueKind, callable: ContractId) -> ContractRef {
+/// receives one can open it ([`lower::FunctionKind::CallableParts`]), and
+/// for an array its element contract.
+fn abi_ref(kind: lower::ValueKind, contracts: KindContracts) -> ContractRef {
     match kind {
-        lower::ValueKind::Closure(_) => callable.into(),
+        lower::ValueKind::Closure(_) => contracts.callable.into(),
+        lower::ValueKind::Array(lower::ArrayKind::Str) => contracts.str_array.1.into(),
+        lower::ValueKind::Array(lower::ArrayKind::Any) => contracts.any_array.1.into(),
         kind => ContractRef::Kind(value_type(kind)),
     }
 }
@@ -282,7 +332,7 @@ fn callable_contract(builder: &mut ProgramBuilder) -> Result<ContractId, TapeErr
 
 fn closure_env_contract(
     function: &lower::Function,
-    callable: ContractId,
+    callable: KindContracts,
     builder: &mut ProgramBuilder,
 ) -> Result<Option<ContractId>, TapeError> {
     if !matches!(
@@ -521,11 +571,11 @@ fn declare_miss_stub(
         .map(|param| param.kind)
         .collect::<Vec<_>>();
     let mut args = vec![ContractRef::Kind(ValueType::U64); 1 + keys];
-    args.extend(params.iter().map(|kind| abi_ref(*kind, abi.callable)));
+    args.extend(params.iter().map(|kind| abi_ref(*kind, abi.kinds)));
     let rets = dispatcher
         .rets
         .iter()
-        .map(|kind| abi_ref(*kind, abi.callable))
+        .map(|kind| abi_ref(*kind, abi.kinds))
         .collect::<Vec<_>>();
     let stub = builder
         .declare_function(FunctionAbi {
@@ -540,7 +590,7 @@ fn declare_miss_stub(
         .call_sig(FunctionAbi {
             args: params
                 .iter()
-                .map(|kind| abi_ref(*kind, abi.callable))
+                .map(|kind| abi_ref(*kind, abi.kinds))
                 .collect(),
             rets,
         })
@@ -641,8 +691,8 @@ fn method_link_name(layout: &RuntimeLayout, method: sem::MethodId) -> String {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AbiTables {
-    /// The contract of every callable value register ([`callable_contract`]).
-    callable: ContractId,
+    /// The contracts of callable value and array registers.
+    kinds: KindContracts,
     make_object: HostSigId,
     class_count: usize,
     class_of: HostSigId,
@@ -1139,7 +1189,7 @@ impl AbiTables {
             })
             .collect();
         Ok(Self {
-            callable: callable_contract(builder)?,
+            kinds: KindContracts::declare(builder)?,
             make_object,
             class_count: module.runtime.classes.len(),
             class_of,
@@ -1514,6 +1564,16 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             RuntimeOp::Unsupplied,
             runtime::UNSUPPLIED,
             runtime::unsupplied_signature(),
+        ),
+        (
+            RuntimeOp::IsUnsupplied,
+            runtime::IS_UNSUPPLIED,
+            runtime::is_unsupplied_signature(),
+        ),
+        (
+            RuntimeOp::InternSymbol,
+            runtime::SYMBOL_LITERAL,
+            runtime::symbol_literal_signature(),
         ),
     ]
     .into_iter()
@@ -2069,7 +2129,9 @@ impl<'a> FunctionEmitter<'a> {
                     | lower::ValueKind::Function(_)
                     | lower::ValueKind::Entry
                     | lower::ValueKind::Aggregate
-                    | lower::ValueKind::Exn => {
+                    | lower::ValueKind::Exn
+                    | lower::ValueKind::Str
+                    | lower::ValueKind::Array(_) => {
                         return Err(invalid_lowered("invalid boxed value input kind"));
                     }
                 };
@@ -2462,7 +2524,7 @@ impl<'a> FunctionEmitter<'a> {
                 rets,
                 span,
             } => {
-                let callable = self.abi.callable;
+                let callable = self.abi.kinds;
                 let sig = self
                     .builder
                     .call_sig(FunctionAbi {
@@ -2751,6 +2813,51 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 self.set_span(*span);
                 self.asm.u64_eq(*dst, *lhs, *rhs);
+            }
+            lower::Instr::AddU64 {
+                dst,
+                lhs,
+                rhs,
+                span,
+            } => {
+                self.set_span(*span);
+                self.asm.u64_add(*dst, *lhs, *rhs);
+            }
+            lower::Instr::ConstStr { dst, value, span } => {
+                let value = self.builder.const_str(value);
+                self.set_span(*span);
+                self.asm.const_pool(*dst, value);
+            }
+            lower::Instr::StrEq {
+                dst,
+                lhs,
+                rhs,
+                span,
+            } => {
+                self.set_span(*span);
+                self.asm.str_eq(*dst, *lhs, *rhs);
+            }
+            lower::Instr::ArrayNew {
+                dst,
+                kind,
+                values,
+                span,
+            } => {
+                self.set_span(*span);
+                self.asm.array_new(*dst, self.abi.kinds.elem(*kind), values);
+            }
+            lower::Instr::ArrayLen { dst, array, span } => {
+                self.set_span(*span);
+                self.asm.array_len(*dst, *array);
+            }
+            lower::Instr::ArrayGet {
+                dst,
+                array,
+                index,
+                span,
+            } => {
+                self.set_span(*span);
+                self.asm.array_get(*dst, *array, *index);
             }
             lower::Instr::Branch {
                 cond,

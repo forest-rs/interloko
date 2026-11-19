@@ -1,0 +1,20 @@
+// expect: run 36
+// expect: diagnostics 0
+// A function that takes keywords is a value like any other. A call through
+// a `<callable>` passes the keywords it names to the value's boxed entry,
+// whose tail they travel in, and the value fills the defaults of those it
+// does not pass.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2) => <integer>
+  x * by
+end;
+
+define function twice(f :: <callable>, x :: <integer>) => <integer>
+  let a :: <integer> = f(x);
+  let b :: <integer> = f(x, by: 10);
+  a + b
+end;
+
+define function main() => <integer>
+  twice(scale, 3)
+end;
