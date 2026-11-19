@@ -1,6 +1,6 @@
 // expect: run 161.0
 // expect: diagnostics 0
-// expect: dump lowered contains take-i32#closure#boxed(%r1 $env: agg, %r2 arg0: any, %r3 $keywords: array(str), %r4 $keyword-values: array(any)) -> any
+// expect: dump lowered contains take-i32#closure#boxed(%r1 $env: agg, %r2 arg0: any) -> any
 
 // An untyped call whose shape differs from the callee's passes and returns
 // its values boxed, so a value of the class a function declares reaches it
