@@ -283,9 +283,11 @@ pub enum ValueKind {
 ///
 /// The call fails with the check-failed tag; the failure signals
 /// `type_error` for the argument and a `use-value` replacement for it, in
-/// the argument's register type, is written to the argument's register,
-/// which is the call's own copy, and the call is made again. The operation
-/// checks every argument it is given, so any replacement is safe.
+/// the argument's register type, is written to the call's own copy of the
+/// argument, which the backend makes, and the call is made again. The
+/// argument's register itself, which may be a local's, is never written.
+/// The operation checks every argument it is given, so any replacement is
+/// safe.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextCheck {
     /// The checked argument's kind, which says how to box it for the
@@ -8223,14 +8225,6 @@ impl<'module> BodyLowering<'module> {
                 ));
             }
             if checked == Some(index) {
-                // A replacement is written to the argument's register, so
-                // the call gets a copy: the argument may be a local's.
-                let copy = self.alloc(value.kind);
-                self.instructions.push(Instr::Move {
-                    dst: copy.reg,
-                    src: value.reg,
-                    span,
-                });
                 // The class the argument should have named: a character, or
                 // a position in the string.
                 let expected = match function {
@@ -8250,7 +8244,6 @@ impl<'module> BodyLowering<'module> {
                         span,
                     ),
                 }));
-                value = copy;
             }
             regs.push(value.reg);
         }
@@ -8699,18 +8692,12 @@ impl<'module> BodyLowering<'module> {
             _ => return Ok(value),
         };
         let result = self.alloc(value.kind);
-        let copy = self.alloc(value.kind);
-        self.instructions.push(Instr::Move {
-            dst: copy.reg,
-            src: value.reg,
-            span,
-        });
         let class = builtin_class(self.module, class)
             .ok_or_else(|| invalid_semantic("a text class is missing"))?;
         self.instructions.push(Instr::TextCall {
             dst: result.reg,
             function,
-            args: vec![copy.reg],
+            args: vec![value.reg],
             check: Some(Box::new(TextCheck {
                 kind: value.kind,
                 type_error: type_error_site(

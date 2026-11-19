@@ -23921,6 +23921,36 @@ end;
     }
 
     #[test]
+    fn a_replaced_position_leaves_the_local_it_came_from() {
+        // `p` is inside `é`, so reading it signals; the replacement is read
+        // instead, but `p` itself still holds offset 1 afterwards.
+        let artifacts = CompilerSession::compile_source(
+            "local.loko",
+            "define function main() => <integer>\n  \
+             let s = \"\u{e9}!\";\n  \
+             let p = position-at(\"abc\", 1);\n  \
+             let c = s[p];\n  \
+             byte-offset(p) * 1000 + as(<integer>, c)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut breaks = 0;
+            let mut chooser = Scripted(|_: &UnhandledCondition<'_>| {
+                breaks += 1;
+                Choice::UseValue(vec![Value::I64(0)])
+            });
+            assert_eq!(
+                call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes"),
+                FunctionValue::Integer(1000 + 0xE9),
+                "{policy:?}"
+            );
+            assert_eq!(breaks, 1, "{policy:?}");
+        }
+    }
+
+    #[test]
     fn string_reads_agree_with_the_runtime_at_every_position() {
         // A read is made at an offset inside `é`, which signals; the
         // `use-value` replacement is the position under test, decoded in
