@@ -20714,6 +20714,37 @@ mod tests {
         assert!(report(&update, QueryArtifact::DefinitionTyping(other)));
     }
 
+    /// A send fills a generic's defaults the same way, so editing one
+    /// changes only the generic's default function.
+    #[test]
+    fn a_generic_keyword_default_edit_changes_only_its_default_function() {
+        const AREA: &str = "define generic area(s, #key scale :: <integer> = 1) => <integer>;\n\
+            define method area(s :: <integer>, #key scale :: <integer>) => <integer>\n  \
+            s * scale\nend;\n\
+            define function main() => <integer>\n  area(3)\nend;";
+        let mut session = IncrementalCompilerSession::new();
+        let id = session.add_source("area.loko", AREA);
+        let first = session
+            .compile(id, RuntimeMode::CompileOnly)
+            .expect("source was just added");
+        assert!(first.artifacts.diagnostics.is_empty());
+        let update = session
+            .edit_and_compile(id, &AREA.replace("= 1)", "= 4)"), RuntimeMode::CompileOnly)
+            .expect("source exists");
+        assert!(!update.artifacts.has_errors());
+        let default = function_definition(&update.artifacts, "area #key scale");
+        let main = function_definition(&update.artifacts, "main");
+        let diff = update.diff.as_ref().expect("second compile has a diff");
+        let changed = diff
+            .changed
+            .iter()
+            .map(|change| change.definition.id)
+            .collect::<Vec<_>>();
+        assert_eq!(changed, vec![default]);
+        let report = |artifact| cache_report(&update, artifact).expect("artifact report");
+        assert!(!report(QueryArtifact::DefinitionTyping(main)).affected);
+    }
+
     #[test]
     fn a_range_only_edit_reports_what_assumed_the_range() {
         const RANGES: &str = "define class <dial> (<object>)\n  \

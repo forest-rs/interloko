@@ -1,0 +1,8 @@
+// expect: diagnostic code sem.reserved-name
+// expect: diagnostics 1
+// A local cannot be named `$unsupplied` either.
+
+define function main() => <integer>
+  let $unsupplied = 7;
+  1
+end;

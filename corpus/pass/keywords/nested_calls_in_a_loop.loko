@@ -1,0 +1,30 @@
+// expect: run 431
+// expect: diagnostics 0
+// A keyword call nested in another's arguments, inside a loop, evaluates
+// each call's arguments in source order and then its defaults, on every
+// iteration.
+
+define class <log> (<object>)
+  slot n :: <integer>, init-keyword: n:;
+end;
+
+define function note(log :: <log>, digit :: <integer>) => <integer>
+  log.n := log.n * 10 + digit;
+  digit
+end;
+
+define function f(log :: <log>, #key a :: <integer> = 0, b :: <integer> = note(log, 1)) => <integer>
+  a + b
+end;
+
+define function main() => <integer>
+  let log = make(<log>, n: 0);
+  let i = 0;
+  while (i < 1)
+    // The outer call passes `b:` first, then the inner call's `a:`, then
+    // the inner call takes its `b` default.
+    f(log, b: note(log, 4), a: f(log, a: note(log, 3)));
+    i := i + 1
+  end;
+  log.n
+end;

@@ -1,0 +1,12 @@
+// expect: diagnostic code sem.unresolved-class
+// expect: diagnostics 1
+// Each default runs in a hidden function that restates its owner's
+// parameter types, but a problem with one is reported once, at the owner.
+
+define function f(x :: <nope>, #key by :: <integer> = 2, c :: <integer> = 3) => <integer>
+  by + c
+end;
+
+define function main() => <integer>
+  1
+end;

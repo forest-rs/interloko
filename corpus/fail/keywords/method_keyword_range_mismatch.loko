@@ -1,0 +1,15 @@
+// expect: diagnostic code sem.method-keyword-type-mismatch
+// expect: diagnostics 1
+// expect: diagnostic contains limited(<integer>, min: 0, max: 9)
+// A method's keyword cannot narrow or widen its generic's range: the send
+// checks only the generic's.
+
+define generic g (s, #key k :: limited(<integer>, min: 0, max: 9) = 3) => <integer>;
+
+define method g (s :: <integer>, #key k :: limited(<integer>, min: 0, max: 5)) => <integer>
+  k
+end;
+
+define function main() => <integer>
+  g(1)
+end;
