@@ -453,7 +453,6 @@ struct AbiTables {
     symbol_literal_consts: Vec<(String, ConstId)>,
     vector_literal: Option<(HostSigId, ElemTypeId)>,
     value_eq: HostSigId,
-    identical: HostSigId,
     runtime_calls: Vec<(lower::RuntimeOp, HostSigId)>,
     host_functions: Vec<HostSigId>,
     float_functions: Vec<(sem::FloatFunction, HostSigId)>,
@@ -913,7 +912,6 @@ impl AbiTables {
         });
         let vector_literal = vector_literal_sig(builder, module);
         let value_eq = builder.host_sig_for(runtime::VALUE_EQ, runtime::value_eq_signature());
-        let identical = builder.host_sig_for(runtime::IDENTICAL, runtime::identical_signature());
         let runtime_calls = runtime_call_sigs(builder);
         let float_functions = float_function_sigs(builder, module);
         let tags = SharedTags::import(builder)?;
@@ -949,7 +947,6 @@ impl AbiTables {
             symbol_literal_consts,
             vector_literal,
             value_eq,
-            identical,
             runtime_calls,
             host_functions,
             float_functions,
@@ -1847,14 +1844,14 @@ impl<'a> FunctionEmitter<'a> {
                 rhs,
                 span,
             } => {
+                // Declared at its first use, so a module that never compares
+                // identities does not install it.
+                let sig = self
+                    .builder
+                    .host_sig_for(runtime::IDENTICAL, runtime::identical_signature());
                 self.set_span(*span);
-                self.asm.host_call(
-                    Reg::EFFECT,
-                    self.abi.identical,
-                    Reg::EFFECT,
-                    &[*lhs, *rhs],
-                    &[*dst],
-                );
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*lhs, *rhs], &[*dst]);
             }
             lower::Instr::Call {
                 dsts,
