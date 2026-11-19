@@ -558,7 +558,9 @@ fn collect_expr(expr: &ast::Expr, binders: &mut Vec<Binder>) {
             collect_expr(receiver, binders);
             collect_expr(value, binders);
         }
-        Expr::Binary { lhs, rhs, .. } | Expr::Compare { lhs, rhs, .. } => {
+        Expr::Binary { lhs, rhs, .. }
+        | Expr::Compare { lhs, rhs, .. }
+        | Expr::Identical { lhs, rhs, .. } => {
             collect_expr(lhs, binders);
             collect_expr(rhs, binders);
         }

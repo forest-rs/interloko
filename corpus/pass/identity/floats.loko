@@ -1,0 +1,23 @@
+// expect: run 1100100
+// expect: diagnostics 0
+
+// Floats are `==` when they are the same class and the same IEEE 754 bit
+// pattern. Unlike `=`, which follows IEEE 754, a NaN is `==` itself and
+// `0.0` is not `==` `-0.0`. A single-float is never `==` a double-float,
+// nor a float an integer of the same value.
+
+define function bit(b :: <boolean>) => <integer>
+  if (b) 1 else 0 end
+end;
+
+define function main() => <integer>
+  let nan = 0.0 / 0.0;
+  let boxed-nan :: <object> = as(<object>, nan);
+  bit(1.5 == 1.5) * 1000000
+    + bit(nan == nan) * 100000
+    + bit(nan = nan) * 10000
+    + bit(0.0 == -0.0) * 1000
+    + bit(boxed-nan == nan) * 100
+    + bit(1.5f32 == 1.5) * 10
+    + bit(1.0 == 1)
+end;

@@ -406,7 +406,8 @@ fn visit_exprs(expr: &sem::Expr, visit: &mut impl FnMut(&sem::Expr)) {
         E::Binary { lhs, rhs, .. }
         | E::Compare { lhs, rhs, .. }
         | E::MixedCompare { lhs, rhs, .. }
-        | E::ValueEqual { lhs, rhs, .. } => {
+        | E::ValueEqual { lhs, rhs, .. }
+        | E::Identical { lhs, rhs, .. } => {
             visit_exprs(lhs, visit);
             visit_exprs(rhs, visit);
         }

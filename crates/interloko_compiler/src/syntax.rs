@@ -128,6 +128,8 @@ pub enum TokenKind {
     StarPercent,
     /// `=`.
     Equal,
+    /// `==`, identity.
+    EqualEqual,
     /// `=>`.
     Arrow,
     /// `<`.
@@ -180,6 +182,7 @@ impl TokenKind {
             | Self::MinusPercent
             | Self::StarPercent
             | Self::Equal
+            | Self::EqualEqual
             | Self::Less
             | Self::LessEqual
             | Self::Greater
@@ -734,6 +737,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Minus => 16,
         TokenKind::Star => 17,
         TokenKind::Equal => 18,
+        TokenKind::EqualEqual => 58,
         TokenKind::Arrow => 19,
         TokenKind::Colon => 20,
         TokenKind::Assign => 45,
@@ -852,6 +856,10 @@ pub fn lex(source: &str) -> Vec<Token> {
             b'=' if bytes.get(pos + 1) == Some(&b'>') => {
                 pos += 2;
                 TokenKind::Arrow
+            }
+            b'=' if bytes.get(pos + 1) == Some(&b'=') => {
+                pos += 2;
+                TokenKind::EqualEqual
             }
             b'=' => {
                 pos += 1;
@@ -1224,6 +1232,23 @@ mod tests {
             ]
         );
         assert_eq!(texts("end-1"), [(Ident, "end-1")]);
+    }
+
+    #[test]
+    fn lex_identity_apart_from_equality_and_arrow() {
+        use TokenKind::{Arrow, Equal, EqualEqual, Ident};
+        assert_eq!(
+            texts("a == b = c => d"),
+            [
+                (Ident, "a"),
+                (EqualEqual, "=="),
+                (Ident, "b"),
+                (Equal, "="),
+                (Ident, "c"),
+                (Arrow, "=>"),
+                (Ident, "d"),
+            ]
+        );
     }
 
     #[test]

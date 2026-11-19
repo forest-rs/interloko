@@ -1441,6 +1441,17 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Identity of two boxed values, `==`.
+    Identical {
+        /// Destination register.
+        dst: Reg,
+        /// Left operand register, a boxed `<object>`.
+        lhs: Reg,
+        /// Right operand register, a boxed `<object>`.
+        rhs: Reg,
+        /// Source span.
+        span: Span,
+    },
     /// Ordinary direct call to another lowered function.
     Call {
         /// Destination registers.
@@ -3558,7 +3569,8 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
         sem::Expr::Binary { lhs, rhs, .. }
         | sem::Expr::Compare { lhs, rhs, .. }
         | sem::Expr::MixedCompare { lhs, rhs, .. }
-        | sem::Expr::ValueEqual { lhs, rhs, .. } => {
+        | sem::Expr::ValueEqual { lhs, rhs, .. }
+        | sem::Expr::Identical { lhs, rhs, .. } => {
             collect_known_callable_uses_in_expr(lhs, uses);
             collect_known_callable_uses_in_expr(rhs, uses);
         }
@@ -6053,6 +6065,20 @@ impl<'module> BodyLowering<'module> {
                     lhs: lhs.reg,
                     rhs: rhs.reg,
                     kind: self.value_kind(*kind)?,
+                    span: *span,
+                });
+                Ok(result)
+            }
+            sem::Expr::Identical { lhs, rhs, span } => {
+                let lhs = self.lower_expr(lhs)?;
+                let lhs = self.box_any(lhs, *span)?;
+                let rhs = self.lower_expr(rhs)?;
+                let rhs = self.box_any(rhs, *span)?;
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::Identical {
+                    dst: result.reg,
+                    lhs: lhs.reg,
+                    rhs: rhs.reg,
                     span: *span,
                 });
                 Ok(result)
@@ -10390,6 +10416,15 @@ impl Module {
             } => {
                 write!(f, "  %{dst} = value.eq %{lhs}, %{rhs}: ")?;
                 self.fmt_kind(f, *kind)?;
+                fmt_span(f, *span)
+            }
+            Instr::Identical {
+                dst,
+                lhs,
+                rhs,
+                span,
+            } => {
+                write!(f, "  %{dst} = identical %{lhs}, %{rhs}")?;
                 fmt_span(f, *span)
             }
             Instr::Call {

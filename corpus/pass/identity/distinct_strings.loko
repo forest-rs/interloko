@@ -1,0 +1,9 @@
+// expect: run #f
+// expect: diagnostics 0
+
+// Strings with the same text are `=` but are not the same object.
+
+define function main() => <boolean>
+  let built = concatenate("lo", "ko");
+  built == "loko"
+end;
