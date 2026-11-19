@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic contains <string-position>
+
+// Strings have no integer keys: positions come from the string functions.
+
+define function main() => <character>
+  "abc"[1]
+end;

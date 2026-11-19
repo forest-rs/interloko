@@ -15,7 +15,7 @@ use crate::syntax::{self, Span};
 mod collection;
 pub use collection::{BUILTIN_METHODS, BuiltinMethod, CollectionFunction};
 mod text;
-pub use text::{NAMED_TEXT_FUNCTIONS, text_function_for_name, text_function_name};
+pub use text::{NAMED_TEXT_FUNCTIONS, TextClasses, text_function_name, text_functions_for_name};
 
 use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
 use interloko_model::sealing::Sealing;
@@ -150,6 +150,9 @@ pub enum ValueKind {
     Bool,
     /// `<character>`: an unboxed Unicode scalar value.
     Char,
+    /// `<string-position>`: an unboxed byte offset into a string, which the
+    /// string operations check wherever it is used.
+    Position,
     /// Runtime string object.
     String(ClassId),
     /// Runtime interned symbol object.
@@ -310,6 +313,7 @@ fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
         "limited-integer-max" => Intrinsic::LimitedIntegerMax,
         "subclass-type-class" => Intrinsic::SubclassTypeClass,
         "type-name" => Intrinsic::TypeName,
+        "byte-offset" => Intrinsic::PositionToInteger,
         _ => return None,
     })
 }
@@ -340,8 +344,8 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         Intrinsic::VectorRef | Intrinsic::Concatenate | Intrinsic::InstanceOfType => 2,
         Intrinsic::VectorElementOr => 3,
         Intrinsic::Text(function) => function.params().len(),
-        Intrinsic::CharCompare(_) => 2,
-        Intrinsic::CharToInteger => 1,
+        Intrinsic::CharCompare(_) | Intrinsic::PositionCompare(_) => 2,
+        Intrinsic::CharToInteger | Intrinsic::PositionToInteger => 1,
         Intrinsic::FloatToString | Intrinsic::IntegerToString => 1,
     }
 }
@@ -389,6 +393,7 @@ fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
             .get(index)
             .map_or("<object>", |kind| text::text_kind_name(*kind)),
         (Intrinsic::CharCompare(_) | Intrinsic::CharToInteger, _) => "<character>",
+        (Intrinsic::PositionCompare(_) | Intrinsic::PositionToInteger, _) => "<string-position>",
         _ => "<object>",
     }
 }
@@ -872,6 +877,9 @@ impl Module {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Character,
             } => Some(ValueKind::Char),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::StringPosition,
+            } => Some(ValueKind::Position),
             // A value declared `<function>` is any callable value.
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Function,
@@ -895,7 +903,8 @@ impl Module {
                     | BuiltinValueClass::SlotDescriptor
                     | BuiltinValueClass::Type
                     | BuiltinValueClass::LimitedIntegerType
-                    | BuiltinValueClass::SubclassType,
+                    | BuiltinValueClass::SubclassType
+                    | BuiltinValueClass::StringBuilder,
             } => Some(ValueKind::Object(class)),
             ClassOrigin::ObjectRoot
             | ClassOrigin::Native
@@ -931,6 +940,7 @@ impl Module {
             }
             ValueKind::Bool => self.builtin_value_class(BuiltinValueClass::Boolean),
             ValueKind::Char => self.builtin_value_class(BuiltinValueClass::Character),
+            ValueKind::Position => self.builtin_value_class(BuiltinValueClass::StringPosition),
             ValueKind::Callable | ValueKind::KnownCallable(_) => {
                 self.builtin_value_class(BuiltinValueClass::Function)
             }
@@ -969,6 +979,7 @@ impl Module {
             ValueKind::F32 => builtin(BuiltinValueClass::SingleFloat),
             ValueKind::Bool => Type::union([Atom::Boolean(false), Atom::Boolean(true)], self),
             ValueKind::Char => builtin(BuiltinValueClass::Character),
+            ValueKind::Position => builtin(BuiltinValueClass::StringPosition),
             ValueKind::String(class)
             | ValueKind::Symbol(class)
             | ValueKind::Vector(class)
@@ -2797,7 +2808,8 @@ impl EntryTarget {
             | ValueKind::U32
             | ValueKind::F32
             | ValueKind::Bool
-            | ValueKind::Char => Some(Self::Unbox(kind)),
+            | ValueKind::Char
+            | ValueKind::Position => Some(Self::Unbox(kind)),
             _ => None,
         }
     }
@@ -3530,6 +3542,10 @@ pub enum Intrinsic {
     CharCompare(CompareOp),
     /// `as(<integer>, c)`: a `<character>`'s scalar value, inline.
     CharToInteger,
+    /// Compares two `<string-position>`s by byte offset, inline.
+    PositionCompare(CompareOp),
+    /// `byte-offset(p)`: a `<string-position>`'s byte offset, inline.
+    PositionToInteger,
 }
 
 /// Semantic expression.
@@ -4495,6 +4511,11 @@ struct SelectMatcher {
 /// already a local, suffixed with where the `select` starts. Its name has a
 /// space, so source cannot name it.
 const SELECT_TARGET_LOCAL: &str = "select target";
+
+/// The hidden local `copy-sequence` and `starts-with?` bind their string
+/// to, suffixed with where the call starts. Its name has a space, so source
+/// cannot name it.
+const TEXT_STRING_LOCAL: &str = "text string";
 
 /// The hidden local a `select` binds a `by` test that is not a name to.
 const SELECT_TEST_LOCAL: &str = "select test";
@@ -7650,16 +7671,23 @@ impl Lowering {
                 ..
             } => self.lower_cast(ctx, value, target, *span),
             ast::Expr::Call {
+                id,
                 callee,
                 args,
                 keywords,
                 span,
-                ..
             } => {
                 if let Some(function) = CollectionFunction::from_name(callee)
                     .filter(|_| !self.defines_callable(ctx, callee))
                 {
                     return self.lower_collection_call(ctx, function, args, keywords, *span);
+                }
+                if matches!(callee.as_str(), "copy-sequence" | "starts-with?")
+                    && !self.defines_callable(ctx, callee)
+                    && self.resolve_function(callee).is_none()
+                    && self.resolve_generic(callee).is_none()
+                {
+                    return self.lower_keyword_text_call(ctx, *id, callee, args, keywords, *span);
                 }
                 // No other call takes keyword arguments.
                 for keyword in keywords {
@@ -7893,24 +7921,22 @@ impl Lowering {
                 if let Some(builtin) = FloatBuiltin::from_name(callee) {
                     return self.lower_float_call(ctx, builtin, lowered_args, *span);
                 }
-                if let Some(function) = text_function_for_name(callee) {
-                    let arity = function.params().len();
-                    if lowered_args.len() != arity {
-                        ctx.diagnostics.push(Self::arity_mismatch(
-                            callee,
-                            arity,
-                            lowered_args.len(),
-                            *span,
-                        ));
-                        return Expr::Error { span: *span };
-                    }
-                    return self.checked_intrinsic_call(
+                if let Some(functions) = text_functions_for_name(callee) {
+                    return self.lower_text_call(ctx, callee, functions, lowered_args, *span);
+                }
+                if callee == ast::POSITION_FROM_OFFSET {
+                    return self.lower_text_call(
                         ctx,
-                        Intrinsic::Text(function),
                         callee,
+                        &[TextFunction::PositionFromOffset],
                         lowered_args,
                         *span,
                     );
+                }
+                if callee == "byte-offset" {
+                    return self
+                        .lower_intrinsic_call(ctx, callee, &lowered_args, *span)
+                        .unwrap_or(Expr::Error { span: *span });
                 }
                 if let Some(op) = BinaryOp::bitwise_function(callee) {
                     return self.lower_bitwise(ctx, op, lowered_args, *span);
@@ -8503,7 +8529,25 @@ impl Lowering {
                 .push(Self::arity_mismatch(callee, expected, args.len(), span));
             return Some(Expr::Error { span });
         }
-        Some(self.checked_intrinsic_call(ctx, intrinsic, callee, args.to_vec(), span))
+        let mut args = args.to_vec();
+        // `concatenate` takes characters too, each as a one-character
+        // string.
+        if intrinsic == Intrinsic::Concatenate {
+            let string = self.builtin_value_class(BuiltinValueClass::String)?;
+            for arg in &mut args {
+                if self.expr_kind(arg) == ValueKind::Char {
+                    let span = arg.span();
+                    let character = core::mem::replace(arg, Expr::Error { span });
+                    *arg = Expr::IntrinsicCall {
+                        intrinsic: Intrinsic::Text(TextFunction::CharacterToString),
+                        args: vec![character],
+                        result_kind: ValueKind::String(string),
+                        span,
+                    };
+                }
+            }
+        }
+        Some(self.checked_intrinsic_call(ctx, intrinsic, callee, args, span))
     }
 
     /// Whether the program names `name` as something a call can call: a
@@ -8767,6 +8811,38 @@ impl Lowering {
             ));
             return Expr::Error { span };
         }
+        // A text receiver's class is closed and the generic sealed over it,
+        // so its kernel method is the only one that can apply: call it
+        // directly, which keeps its precise result, a `<character>` for
+        // `element`.
+        let text_method = self
+            .value_kind_class(self.expr_kind(&args[function.collection_index()]))
+            .and_then(|class| {
+                collection::builtin_methods(function).find(|method| {
+                    matches!(method.operation, Intrinsic::Text(_))
+                        && self.builtin_value_class(method.collection) == Some(class)
+                })
+            });
+        // A key typing does not know is a position, an `<object>`,
+        // dispatches instead.
+        if let Some(method) = text_method {
+            let mut direct = args.clone();
+            let operation = match &default {
+                Some(default) => {
+                    direct.push(default.clone());
+                    method.with_default.unwrap_or(method.operation)
+                }
+                None => method.operation,
+            };
+            // Only an `<object>` argument may still be of the method's type.
+            let may_dispatch = direct.iter().enumerate().any(|(index, arg)| {
+                let kind = self.expr_kind(arg);
+                kind == ValueKind::Any && !self.intrinsic_arg_matches(operation, index, kind)
+            });
+            if !may_dispatch || default.is_some() {
+                return self.checked_intrinsic_call(ctx, operation, name, direct, span);
+            }
+        }
         let Some(default) = default else {
             let generic = self.collection_generic(function);
             let Some(symbol) = self
@@ -8808,6 +8884,167 @@ impl Lowering {
         let mut args = args;
         args.push(default);
         self.checked_intrinsic_call(ctx, operation, name, args, span)
+    }
+
+    /// The classes text values have in this module.
+    fn text_classes(&self) -> Option<TextClasses> {
+        Some(TextClasses {
+            string: self.builtin_value_class(BuiltinValueClass::String)?,
+            builder: self.builtin_value_class(BuiltinValueClass::StringBuilder)?,
+        })
+    }
+
+    /// Lowers a call of the text function `callee` with `args` to the first
+    /// of its overloads `functions` whose parameters the arguments match,
+    /// reporting a mismatch against the first when none does.
+    fn lower_text_call(
+        &self,
+        ctx: &mut FunctionContext,
+        callee: &str,
+        functions: &[TextFunction],
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Expr {
+        let Some(first) = functions.first() else {
+            return Expr::Error { span };
+        };
+        let arity = first.params().len();
+        if args.len() != arity {
+            ctx.diagnostics
+                .push(Self::arity_mismatch(callee, arity, args.len(), span));
+            return Expr::Error { span };
+        }
+        let function = functions
+            .iter()
+            .find(|function| {
+                args.iter().enumerate().all(|(index, arg)| {
+                    self.intrinsic_arg_matches(
+                        Intrinsic::Text(**function),
+                        index,
+                        self.expr_kind(arg),
+                    )
+                })
+            })
+            .unwrap_or(first);
+        self.checked_intrinsic_call(ctx, Intrinsic::Text(*function), callee, args, span)
+    }
+
+    /// Lowers `copy-sequence(s, start: p, end: q)` and
+    /// `starts-with?(s, prefix, at: p)`, whose keyword arguments are
+    /// optional. The string is bound to a hidden local, as a missing
+    /// keyword's default reads it again: the start or the end of `s`.
+    /// Arguments evaluate in source order.
+    fn lower_keyword_text_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        callee: &str,
+        args: &[ast::Expr],
+        keywords: &[ast::KeywordArg],
+        span: Span,
+    ) -> Expr {
+        let (arity, accepted): (usize, &[&str]) = if callee == "copy-sequence" {
+            (1, &["start", "end"])
+        } else {
+            (2, &["at"])
+        };
+        let mut valid = true;
+        for (index, keyword) in keywords.iter().enumerate() {
+            if !accepted.contains(&keyword.name.as_str()) {
+                ctx.diagnostics
+                    .push(Self::unexpected_keyword(callee, keyword));
+                valid = false;
+            } else if keywords[..index]
+                .iter()
+                .any(|earlier| earlier.name == keyword.name)
+            {
+                ctx.diagnostics.push(
+                    Diagnostic::error(keyword.span, DiagnosticCode::DuplicateKeywordArgument)
+                        .with_arg(DiagnosticArg::text("keyword", keyword.name.clone())),
+                );
+                valid = false;
+            }
+        }
+        if args.len() != arity {
+            ctx.diagnostics
+                .push(Self::arity_mismatch(callee, arity, args.len(), span));
+            valid = false;
+        }
+        if !valid {
+            return Expr::Error { span };
+        }
+        let scope_start = ctx.scope_start();
+        let string = self.lower_expr(ctx, &args[0]);
+        let string_kind = self.expr_kind(&string);
+        let name = format!("{TEXT_STRING_LOCAL}@{}", span.start);
+        let bound = self.bind_hidden_local(ctx, id, &name, string, args[0].span());
+        let read = || Expr::Local {
+            local: bound.local,
+            result_kind: string_kind,
+            callable_signature: None,
+            span: args[0].span(),
+        };
+        let keyword = |name: &str| keywords.iter().find(|keyword| keyword.name == name);
+        let call = |this: &mut Self,
+                    ctx: &mut FunctionContext,
+                    function: TextFunction,
+                    args: Vec<Expr>,
+                    span: Span| {
+            this.checked_intrinsic_call(ctx, Intrinsic::Text(function), callee, args, span)
+        };
+        let result = if callee == "copy-sequence" {
+            let start = match keyword("start") {
+                Some(start) => {
+                    let position = self.lower_expr(ctx, &start.value);
+                    call(
+                        self,
+                        ctx,
+                        TextFunction::CheckPosition,
+                        vec![read(), position],
+                        start.span,
+                    )
+                }
+                None => call(self, ctx, TextFunction::StartPosition, vec![read()], span),
+            };
+            let end = match keyword("end") {
+                Some(end) => self.lower_expr(ctx, &end.value),
+                None => call(self, ctx, TextFunction::EndPosition, vec![read()], span),
+            };
+            call(
+                self,
+                ctx,
+                TextFunction::CopyRange,
+                vec![read(), start, end],
+                span,
+            )
+        } else {
+            let prefix = self.lower_expr(ctx, &args[1]);
+            let at = match keyword("at") {
+                Some(at) => self.lower_expr(ctx, &at.value),
+                None => call(self, ctx, TextFunction::StartPosition, vec![read()], span),
+            };
+            call(
+                self,
+                ctx,
+                TextFunction::StartsWith,
+                vec![read(), prefix, at],
+                span,
+            )
+        };
+        ctx.hide_locals_from(scope_start);
+        if matches!(result, Expr::Error { .. }) {
+            return result;
+        }
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements: vec![Statement::Let(bound)],
+                result,
+                span,
+            }),
+            cleanup: None,
+            span,
+        }
     }
 
     /// The diagnostic for a keyword argument `callee` does not take.
@@ -8985,11 +9222,16 @@ impl Lowering {
             | Intrinsic::MethodSpecializers => self
                 .builtin_value_class(BuiltinValueClass::Vector)
                 .map_or(ValueKind::Error, ValueKind::Vector),
-            Intrinsic::SlotMutable | Intrinsic::InstanceOfType | Intrinsic::CharCompare(_) => {
-                ValueKind::Bool
+            Intrinsic::SlotMutable
+            | Intrinsic::InstanceOfType
+            | Intrinsic::CharCompare(_)
+            | Intrinsic::PositionCompare(_) => ValueKind::Bool,
+            Intrinsic::VectorSize | Intrinsic::CharToInteger | Intrinsic::PositionToInteger => {
+                ValueKind::I64
             }
-            Intrinsic::VectorSize | Intrinsic::CharToInteger => ValueKind::I64,
-            Intrinsic::Text(function) => text::text_result_kind(function.result()),
+            Intrinsic::Text(function) => self.text_classes().map_or(ValueKind::Error, |classes| {
+                classes.result_kind(function.result())
+            }),
             Intrinsic::LimitedIntegerBase => self
                 .builtin_value_class(BuiltinValueClass::Integer)
                 .map_or(ValueKind::Error, ValueKind::ClassObject),
@@ -9111,12 +9353,19 @@ impl Lowering {
                 actual == ValueKind::Any
                     || self.is_builtin_subclass_instance(actual, BuiltinValueClass::SubclassType)
             }
-            (Intrinsic::Text(function), index) => function
-                .params()
-                .get(index)
-                .is_some_and(|kind| text::text_arg_matches(*kind, actual)),
+            (Intrinsic::Text(function), index) => {
+                let classes = self.text_classes();
+                function
+                    .params()
+                    .get(index)
+                    .zip(classes)
+                    .is_some_and(|(kind, classes)| classes.arg_matches(*kind, actual))
+            }
             (Intrinsic::CharCompare(_), 0 | 1) | (Intrinsic::CharToInteger, 0) => {
                 actual == ValueKind::Char
+            }
+            (Intrinsic::PositionCompare(_), 0 | 1) | (Intrinsic::PositionToInteger, 0) => {
+                actual == ValueKind::Position
             }
             _ => false,
         }
@@ -10732,6 +10981,37 @@ impl Lowering {
                 span,
             };
         }
+        // Positions compare by byte offset, which orders the places in one
+        // string.
+        if lhs_kind == ValueKind::Position && rhs_kind == ValueKind::Position {
+            return Expr::IntrinsicCall {
+                intrinsic: Intrinsic::PositionCompare(op.into()),
+                args: vec![lhs, rhs],
+                result_kind: ValueKind::Bool,
+                span,
+            };
+        }
+        // Strings order by scalar value, as UTF-8 byte order gives: the
+        // host answers -1, 0 or 1, compared with 0. `=` compares contents
+        // below.
+        if op != ast::CompareOp::Eq
+            && lhs_kind == rhs_kind
+            && matches!(lhs_kind, ValueKind::String(_))
+        {
+            let order = Expr::IntrinsicCall {
+                intrinsic: Intrinsic::Text(TextFunction::StringOrder),
+                args: vec![lhs, rhs],
+                result_kind: ValueKind::I64,
+                span,
+            };
+            let zero = Expr::ConstI64 { value: 0, span };
+            return compare_numbers(
+                op.into(),
+                (order, NumericKind::Integer),
+                (zero, NumericKind::Integer),
+                span,
+            );
+        }
         // Characters compare by scalar value, which orders them as UTF-8
         // orders their encodings.
         if lhs_kind == ValueKind::Char && rhs_kind == ValueKind::Char {
@@ -10803,8 +11083,10 @@ impl Lowering {
         if integer(lhs_kind) && integer(rhs_kind) {
             return self.lower_compare(ctx, ast::CompareOp::Eq, lhs, rhs, span);
         }
-        // So are characters, by scalar value.
-        if lhs_kind == ValueKind::Char && rhs_kind == ValueKind::Char {
+        // So are characters, by scalar value, and positions, by offset.
+        if (lhs_kind == ValueKind::Char && rhs_kind == ValueKind::Char)
+            || (lhs_kind == ValueKind::Position && rhs_kind == ValueKind::Position)
+        {
             return self.lower_compare(ctx, ast::CompareOp::Eq, lhs, rhs, span);
         }
         // Every value is an object, so only an operand that failed to
@@ -11073,6 +11355,25 @@ impl Lowering {
                     span,
                 };
             }
+            // A character or a builder's text becomes a `<string>`.
+            (actual, Some(ValueKind::String(class))) => {
+                let builder = self.builtin_value_class(BuiltinValueClass::StringBuilder);
+                let function = match actual {
+                    ValueKind::Char => Some(TextFunction::CharacterToString),
+                    ValueKind::Object(object) if Some(object) == builder => {
+                        Some(TextFunction::BuilderToString)
+                    }
+                    _ => None,
+                };
+                if let Some(function) = function {
+                    return Expr::IntrinsicCall {
+                        intrinsic: Intrinsic::Text(function),
+                        args: vec![value],
+                        result_kind: ValueKind::String(class),
+                        span,
+                    };
+                }
+            }
             _ => {}
         }
         if let Some(from) = NumericKind::of(self.expr_kind(&value))
@@ -11141,6 +11442,26 @@ impl Lowering {
         let Some(class) = self.classes.get(class_id.0 as usize) else {
             return Expr::Error { span };
         };
+        // The builder is the one kernel class `make` creates: it takes no
+        // keywords and starts empty.
+        if class.origin
+            == (ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::StringBuilder,
+            })
+        {
+            if let Some(field) = fields.first() {
+                ctx.diagnostics
+                    .push(Self::unexpected_keyword("make", field));
+                return Expr::Error { span };
+            }
+            return self.checked_intrinsic_call(
+                ctx,
+                Intrinsic::Text(TextFunction::MakeBuilder),
+                "make",
+                Vec::new(),
+                span,
+            );
+        }
         let class_name = class.name.clone();
         let class_origin = class.origin;
         let effective_slots = class.effective_slots.clone();
@@ -12037,6 +12358,9 @@ impl Lowering {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Character,
             } => Some(ValueKind::Char),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::StringPosition,
+            } => Some(ValueKind::Position),
             // A value declared `<function>` is any callable value.
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Function,
@@ -12060,7 +12384,8 @@ impl Lowering {
                     | BuiltinValueClass::SlotDescriptor
                     | BuiltinValueClass::Type
                     | BuiltinValueClass::LimitedIntegerType
-                    | BuiltinValueClass::SubclassType,
+                    | BuiltinValueClass::SubclassType
+                    | BuiltinValueClass::StringBuilder,
             } => Some(ValueKind::Object(class)),
             ClassOrigin::ObjectRoot
             | ClassOrigin::Native
@@ -12091,6 +12416,7 @@ impl Lowering {
             }
             ValueKind::Bool => self.builtin_value_class(BuiltinValueClass::Boolean),
             ValueKind::Char => self.builtin_value_class(BuiltinValueClass::Character),
+            ValueKind::Position => self.builtin_value_class(BuiltinValueClass::StringPosition),
             ValueKind::Callable | ValueKind::KnownCallable(_) => {
                 self.builtin_value_class(BuiltinValueClass::Function)
             }
@@ -12452,6 +12778,7 @@ impl Lowering {
             "<object>" => ValueKind::Any,
             "<boolean>" => ValueKind::Bool,
             "<character>" => ValueKind::Char,
+            "<string-position>" => ValueKind::Position,
             "<string>" => self
                 .builtin_value_class(BuiltinValueClass::String)
                 .map_or(ValueKind::Error, ValueKind::String),
@@ -12546,6 +12873,7 @@ impl Lowering {
                 .is_some_and(|class| self.is_same_or_subclass(class, specializer)),
             ValueKind::Bool
             | ValueKind::Char
+            | ValueKind::Position
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -12597,6 +12925,7 @@ impl Lowering {
             | ValueKind::F32
             | ValueKind::Bool
             | ValueKind::Char
+            | ValueKind::Position
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -12623,6 +12952,7 @@ impl Lowering {
             ValueKind::F32 => "<single-float>".into(),
             ValueKind::Bool => "<boolean>".into(),
             ValueKind::Char => "<character>".into(),
+            ValueKind::Position => "<string-position>".into(),
             ValueKind::Callable => "<callable>".into(),
             ValueKind::String(_) => "<string>".into(),
             ValueKind::Symbol(_) => "<symbol>".into(),
@@ -13404,6 +13734,7 @@ mod tests {
             ValueKind::F32,
             ValueKind::Bool,
             ValueKind::Char,
+            ValueKind::Position,
             ValueKind::String(builtin(BuiltinValueClass::String)),
             ValueKind::Symbol(builtin(BuiltinValueClass::Symbol)),
             ValueKind::Vector(builtin(BuiltinValueClass::Vector)),
@@ -13432,6 +13763,7 @@ mod tests {
                     Type::union([Atom::Boolean(true), Atom::Boolean(false)], &module)
                 }
                 ValueKind::Char => of(Atom::Exact(builtin(BuiltinValueClass::Character))),
+                ValueKind::Position => of(Atom::Exact(builtin(BuiltinValueClass::StringPosition))),
                 // Built-in value classes are closed.
                 ValueKind::String(class) | ValueKind::Symbol(class) | ValueKind::Vector(class) => {
                     of(Atom::Exact(class))

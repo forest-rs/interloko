@@ -1,0 +1,15 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// `<string-position>` is a class: it boxes, dispatches and is `==` by
+// offset.
+
+define generic kind(x) => <integer>;
+define method kind(x :: <string-position>) => <integer> 1 end;
+define method kind(x :: <object>) => <integer> 2 end;
+define function boxed(x :: <object>) => <object> x end;
+define function main() => <integer>
+  let s = "abc";
+  let p = end-position(s);
+  if (boxed(p) == p) kind(boxed(p)) + kind(boxed(1)) else 0 end
+end;

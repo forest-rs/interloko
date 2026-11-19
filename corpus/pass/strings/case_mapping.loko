@@ -1,0 +1,9 @@
+// expect: run "STRASSE-é"
+// expect: diagnostics 0
+
+// A string's case mapping is full, so it can change the length; a
+// character's maps one scalar to one.
+
+define function main() => <string>
+  concatenate(as-uppercase("straße"), concatenate('-', as-lowercase("É")))
+end;

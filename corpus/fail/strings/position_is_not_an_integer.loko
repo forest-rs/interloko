@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic contains <string-position>
+
+// No arithmetic lands inside a character: `byte-offset` is explicit.
+
+define function main() => <string-position>
+  start-position("abc") + 1
+end;

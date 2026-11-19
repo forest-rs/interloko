@@ -1145,11 +1145,11 @@ pub(crate) const fn is_name_start(byte: u8) -> bool {
 
 /// Returns true when `byte` can continue a name.
 ///
-/// Mirrors the base grammar's `[A-Za-z0-9_?-]`. As in Dylan, a hyphen is
+/// Mirrors the base grammar's `[A-Za-z0-9_?!-]`. As in Dylan, a hyphen is
 /// always a name character: `x-1`, `a-b`, and `x-` are single names, so
 /// subtraction is written with spaces, `x - 1`.
 pub(crate) const fn is_name_continue(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'?' | b'-')
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'?' | b'!' | b'-')
 }
 
 /// Returns the end of the name whose first byte is at `start`.

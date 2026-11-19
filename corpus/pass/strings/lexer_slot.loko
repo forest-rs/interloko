@@ -1,0 +1,19 @@
+// expect: run 'Z'
+// expect: diagnostics 0
+
+// A lexer keeps a position in a slot, and `element(..., default:)` reads
+// past the end without asking for the size.
+
+define class <lexer> (<object>)
+  constant slot text :: <string>;
+  slot pos :: <string-position>;
+end;
+define function peek(lx :: <lexer>) => <character>
+  element(lx.text, lx.pos, default: '\0')
+end;
+define function main() => <character>
+  let lx = make(<lexer>, text: "ab", pos: start-position("ab"));
+  lx.pos := next-position(lx.text, lx.pos);
+  lx.pos := next-position(lx.text, lx.pos);
+  if (peek(lx) = '\0') as-uppercase('z') else peek(lx) end
+end;

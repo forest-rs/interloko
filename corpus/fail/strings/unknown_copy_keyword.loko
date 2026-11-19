@@ -1,0 +1,6 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.unexpected-keyword-argument
+
+define function main() => <string>
+  copy-sequence("abc", from: start-position("abc"))
+end;

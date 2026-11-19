@@ -177,6 +177,7 @@ impl InterlokoHost {
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_VALUE_TYPE => match self.unbox(obj) {
                 Ok(Unboxed::Value(inner)) => self.describe_value(ValueRef::from_value(&inner)),
                 Ok(Unboxed::Character(value)) => character_literal(value),
+                Ok(Unboxed::Position(offset)) => format!("{{<string-position> {offset}}}"),
                 Err(_) => "{invalid}".into(),
             },
             ValueRef::Obj(obj) if obj.host_type == INTERLOKO_OBJECT_TYPE => {
@@ -198,7 +199,8 @@ impl InterlokoHost {
                 .map_or_else(|| format!("class#{}", class.0), |class| class.name.clone())
         };
         match &object.storage {
-            RuntimeObjectStorage::String { value } => string_literal(value),
+            RuntimeObjectStorage::String { text } => string_literal(text.as_str()),
+            RuntimeObjectStorage::StringBuilder { .. } => "{<string-builder>}".into(),
             RuntimeObjectStorage::Symbol { name } => format!("#{name}"),
             RuntimeObjectStorage::Vector { elements } => {
                 let elements = elements

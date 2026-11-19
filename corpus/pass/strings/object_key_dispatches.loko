@@ -1,0 +1,14 @@
+// expect: run 'b'
+// expect: diagnostics 0
+
+// A string read with a key typing knows only as an `<object>` dispatches
+// to the string's `element` method, which checks the key is a position.
+
+define function key() => <object>
+  position-at("abc", 1)
+end;
+
+define function main() => <character>
+  let s = "abc";
+  as(<character>, s[key()])
+end;

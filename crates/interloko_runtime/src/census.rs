@@ -79,7 +79,8 @@ impl TurnStats {
 pub(crate) fn object_bytes(object: &RuntimeObject) -> usize {
     let payload = match &object.storage {
         RuntimeObjectStorage::Native { slots } => slots.len() * size_of::<Value>(),
-        RuntimeObjectStorage::String { value } => value.len(),
+        RuntimeObjectStorage::String { text } => text.as_str().len(),
+        RuntimeObjectStorage::StringBuilder { text, .. } => text.capacity(),
         RuntimeObjectStorage::Symbol { name } => name.len(),
         RuntimeObjectStorage::Vector { elements } => elements.len() * size_of::<Value>(),
         RuntimeObjectStorage::ClassMeta { .. }
@@ -192,6 +193,7 @@ impl InterlokoHost {
                     | BoxedHandle::Integer(_)
                     | BoxedHandle::Bool(_)
                     | BoxedHandle::Character(_)
+                    | BoxedHandle::Position(_)
                     | BoxedHandle::Invalid => {}
                 }
                 continue;

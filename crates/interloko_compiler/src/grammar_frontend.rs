@@ -3336,7 +3336,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "argument-keyword",
-            "name `:`",
+            "(name | `end`) `:`",
             "base_loko_primary::BaseLokoCstBuilder::build_keyword_arg",
         ),
         (

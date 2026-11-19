@@ -100,7 +100,7 @@ rule call-name = name
 rule argument-list = trailing-list-of<argument, `,`>
 rule argument = keyword-argument | expression
 rule keyword-argument = argument-keyword expression
-rule argument-keyword = name `:`
+rule argument-keyword = (name | `end`) `:`
 rule name-expression = name
 rule type-expression = expression-type-name
 rule expression-type-name = type-name
@@ -112,7 +112,7 @@ rule symbol-literal = `#` name
 rule keyword-symbol = explicit-keyword-symbol | expression-keyword-symbol
 rule explicit-keyword-symbol = `#:` name
 rule expression-keyword-symbol = name `:` !`=`
-rule name = [$A-Za-z_] [A-Za-z0-9_?-]*
+rule name = [$A-Za-z_] [A-Za-z0-9_?!-]*
 rule number raw = [0-9]+ (`.` [0-9]+)? ([eE] [+-]? [0-9]+)? (`i32` | `u32` | `f32`)?
 rule type-name = `<` type-name-word `>`
 rule type-name-word = [$A-Za-z_] [A-Za-z0-9_?-]*

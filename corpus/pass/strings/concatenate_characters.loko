@@ -1,0 +1,8 @@
+// expect: run "x=yz"
+// expect: diagnostics 0
+
+// `concatenate` takes characters as one-character strings.
+
+define function main() => <string>
+  concatenate(concatenate("x", '='), concatenate('y', "z"))
+end;

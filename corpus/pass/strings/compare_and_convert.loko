@@ -1,0 +1,19 @@
+// expect: run 6
+// expect: diagnostics 0
+
+// Positions compare by offset and convert explicitly; strings order by
+// scalar value.
+
+define function bit(b :: <boolean>, n :: <integer>) => <integer>
+  if (b) n else 0 end
+end;
+define function main() => <integer>
+  let s = "héllo";
+  let p = position-at(s, 2);
+  let q = as(<string-position>, s, 3);
+  bit(p = q, 1)
+    + bit(start-position(s) < p, 2)
+    + bit("apple" < "apricot", 3)
+    + bit("b" < "apricot", 4)
+    + bit(byte-offset(q) = 3, 0)
+end;

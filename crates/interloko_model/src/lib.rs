@@ -111,6 +111,14 @@ pub enum BuiltinValueClass {
     /// `<integer>`; `as` converts between the two. It comes after
     /// `<function>` so that no other built-in class's id moved.
     Character,
+    /// The concrete built-in `<string-position>` class: an opaque place in
+    /// a `<string>`, between two characters, which only the string
+    /// functions make. It is an unboxed scalar (a byte offset), never an
+    /// `<integer>`, so arithmetic cannot land inside a character.
+    StringPosition,
+    /// The concrete built-in `<string-builder>` class: the one mutable text
+    /// type, whose contents become a `<string>` without a copy.
+    StringBuilder,
 }
 
 impl BuiltinValueClass {
@@ -136,6 +144,8 @@ impl BuiltinValueClass {
         (Self::Boolean, "<boolean>"),
         (Self::Function, "<function>"),
         (Self::Character, "<character>"),
+        (Self::StringPosition, "<string-position>"),
+        (Self::StringBuilder, "<string-builder>"),
     ];
 
     /// Returns the Loko-visible class name for this built-in value class.
@@ -162,6 +172,8 @@ impl BuiltinValueClass {
             Self::Boolean => "<boolean>",
             Self::Function => "<function>",
             Self::Character => "<character>",
+            Self::StringPosition => "<string-position>",
+            Self::StringBuilder => "<string-builder>",
         }
     }
 
@@ -189,6 +201,8 @@ impl BuiltinValueClass {
             b"<boolean>" => Some(Self::Boolean),
             b"<function>" => Some(Self::Function),
             b"<character>" => Some(Self::Character),
+            b"<string-position>" => Some(Self::StringPosition),
+            b"<string-builder>" => Some(Self::StringBuilder),
             _ => None,
         }
     }
@@ -217,6 +231,8 @@ impl BuiltinValueClass {
             Self::Boolean => 17,
             Self::Function => 18,
             Self::Character => 19,
+            Self::StringPosition => 20,
+            Self::StringBuilder => 21,
         }
     }
 
@@ -252,11 +268,11 @@ impl BuiltinValueClass {
     }
 
     /// Returns whether this class's instances are unboxed scalars: numbers,
-    /// booleans and characters. They are boxed rather than referenced when
-    /// they travel as `<object>`.
+    /// booleans, characters and string positions. They are boxed rather
+    /// than referenced when they travel as `<object>`.
     #[must_use]
     pub const fn is_scalar(self) -> bool {
-        matches!(self, Self::Boolean | Self::Character) || self.is_numeric()
+        matches!(self, Self::Boolean | Self::Character | Self::StringPosition) || self.is_numeric()
     }
 
     /// Returns whether this class's instances are unboxed values rather than
@@ -556,7 +572,7 @@ mod tests {
         assert!(!BuiltinValueClass::Boolean.is_numeric());
         assert_eq!(
             BuiltinValueClass::Boolean.index(),
-            BuiltinValueClass::ALL.len() - 3
+            BuiltinValueClass::ALL.len() - 5
         );
         assert_eq!(chain(BuiltinValueClass::Function), ["<function>"]);
         assert!(!BuiltinValueClass::Function.is_abstract());
@@ -566,7 +582,7 @@ mod tests {
         assert!(!BuiltinValueClass::String.is_unboxed());
         assert_eq!(
             BuiltinValueClass::Function.index(),
-            BuiltinValueClass::ALL.len() - 2
+            BuiltinValueClass::ALL.len() - 4
         );
         assert_eq!(chain(BuiltinValueClass::Character), ["<character>"]);
         assert!(!BuiltinValueClass::Character.is_abstract());
@@ -574,6 +590,12 @@ mod tests {
         assert!(!BuiltinValueClass::Character.is_numeric());
         assert_eq!(
             BuiltinValueClass::Character.index(),
+            BuiltinValueClass::ALL.len() - 3
+        );
+        assert!(BuiltinValueClass::StringPosition.is_scalar());
+        assert!(!BuiltinValueClass::StringBuilder.is_unboxed());
+        assert_eq!(
+            BuiltinValueClass::StringBuilder.index(),
             BuiltinValueClass::ALL.len() - 1
         );
     }

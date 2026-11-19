@@ -64,13 +64,19 @@ enum Unboxed {
     /// A `<character>`, which a `u32` register holds unboxed. It is kept
     /// apart because a `u32` value is otherwise a `<u32>` integer.
     Character(char),
+    /// A `<string-position>`, a byte offset an `i64` register holds
+    /// unboxed, kept apart from the `<integer>` that register would be.
+    Position(u64),
 }
 pub use boxed::{IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
 pub use census::{HeapStats, TurnStats};
 pub use no_applicable_method::NoApplicableMethodReport;
 use region::{NurserySerials, ObjectRef, OpenTurn, Region, Space};
 pub use send::SendCacheReport;
-pub use text::{TextFunction, TextKind, character_literal, string_literal};
+use text::StringText;
+pub use text::{
+    STRING_MAX_BYTES, TextFunction, TextKind, character_literal, is_position_offset, string_literal,
+};
 pub use turn::ImageRootId;
 pub use type_error::TypeErrorReport;
 
@@ -105,12 +111,25 @@ pub const BOX_CHARACTER: &str = "interloko.box_character";
 /// unboxing checked, which it does not need, and returns the replacement,
 /// or fails with the check-failed tag.
 pub const CHECK_CHARACTER: &str = "interloko.check_character";
+/// Host-call symbol for checking that a `use-value` replacement for a failed
+/// unboxing to `<string-position>` is an offset some string can have. It
+/// takes [`check_position_signature`], as [`CHECK_CHARACTER`] does.
+pub const CHECK_POSITION: &str = "interloko.check_position";
 /// Host-call symbol for boxing a rejected character argument for the
 /// `<type-error>` that reports it. It takes [`box_character_signature`].
 /// A scalar value boxes as the `<character>` it is; any other value a
 /// `u32` register can hold, such as a `use-value` replacement that was not
 /// a scalar value, boxes as the `<integer>` it is, so the report shows it.
 pub const BOX_REJECTED_CHARACTER: &str = "interloko.box_rejected_character";
+/// Host-call symbol for boxing a `<string-position>`, held unboxed in an
+/// `i64` register, as the top `<object>` value. It takes
+/// [`box_position_signature`].
+pub const BOX_POSITION: &str = "interloko.box_position";
+/// Host-call symbol for boxing a rejected position argument for the
+/// `<type-error>` that reports it. It takes [`box_position_signature`]. An
+/// offset a string can have boxes as a `<string-position>`, and any other
+/// `i64` as the `<integer>` it is.
+pub const BOX_REJECTED_POSITION: &str = "interloko.box_rejected_position";
 /// Host-call symbol for testing whether a value is an instance of a class.
 pub const INSTANCE_OF: &str = "interloko.instance_of";
 /// Host-call symbol for casting a value to a known runtime object class.
@@ -383,6 +402,24 @@ pub fn box_character_signature() -> HostSig {
     }
 }
 
+/// Returns the host signature for [`BOX_POSITION`].
+#[must_use]
+pub fn box_position_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::I64],
+        rets: vec![any_type()],
+    }
+}
+
+/// Returns the host signature for [`CHECK_POSITION`].
+#[must_use]
+pub fn check_position_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::I64, ValueType::U64],
+        rets: vec![ValueType::I64],
+    }
+}
+
 /// Returns the host signature for [`CHECK_CHARACTER`].
 #[must_use]
 pub fn check_character_signature() -> HostSig {
@@ -432,6 +469,9 @@ pub enum ValueKind {
     Bool,
     /// `<character>` value: a Unicode scalar value in a `u32` register.
     Character,
+    /// `<string-position>` value: a byte offset in an `i64` register,
+    /// checked against its string wherever it is used.
+    Position,
     /// String object value.
     String(ClassId),
     /// Symbol object value.
@@ -624,6 +664,9 @@ pub struct RuntimeLayout {
 pub enum RuntimeError {
     /// A cell operation named an object that is not a cell.
     NotACell,
+    /// A `<string>` would hold more bytes than a `<string-position>` can
+    /// address.
+    StringTooLong,
     /// Runtime layout omits a built-in value class required by an operation.
     MissingBuiltinClass {
         /// Stable source-level class name.
@@ -1641,8 +1684,14 @@ enum RuntimeObjectStorage {
     Native {
         slots: Vec<Value>,
     },
+    /// A `<string>`: immutable, validated UTF-8 with its header.
     String {
-        value: String,
+        text: StringText,
+    },
+    /// A `<string-builder>`'s growing text and its character count.
+    StringBuilder {
+        text: String,
+        scalars: usize,
     },
     Symbol {
         name: String,
@@ -1789,7 +1838,7 @@ impl InterlokoHost {
         Ok(self.push_object(RuntimeObject {
             class,
             storage: RuntimeObjectStorage::String {
-                value: value.into(),
+                text: StringText::new(value.into()).ok_or(RuntimeError::StringTooLong)?,
             },
         }))
     }
@@ -1808,7 +1857,7 @@ impl InterlokoHost {
         };
         let object = self.object(*object)?;
         match &object.storage {
-            RuntimeObjectStorage::String { value } => Ok(value),
+            RuntimeObjectStorage::String { text } => Ok(text.as_str()),
             _ => Err(RuntimeError::ValueKindMismatch {
                 expected: ValueKind::String(class),
             }),
@@ -1876,6 +1925,7 @@ impl InterlokoHost {
             }
             RuntimeObjectStorage::HostBacked { adapter } => adapter.read_slot(slot, slot_info.kind),
             RuntimeObjectStorage::String { .. }
+            | RuntimeObjectStorage::StringBuilder { .. }
             | RuntimeObjectStorage::Symbol { .. }
             | RuntimeObjectStorage::Vector { .. }
             | RuntimeObjectStorage::ClassMeta { .. }
@@ -2126,6 +2176,7 @@ impl InterlokoHost {
             BoxedHandle::Integer(value) => Value::I64(value),
             BoxedHandle::Bool(value) => Value::Bool(value),
             BoxedHandle::Character(value) => return Ok(Unboxed::Character(value)),
+            BoxedHandle::Position(offset) => return Ok(Unboxed::Position(offset)),
             BoxedHandle::Object(handle) => Value::Obj(Obj {
                 host_type: INTERLOKO_OBJECT_TYPE,
                 handle,
@@ -2155,7 +2206,9 @@ impl InterlokoHost {
     fn boxed_value(&self, obj: Obj) -> Result<Value, RuntimeError> {
         match self.unbox(obj)? {
             Unboxed::Value(value) => Ok(value),
-            Unboxed::Character(_) => Err(RuntimeError::InvalidBoxedValueHandle { object: obj }),
+            Unboxed::Character(_) | Unboxed::Position(_) => {
+                Err(RuntimeError::InvalidBoxedValueHandle { object: obj })
+            }
         }
     }
 
@@ -2245,12 +2298,10 @@ impl Host for InterlokoHost {
             let [ret] = rets else {
                 return Err(HostError::Failed);
             };
-            *ret = match function.apply(args) {
-                Some(value) => value,
-                None if function.checked_arg().is_some() => {
-                    return Err(type_error::check_failed(&ctx));
-                }
-                None => return Err(HostError::Failed),
+            *ret = match self.call_text(function, args) {
+                Ok(value) => value,
+                Err(text::TextFailure::Rejected) => return Err(type_error::check_failed(&ctx)),
+                Err(text::TextFailure::Failed) => return Err(HostError::Failed),
             };
             return Ok(0);
         }
@@ -2277,7 +2328,7 @@ impl Host for InterlokoHost {
                 rets[0] = self.push_object(RuntimeObject {
                     class,
                     storage: RuntimeObjectStorage::String {
-                        value: String::from(*value),
+                        text: StringText::new(String::from(*value)).ok_or(HostError::Failed)?,
                     },
                 });
                 Ok(0)
@@ -2720,6 +2771,9 @@ impl Host for InterlokoHost {
                         | Value::Agg(_)),
                     ) => value,
                     Unboxed::Character(value) => Value::U32(u32::from(value)),
+                    Unboxed::Position(offset) => {
+                        Value::I64(i64::try_from(offset).map_err(|_| HostError::Failed)?)
+                    }
                     Unboxed::Value(_) => return Err(HostError::Failed),
                 };
                 Ok(0)
@@ -2761,6 +2815,16 @@ impl Host for InterlokoHost {
                 self.write_cell(*cell, value.to_value())?;
                 Ok(0)
             }
+            CHECK_POSITION => {
+                let [ValueRef::I64(offset), ValueRef::U64(_)] = args else {
+                    return Err(HostError::Failed);
+                };
+                if !is_position_offset(*offset) {
+                    return Err(type_error::check_failed(&ctx));
+                }
+                rets[0] = Value::I64(*offset);
+                Ok(0)
+            }
             CHECK_CHARACTER => {
                 let [ValueRef::U32(value), ValueRef::U64(_)] = args else {
                     return Err(HostError::Failed);
@@ -2769,6 +2833,22 @@ impl Host for InterlokoHost {
                     return Err(type_error::check_failed(&ctx));
                 }
                 rets[0] = Value::U32(*value);
+                Ok(0)
+            }
+            BOX_POSITION | BOX_REJECTED_POSITION => {
+                let [ValueRef::I64(offset)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = match BoxedHandle::immediate_position(*offset) {
+                    Some(handle) => Value::Obj(Obj {
+                        host_type: INTERLOKO_VALUE_TYPE,
+                        handle,
+                    }),
+                    None if symbol == BOX_REJECTED_POSITION => {
+                        self.push_boxed_value(Value::I64(*offset))
+                    }
+                    None => return Err(HostError::Failed),
+                };
                 Ok(0)
             }
             BOX_CHARACTER | BOX_REJECTED_CHARACTER => {
@@ -2884,7 +2964,9 @@ impl InterlokoHost {
         let class = self.builtin_class(BuiltinValueClass::String)?;
         Ok(self.push_object(RuntimeObject {
             class,
-            storage: RuntimeObjectStorage::String { value },
+            storage: RuntimeObjectStorage::String {
+                text: StringText::new(value).ok_or(HostError::Failed)?,
+            },
         }))
     }
 
@@ -3016,6 +3098,9 @@ impl InterlokoHost {
                     Unboxed::Character(_) => {
                         return self.builtin_class(BuiltinValueClass::Character);
                     }
+                    Unboxed::Position(_) => {
+                        return self.builtin_class(BuiltinValueClass::StringPosition);
+                    }
                 };
                 match value {
                     Value::I64(_) | Value::I32(_) | Value::U32(_) => {
@@ -3106,9 +3191,9 @@ impl InterlokoHost {
         let rhs = self.object(rhs)?;
         Ok(match (&lhs.storage, &rhs.storage) {
             (
-                RuntimeObjectStorage::String { value: left },
-                RuntimeObjectStorage::String { value: right },
-            ) => left == right,
+                RuntimeObjectStorage::String { text: left },
+                RuntimeObjectStorage::String { text: right },
+            ) => left.as_str() == right.as_str(),
             (
                 RuntimeObjectStorage::Vector { elements: left },
                 RuntimeObjectStorage::Vector { elements: right },
@@ -3134,6 +3219,7 @@ impl InterlokoHost {
         let (lhs, rhs) = match (self.unbox(lhs)?, self.unbox(rhs)?) {
             (Unboxed::Value(lhs), Unboxed::Value(rhs)) => (lhs, rhs),
             (Unboxed::Character(lhs), Unboxed::Character(rhs)) => return Ok(lhs == rhs),
+            (Unboxed::Position(lhs), Unboxed::Position(rhs)) => return Ok(lhs == rhs),
             _ => return Ok(false),
         };
         Ok(match (lhs, rhs) {
@@ -3191,6 +3277,7 @@ impl InterlokoHost {
             (ValueKind::Character, ValueRef::U32(value)) if char::from_u32(value).is_some() => {
                 Ok(Value::U32(value))
             }
+            (ValueKind::Position, ValueRef::I64(offset)) => Ok(Value::I64(offset)),
             (ValueKind::Callable, ValueRef::Agg(callable)) => Ok(Value::Agg(callable)),
             (
                 ValueKind::Object(expected_class)
@@ -3578,6 +3665,7 @@ fn value_type(kind: ValueKind) -> Option<ValueType> {
         ValueKind::F32 => Some(ValueType::F32),
         ValueKind::Bool => Some(ValueType::Bool),
         ValueKind::Character => Some(ValueType::U32),
+        ValueKind::Position => Some(ValueType::I64),
         ValueKind::String(_)
         | ValueKind::Symbol(_)
         | ValueKind::Vector(_)
@@ -3939,7 +4027,7 @@ mod tests {
             .map(|object| {
                 let storage = match &object.storage {
                     RuntimeObjectStorage::Native { slots } => format!("native {slots:?}"),
-                    RuntimeObjectStorage::String { value } => format!("string {value:?}"),
+                    RuntimeObjectStorage::String { text } => format!("string {:?}", text.as_str()),
                     RuntimeObjectStorage::Symbol { name } => format!("symbol {name:?}"),
                     RuntimeObjectStorage::Vector { elements } => format!("vector {elements:?}"),
                     _ => String::from("other"),
