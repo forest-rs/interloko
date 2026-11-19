@@ -1,0 +1,26 @@
+// expect: run 2128842
+// expect: diagnostics 0
+// expect: dump lowered contains string.step
+
+// A `for` over a value typing knows is a `<string>` steps positions itself,
+// from the start to the end, reading each character and the position after
+// it with one decode, whatever its width: no iteration protocol callables.
+// Its variable is a `<character>`, and a second clause still stops the loop
+// at the shorter.
+
+define function codes(s :: <string>) => <integer>
+  let total = 0;
+  for (c in s) total := total + as(<integer>, c) end;
+  total
+end;
+
+define function last-index(s :: <string>) => <integer>
+  let last = -1;
+  for (c :: <character> in s, i from 0 below 10) last := i end;
+  last
+end;
+
+define function main() => <integer>
+  // 'a' + 'é' + '😀' = 97 + 233 + 128512
+  codes("a\u{e9}\u{1f600}") + last-index("abc") * 1000000 + codes("")
+end;

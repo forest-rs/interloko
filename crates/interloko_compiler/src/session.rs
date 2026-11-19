@@ -13859,6 +13859,7 @@ fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
     match intrinsic {
         // The symbol, unlike the name, tells overloads apart.
         sem::Intrinsic::Text(function) => function.symbol(),
+        sem::Intrinsic::StringStep => "string-step",
         sem::Intrinsic::CharCompare(op) => match op {
             sem::CompareOp::Eq => "character=",
             sem::CompareOp::Lt => "character<",

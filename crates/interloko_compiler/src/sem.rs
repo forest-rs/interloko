@@ -25,6 +25,8 @@ enum CollectionKind {
     Vector,
     /// A `<table>`, keyed by any object.
     Table,
+    /// A `<string>`, keyed by `<string-position>`.
+    String,
 }
 
 use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
@@ -389,7 +391,8 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         Intrinsic::Text(function) => function.params().len(),
         Intrinsic::CharCompare(_)
         | Intrinsic::PositionCompare(_)
-        | Intrinsic::IntegerDivision(_) => 2,
+        | Intrinsic::IntegerDivision(_)
+        | Intrinsic::StringStep => 2,
         Intrinsic::CharToInteger | Intrinsic::PositionToInteger => 1,
         Intrinsic::TableVersion | Intrinsic::TablePositions => 1,
         Intrinsic::TablePositionValue | Intrinsic::TablePositionKey => 3,
@@ -3898,6 +3901,13 @@ pub enum Intrinsic {
     /// A text operation the runtime host serves, such as `digit?` or
     /// `as(<character>, i)`.
     Text(TextFunction),
+    /// One step of a `for` over a `<string>`: the character at the
+    /// position in its second argument, a hidden local of the loop, which it
+    /// advances past that character. Only the plan of a `for` over a known
+    /// `<string>` makes it, with positions it made itself
+    /// from the start of the string to its end, so the position always
+    /// starts a character; the step reads and advances it with one decode.
+    StringStep,
     /// Compares two `<character>`s by scalar value, inline.
     CharCompare(CompareOp),
     /// `as(<integer>, c)`: a `<character>`'s scalar value, inline.
@@ -4607,7 +4617,20 @@ impl Expr {
     }
 
     fn collect_assigned(&self, out: &mut Vec<LocalId>) {
-        if let Self::AssignLocal { local, .. } = self
+        let assigned = match self {
+            Self::AssignLocal { local, .. } => Some(local),
+            // A string loop's step advances its position local in place.
+            Self::IntrinsicCall {
+                intrinsic: Intrinsic::StringStep,
+                args,
+                ..
+            } => match args.as_slice() {
+                [_, Self::Local { local, .. }] => Some(local),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(local) = assigned
             && !out.contains(local)
         {
             out.push(*local);
@@ -10227,6 +10250,7 @@ impl Lowering {
             Intrinsic::Text(function) => self.text_classes().map_or(ValueKind::Error, |classes| {
                 classes.result_kind(function.result())
             }),
+            Intrinsic::StringStep => ValueKind::Char,
             Intrinsic::TableVersion | Intrinsic::TablePositions | Intrinsic::TableNextPosition => {
                 ValueKind::I64
             }
@@ -10268,6 +10292,7 @@ impl Lowering {
     /// `<vector>` (a `<stretchy-vector>` too) or a `<table>`.
     fn collection_kind(&self, actual: ValueKind) -> Option<CollectionKind> {
         let class = match actual {
+            ValueKind::String(_) => return Some(CollectionKind::String),
             ValueKind::Vector(class) | ValueKind::Object(class) => class,
             _ => return None,
         };
@@ -10361,7 +10386,11 @@ impl Lowering {
                 matches!(actual, ValueKind::MethodObject(_) | ValueKind::Any)
                     || self.is_builtin_instance(actual, BuiltinValueClass::Method)
             }
-            (Intrinsic::CollectionSize, 0) => self.collection_kind(actual).is_some(),
+            // A string's size is its own text operation.
+            (Intrinsic::CollectionSize, 0) => matches!(
+                self.collection_kind(actual),
+                Some(CollectionKind::Vector | CollectionKind::Table)
+            ),
             (Intrinsic::VectorElement | Intrinsic::VectorElementOr, 0)
             | (Intrinsic::VectorElementSetter, 1) => {
                 self.collection_kind(actual) == Some(CollectionKind::Vector)
@@ -13246,10 +13275,14 @@ impl Lowering {
     }
 
     /// Plans a collection clause, `name in collection`, by the collection's
-    /// static class: a vector or table the loop reads directly, and any
-    /// other collection through the iteration protocol it answers to
-    /// `forward-iteration-protocol`. Its elements are `<object>`s; a
-    /// variable annotated with another type checks each one with `as`.
+    /// static class: a vector, table or string the loop reads directly, and
+    /// any other collection through the iteration protocol it answers to
+    /// `forward-iteration-protocol`. A vector's or table's elements are
+    /// `<object>`s, which a variable annotated with another type checks with
+    /// `as`; a string's are `<character>`s, checked the same way only under
+    /// an annotation a character may not satisfy. Reading these collections
+    /// directly is sound because no program can override their kernel
+    /// `forward-iteration-protocol` methods.
     fn plan_collection_for(
         &mut self,
         ctx: &mut FunctionContext,
@@ -13372,6 +13405,76 @@ impl Lowering {
                         value: Box::new(next),
                         span,
                     },
+                    state: position,
+                }
+            }
+            Some(CollectionKind::String) => {
+                // The state is a position the loop makes itself, from the
+                // start to the end, so each step reads the character there
+                // and the position after it with one decode, and nothing can
+                // signal: a string's bytes never change.
+                let start = call(
+                    self,
+                    Intrinsic::Text(TextFunction::StartPosition),
+                    vec![c.clone()],
+                );
+                let position = self.hidden_for_local(
+                    ctx,
+                    binding,
+                    "position",
+                    ValueKind::Position,
+                    start,
+                    statements,
+                );
+                let end_value = call(
+                    self,
+                    Intrinsic::Text(TextFunction::EndPosition),
+                    vec![c.clone()],
+                );
+                let end = self.hidden_for_local(
+                    ctx,
+                    binding,
+                    "end",
+                    ValueKind::Position,
+                    end_value,
+                    statements,
+                );
+                let p = hidden_local(position, ValueKind::Position, span);
+                let test = call(
+                    self,
+                    Intrinsic::PositionCompare(CompareOp::Lt),
+                    vec![p.clone(), hidden_local(end, ValueKind::Position, span)],
+                );
+                let read = call(self, Intrinsic::StringStep, vec![c, p]);
+                // The variable is a `<character>`, unless an annotation a
+                // character may not satisfy asks for a check: then it is the
+                // `<object>` the protocol would give, cast with `as` as a
+                // vector's element is, so a mismatch signals as it would.
+                // The binding's own `let` reports an annotation that does not
+                // resolve, so its diagnostics are not repeated here.
+                let unchecked = binding.type_annotation.as_ref().is_none_or(|annotation| {
+                    let resolved = self.resolve_type_expr(annotation, &mut Vec::new());
+                    resolved.range.is_none()
+                        && matches!(resolved.kind, ValueKind::Char | ValueKind::Any)
+                });
+                let name = hidden_for_name(binding, "element");
+                let local = ctx.add_local(
+                    self.local_definition(binding.definition, &name),
+                    name,
+                    if unchecked {
+                        ValueKind::Char
+                    } else {
+                        ValueKind::Any
+                    },
+                    None,
+                    span,
+                );
+                ForPlan {
+                    test,
+                    each: vec![hidden_let(local, read, span)],
+                    value: hidden_for_name(binding, "element"),
+                    checked: !unchecked,
+                    step: no_values(span),
                     state: position,
                 }
             }
@@ -15717,6 +15820,30 @@ mod tests {
                 ("actual", "<integer>")
             ]
         ));
+    }
+
+    #[test]
+    fn a_string_loop_assigns_its_position_where_it_steps() {
+        // The step advances the hidden position in place, so analyses that
+        // ask what a loop assigns, such as typing's loop-head widening, see
+        // it as assigned.
+        let module = lower_source(
+            "define function count(s :: <string>) => <integer>\n  \
+             let n = 0;\n  for (c in s) n := n + 1 end;\n  n\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        let function = &module.functions[0];
+        let position = function
+            .locals
+            .iter()
+            .find(|local| local.name == "c#for-position")
+            .expect("the loop's position local")
+            .id;
+        assert!(
+            function.body.assigned_locals().contains(&position),
+            "{:?}",
+            function.body.assigned_locals()
+        );
     }
 
     #[test]

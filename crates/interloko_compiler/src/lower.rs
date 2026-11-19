@@ -570,11 +570,19 @@ pub enum LokoTrap {
     /// `make` on a class value named a class requiring an init keyword the
     /// call does not pass.
     MakeMissingInitKeyword,
+    /// A `for` over a `<string>` found no character at a position it made
+    /// itself ([`Instr::StringStep`]): the string's host broke the rule that
+    /// a `<string>`'s bytes never change.
+    StringStepMissing,
 }
 
 impl LokoTrap {
     /// Every Loko trap in code order.
-    pub const ALL: &'static [Self] = &[Self::MakeClassOutsideBound, Self::MakeMissingInitKeyword];
+    pub const ALL: &'static [Self] = &[
+        Self::MakeClassOutsideBound,
+        Self::MakeMissingInitKeyword,
+        Self::StringStepMissing,
+    ];
 
     /// Returns the tape trap code for this condition.
     #[must_use]
@@ -582,6 +590,7 @@ impl LokoTrap {
         match self {
             Self::MakeClassOutsideBound => 5,
             Self::MakeMissingInitKeyword => 6,
+            Self::StringStepMissing => 7,
         }
     }
 
@@ -591,6 +600,7 @@ impl LokoTrap {
         match code {
             5 => Some(Self::MakeClassOutsideBound),
             6 => Some(Self::MakeMissingInitKeyword),
+            7 => Some(Self::StringStepMissing),
             _ => None,
         }
     }
@@ -601,6 +611,7 @@ impl LokoTrap {
         match self {
             Self::MakeClassOutsideBound => "make on a class outside the call's bound",
             Self::MakeMissingInitKeyword => "make on a class needing a missing init keyword",
+            Self::StringStepMissing => "a string loop found no character at its own position",
         }
     }
 
@@ -608,9 +619,9 @@ impl LokoTrap {
     #[must_use]
     pub const fn diagnostic_code(self) -> DiagnosticCode {
         match self {
-            Self::MakeClassOutsideBound | Self::MakeMissingInitKeyword => {
-                DiagnosticCode::RuntimeTrap
-            }
+            Self::MakeClassOutsideBound
+            | Self::MakeMissingInitKeyword
+            | Self::StringStepMissing => DiagnosticCode::RuntimeTrap,
         }
     }
 }
@@ -1526,6 +1537,21 @@ pub enum Instr {
         /// For an operation that can reject its argument
         /// ([`sem::TextFunction::checked_arg`]), what a rejection signals.
         check: Option<Box<TextCheck>>,
+        /// Source span.
+        span: Span,
+    },
+    /// One step of a `for` over a `<string>` ([`sem::Intrinsic::StringStep`]):
+    /// the character at `position`, which advances past it in place. The
+    /// loop made `position` itself, so it always starts a character; the
+    /// tape decodes it once and traps ([`LokoTrap::StringStepMissing`]) if
+    /// it does not.
+    StringStep {
+        /// Destination register for the character.
+        dst: Reg,
+        /// The loop's position register, read and advanced.
+        position: Reg,
+        /// The `<string>`.
+        string: Reg,
         /// Source span.
         span: Span,
     },
@@ -8079,6 +8105,7 @@ impl<'module> BodyLowering<'module> {
                 return self.lower_make_vector(intrinsic, args, result_kind, span);
             }
             sem::Intrinsic::Text(function) => return self.lower_text_call(function, args, span),
+            sem::Intrinsic::StringStep => return self.lower_string_step(args, span),
             sem::Intrinsic::CharCompare(op) => {
                 let [lhs, rhs] = args else {
                     return Err(invalid_semantic(
@@ -8272,6 +8299,42 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         Ok(result)
+    }
+
+    /// Lowers one step of a `for` over a `<string>`
+    /// ([`sem::Intrinsic::StringStep`]): the character at the loop's
+    /// position, which advances in its own register.
+    fn lower_string_step(&mut self, args: &[sem::Expr], span: Span) -> Result<Value, LowerError> {
+        let [string, sem::Expr::Local { local, .. }] = args else {
+            return Err(invalid_semantic(
+                "a string step takes a string and its loop's position",
+            ));
+        };
+        let string = self.lower_expr(string)?;
+        let position = self
+            .local_regs
+            .get(local.0 as usize)
+            .and_then(|value| *value)
+            .ok_or_else(|| invalid_semantic("a string step's position has no register"))?;
+        if position.kind != ValueKind::Position
+            || self.current_local(*local).is_some_and(|local| local.shared)
+            || self
+                .unboxed_locals
+                .iter()
+                .any(|(unboxed, _)| *unboxed == position.reg)
+        {
+            return Err(invalid_semantic(
+                "a string step's position is not a register of its own",
+            ));
+        }
+        let dst = self.alloc(ValueKind::Char);
+        self.instructions.push(Instr::StringStep {
+            dst: dst.reg,
+            position: position.reg,
+            string: string.reg,
+            span,
+        });
+        Ok(dst)
     }
 
     /// Lowers an intrinsic's arguments as its runtime operation takes them:
@@ -10976,6 +11039,7 @@ const fn value_type_of_kind(kind: ValueKind) -> Option<execution_tape::program::
 fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> Option<RuntimeOp> {
     Some(match intrinsic {
         sem::Intrinsic::Text(_)
+        | sem::Intrinsic::StringStep
         | sem::Intrinsic::CharCompare(_)
         | sem::Intrinsic::CharToInteger
         | sem::Intrinsic::PositionCompare(_)
@@ -12273,6 +12337,15 @@ impl Module {
             } => {
                 write!(f, "  %{dst} = integer.call {}", function.symbol())?;
                 self.fmt_arg_list(f, args)?;
+                fmt_span(f, *span)
+            }
+            Instr::StringStep {
+                dst,
+                position,
+                string,
+                span,
+            } => {
+                write!(f, "  %{dst} = string.step %{string}, %{position}")?;
                 fmt_span(f, *span)
             }
             Instr::TextCall {

@@ -179,8 +179,13 @@ The current slices include:
   is an open built-in generic, sealed over `<vector>`, `<string>`, `<table>`
   and `<sequence>` itself. A string's states are its `<string-position>`s,
   so the key of each character indexes the string, and it has no element
-  setter; a `for` over a string goes through the protocol's callables for
-  now, one boxed character per step. The abstract `<sequence>` class, whose
+  setter. Over a `<string>` typing knows, `for` steps positions itself and
+  reads each character and the next position with one tape decode, binding
+  a `<character>`, about 60 ns per character; under an annotation a
+  character may not satisfy, it is cast as an `<object>` element would be,
+  and typing warns that the cast always fails, which strict typing refuses.
+  Over a string typing does not know, it goes through the protocol's
+  callables, one boxed character per step. The abstract `<sequence>` class, whose
   subclasses are `<vector>`, `<string>` and a program's own, has a default
   method iterating from 0 below
   `size(c)` with `element`, so a program's sequence class iterates once it
