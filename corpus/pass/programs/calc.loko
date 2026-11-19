@@ -1,0 +1,329 @@
+// expect: run 10
+// expect: diagnostics 0
+
+// A calculator language read by a table-driven Pratt parser. Each operator
+// is one entry in a table that says how tightly it binds, which way it
+// associates and what it computes, so one loop parses every precedence
+// level and adding an operator is adding an entry. Even `;` is one: it
+// evaluates its left operand, then answers its right.
+//
+//   let x = 6 * 7; sqrt(x * x) + max(1, 2)   =>  44
+
+// --- operators -----------------------------------------------------------
+
+define class <infix> (<object>)
+  constant slot name :: <string>, required-init-keyword: name:;
+  constant slot power :: <integer>, required-init-keyword: power:;
+  constant slot associativity :: <symbol>, required-init-keyword: associativity:;
+  constant slot combine :: callable(<integer>, <integer>) => <integer>,
+    required-init-keyword: combine:;
+end;
+
+define class <prefix> (<object>)
+  constant slot name :: <string>, required-init-keyword: name:;
+  constant slot power :: <integer>, required-init-keyword: power:;
+  constant slot apply :: callable(<integer>) => <integer>, required-init-keyword: apply:;
+end;
+
+define function infix(table :: <table>, name :: <string>, power :: <integer>,
+                      combine :: callable(<integer>, <integer>) => <integer>,
+                      #key associativity :: <symbol> = #left) => ()
+  table[name] := make(<infix>, name: name, power: power,
+                      associativity: associativity, combine: combine)
+end;
+
+define function flag(test :: <boolean>) => <integer>
+  if (test) 1 else 0 end
+end;
+
+define function power-of(base :: <integer>, exponent :: <integer>) => <integer>
+  let result = 1;
+  for (i from 1 to exponent) result := result * base end;
+  result
+end;
+
+// `;` binds loosest of all, so a `let` takes everything up to the next one.
+define constant $statement-power = 1;
+
+define constant $infix :: <table> = begin
+  let t = make(<table>);
+  infix(t, ";", $statement-power, method (a :: <integer>, b :: <integer>) => <integer> b end);
+  infix(t, "==", 10, method (a :: <integer>, b :: <integer>) => <integer> flag(a = b) end);
+  infix(t, "!=", 10, method (a :: <integer>, b :: <integer>) => <integer> flag(a < b | a > b) end);
+  infix(t, "<",  10, method (a :: <integer>, b :: <integer>) => <integer> flag(a < b) end);
+  infix(t, "<=", 10, method (a :: <integer>, b :: <integer>) => <integer> flag(a <= b) end);
+  infix(t, ">",  10, method (a :: <integer>, b :: <integer>) => <integer> flag(a > b) end);
+  infix(t, ">=", 10, method (a :: <integer>, b :: <integer>) => <integer> flag(a >= b) end);
+  infix(t, "+",  20, method (a :: <integer>, b :: <integer>) => <integer> a + b end);
+  infix(t, "-",  20, method (a :: <integer>, b :: <integer>) => <integer> a - b end);
+  infix(t, "*",  30, method (a :: <integer>, b :: <integer>) => <integer> a * b end);
+  infix(t, "/",  30, method (a :: <integer>, b :: <integer>) => <integer> truncate/(a, b) end);
+  infix(t, "^",  50, power-of, associativity: #right);
+  t
+end;
+
+// Unary minus binds tighter than `*` but looser than `^`: -2 ^ 2 is -4.
+define constant $prefix :: <table> = begin
+  let t = make(<table>);
+  t["-"] := make(<prefix>, name: "-", power: 40,
+                 apply: method (a :: <integer>) => <integer> - a end);
+  t
+end;
+
+// --- tokens --------------------------------------------------------------
+
+define class <parse-error> (<error>)
+  constant slot position :: <string-position>, required-init-keyword: position:;
+end;
+
+define class <token> (<object>)
+  constant slot kind :: <symbol>, required-init-keyword: kind:;   // #number, #name, #symbol, #end
+  constant slot text :: <string>, required-init-keyword: text:;
+  constant slot position :: <string-position>, required-init-keyword: position:;
+end;
+
+// The longest operator or punctuation at `pos`, so `<=` is one token.
+define function match-symbol(text :: <string>, pos :: <string-position>) => <string>
+  let best = "";
+  let consider = method (name :: <string>) => ()
+    if (size(name) > size(best) & starts-with?(text, name, at: pos)) best := name end
+  end;
+  for (op :: <infix> in $infix) consider(op.name) end;
+  for (op :: <prefix> in $prefix) consider(op.name) end;
+  for (name :: <string> in #["(", ")", ",", "="]) consider(name) end;
+  if (best = "") signal(make(<parse-error>, position: pos)) end;
+  best
+end;
+
+define function kind-of(c :: <character>) => <symbol>
+  case
+    digit?(c) => #number;
+    alphabetic?(c) => #name;
+    whitespace?(c) => #space;
+    otherwise => #symbol;
+  end
+end;
+
+define function tokenize(text :: <string>) => <stretchy-vector>
+  let tokens = make(<stretchy-vector>);
+  let pos = start-position(text);
+  while (pos < end-position(text))
+    let start = pos;
+    let kind = kind-of(text[pos]);
+    if (kind == #symbol)
+      pos := position-after(text, match-symbol(text, pos), pos)
+    else
+      while (pos < end-position(text) & kind-of(text[pos]) == kind)
+        pos := next-position(text, pos)
+      end
+    end;
+    unless (kind == #space)
+      add!(tokens, make(<token>, kind: kind, position: start,
+                        text: copy-sequence(text, start: start, end: pos)))
+    end
+  end;
+  add!(tokens, make(<token>, kind: #end, text: "", position: pos))
+end;
+
+// --- syntax tree and evaluation ------------------------------------------
+
+define abstract class <node> (<object>) end;
+
+define class <literal> (<node>)
+  constant slot value :: <integer>, required-init-keyword: value:;
+end;
+
+define class <variable> (<node>)
+  constant slot name :: <string>, required-init-keyword: name:;
+end;
+
+define class <unary> (<node>)
+  constant slot operator :: <prefix>, required-init-keyword: operator:;
+  constant slot operand :: <node>, required-init-keyword: operand:;
+end;
+
+define class <binary> (<node>)
+  constant slot operator :: <infix>, required-init-keyword: operator:;
+  constant slot left :: <node>, required-init-keyword: left:;
+  constant slot right :: <node>, required-init-keyword: right:;
+end;
+
+define class <call> (<node>)
+  constant slot callee :: <string>, required-init-keyword: callee:;
+  constant slot arguments :: <stretchy-vector>, required-init-keyword: arguments:;
+end;
+
+define class <definition> (<node>)
+  constant slot name :: <string>, required-init-keyword: name:;
+  constant slot value :: <node>, required-init-keyword: value:;
+end;
+
+define constant $builtins :: <table> = begin
+  let t = make(<table>);
+  t["max"] := method (xs :: <stretchy-vector>) => <integer>
+                let best :: <integer> = xs[0];
+                for (x :: <integer> in xs) if (x > best) best := x end end;
+                best
+              end;
+  t["sqrt"] := method (xs :: <stretchy-vector>) => <integer>
+                 as(<integer>, floor(sqrt(as(<double-float>, xs[0]))))
+               end;
+  t
+end;
+
+define generic eval(node :: <node>, env :: <table>) => <integer>;
+
+define method eval(node :: <literal>, env :: <table>) => <integer>
+  node.value
+end;
+
+define method eval(node :: <variable>, env :: <table>) => <integer>
+  env[node.name]
+end;
+
+define method eval(node :: <unary>, env :: <table>) => <integer>
+  let apply = node.operator.apply;
+  apply(eval(node.operand, env))
+end;
+
+define method eval(node :: <binary>, env :: <table>) => <integer>
+  let combine = node.operator.combine;
+  combine(eval(node.left, env), eval(node.right, env))
+end;
+
+define method eval(node :: <call>, env :: <table>) => <integer>
+  let f :: <function> = $builtins[node.callee];
+  let values = make(<stretchy-vector>);
+  for (argument :: <node> in node.arguments) add!(values, eval(argument, env)) end;
+  f(values)
+end;
+
+define method eval(node :: <definition>, env :: <table>) => <integer>
+  env[node.name] := eval(node.value, env)
+end;
+
+// --- the Pratt parser ----------------------------------------------------
+
+define class <parser> (<object>)
+  constant slot tokens :: <stretchy-vector>, required-init-keyword: tokens:;
+  slot index :: <integer>, init-value: 0;
+end;
+
+define function peek(p :: <parser>) => <token>
+  p.tokens[p.index]
+end;
+
+define function next(p :: <parser>) => <token>
+  let token = peek(p);
+  unless (token.kind == #end) p.index := p.index + 1 end;
+  token
+end;
+
+define function fail(token :: <token>) => <node>
+  signal(make(<parse-error>, position: token.position))
+end;
+
+define function expect(p :: <parser>, text :: <string>) => ()
+  let token = next(p);
+  unless (token.text = text) fail(token) end
+end;
+
+// How tightly the next token binds to the expression on its left: an infix
+// operator's power, or 0 for anything that ends an expression.
+define function left-power(p :: <parser>) => <integer>
+  let op = element($infix, peek(p).text, default: #f);
+  if (instance?(op, <infix>)) op.power else 0 end
+end;
+
+define function parse-expression(p :: <parser>, min-power :: <integer>) => <node>
+  let left = parse-prefix(p);
+  while (left-power(p) > min-power)
+    let op :: <infix> = $infix[next(p).text];
+    let right-power = if (op.associativity == #right) op.power - 1 else op.power end;
+    left := make(<binary>, operator: op, left: left, right: parse-expression(p, right-power))
+  end;
+  left
+end;
+
+define function parse-prefix(p :: <parser>) => <node>
+  let token = next(p);
+  select (token.kind)
+    #number =>
+      let n = 0;
+      for (c in token.text) n := n * 10 + digit-value(c) end;
+      make(<literal>, value: n);
+    #name =>
+      if (token.text = "let")
+        let name = next(p);
+        unless (name.kind == #name) fail(name) end;
+        expect(p, "=");
+        let value = parse-expression(p, $statement-power);
+        make(<definition>, name: name.text, value: value)
+      elseif (peek(p).text = "(")
+        make(<call>, callee: token.text, arguments: parse-arguments(p))
+      else
+        make(<variable>, name: token.text)
+      end;
+    otherwise =>
+      let op = element($prefix, token.text, default: #f);
+      if (token.text = "(")
+        let inner = parse-expression(p, 0);
+        expect(p, ")");
+        inner
+      elseif (instance?(op, <prefix>))
+        make(<unary>, operator: op, operand: parse-expression(p, op.power))
+      else
+        fail(token)
+      end;
+  end
+end;
+
+define function parse-arguments(p :: <parser>) => <stretchy-vector>
+  let arguments = make(<stretchy-vector>);
+  expect(p, "(");
+  unless (peek(p).text = ")")
+    add!(arguments, parse-expression(p, 0));
+    while (peek(p).text = ",")
+      next(p);
+      add!(arguments, parse-expression(p, 0))
+    end
+  end;
+  expect(p, ")");
+  arguments
+end;
+
+// A program is one expression, its statements joined by `;`.
+define function run(source :: <string>) => <integer>
+  let p = make(<parser>, tokens: tokenize(source));
+  let program = parse-expression(p, 0);
+  unless (peek(p).kind == #end) fail(peek(p)) end;
+  eval(program, make(<table>))
+end;
+
+// The byte offset at which `source` fails to parse, or -1 if it parses.
+define function error-offset(source :: <string>) => <integer>
+  handle
+    begin run(source); -1 end
+  with restart e :: <parse-error>
+    byte-offset(e.position)
+  end
+end;
+
+// Counts the checks that pass: all 10 of them.
+define function main() => <integer>
+  let passed = 0;
+  let check = method (actual :: <integer>, expected :: <integer>) => ()
+    if (actual = expected) passed := passed + 1 end
+  end;
+  check(run("let x = 6 * 7; sqrt(x * x) + max(1, 2)"), 44);
+  check(run("1 - 2 - 3"), -4);                         // left-associative
+  check(run("2 ^ 3 ^ 2"), 512);                        // right-associative
+  check(run("-2 ^ 2 + 10 / 3"), -1);                   // prefix below ^
+  check(run("(1 + 2) * 3 == 9"), 1);
+  check(run("let a = 3; let b = 4; a * a + b * b >= 25"), 1);
+  check(run("2 * 3 != 6"), 0);
+  check(error-offset("1 + * 2"), 4);                   // no operand
+  check(error-offset("max(1, 2"), 8);                  // unclosed call
+  check(error-offset("3 $ 4"), 2);                     // unknown symbol
+  passed
+end;
