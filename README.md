@@ -444,7 +444,8 @@ The current slices include:
   changes it and so takes an explicit `as`. A method's limited parameter
   restates or widens its generic's range: unlike Dylan's DRM, methods do
   not dispatch on ranges, so a send's range check is the only one;
-- symbols and keywords;
+- symbols and keywords; a symbol's name is any word after `#`, reserved
+  words included, so a lexer may mark its last token `#end`;
 - strings: a `<string>` is immutable, validated UTF-8 whose header caches
   its character count, so `size(s)` is O(1), and whether it is all ASCII;
   a Rust host borrows its text as `&str` without a copy. Strings have no

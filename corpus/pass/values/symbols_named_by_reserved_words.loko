@@ -1,0 +1,20 @@
+// expect: run 321
+// expect: diagnostics 0
+
+// `#` sets a symbol's name apart, so a reserved word names a symbol like any
+// other word: a lexer may mark its last token `#end`.
+
+define function score(kind :: <symbol>) => <integer>
+  select (kind)
+    #end => 1;
+    #if, #else => 2;
+    #define => 3;
+    otherwise => 0;
+  end
+end;
+
+define function main() => <integer>
+  let last = #end;
+  let ended = if (last == #end) score(last) else 0 end;
+  score(#define) * 100 + score(#else) * 10 + ended
+end;

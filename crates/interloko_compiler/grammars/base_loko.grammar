@@ -123,11 +123,14 @@ rule number-literal = number
 rule bool-literal = `#t` | `#f`
 rule string-literal raw = `"` until(`"`) `"`
 rule character-literal raw = `'` (`\` [^\n] [^'\n]* | [^'\\\n] [^'\n]*) `'`
-rule symbol-literal = `#` name
+rule symbol-literal = `#` symbol-name
 rule keyword-symbol = explicit-keyword-symbol | expression-keyword-symbol
 rule explicit-keyword-symbol = `#:` name
 rule expression-keyword-symbol = name `:` !`=`
 rule name raw = [$A-Za-z_] ([A-Za-z0-9_?!-] | `/` !`/`)*
+// A symbol's name may be a reserved word, as in `#end`: unlike `name`, it
+// takes no reserved-word exclusion, since `#` already sets it apart.
+rule symbol-name raw = [$A-Za-z_] ([A-Za-z0-9_?!-] | `/` !`/`)*
 rule number raw = [0-9]+ (`.` [0-9]+)? ([eE] [+-]? [0-9]+)? (`i32` | `u32` | `f32`)?
 rule type-name = `<` type-name-word `>`
 rule type-name-word = [$A-Za-z_] [A-Za-z0-9_?-]*
