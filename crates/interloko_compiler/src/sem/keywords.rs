@@ -42,17 +42,20 @@
 //!
 //! A function or generic that takes keywords is a callable value like any
 //! other. Its value's signature lists its keywords after its parameters,
-//! and its typed entry takes each boxed: a call through a value of known
-//! signature passes every keyword in declaration order, and for those it
-//! does not pass a marker of the kernel's that source cannot produce, not
-//! `$unsupplied`, so passing `$unsupplied` explicitly means what it means
-//! in a direct call; the entry calls the default function of each absent
-//! one, in declaration order, and checks the type of each other. A call through an untyped `<callable>` passes the keywords
-//! it names in its boxed entry's keyword tail: their names and values, in
-//! source order. Every boxed entry takes a tail; a value that takes
-//! keywords reads it by name, and any value signals
-//! `<unknown-keyword-error>` for a keyword it does not take. `apply`
-//! passes no keywords.
+//! and the value holds, in its typed entry's place, a keyword entry: it
+//! takes the arguments boxed, then a keyword tail, the names and values of
+//! the keywords a call passes, and reads the tail by name. A call through a
+//! value of known signature passes every keyword in declaration order, and
+//! for those it does not pass a marker of the kernel's that source cannot
+//! produce, not `$unsupplied`, so passing `$unsupplied` explicitly means
+//! what it means in a direct call; the value calls the default function of
+//! each absent one, in declaration order, and checks the type of each
+//! other. A call through an untyped `<callable>` passing keywords tests the
+//! value's shape: one that takes keywords gets them in a tail, and one that
+//! takes none signals `<unknown-keyword-error>`. A call passing none, and
+//! every value that takes none, keeps the plain boxed callable ABI, whose
+//! boxed entry passes a keyword value no keywords. `apply` passes no
+//! keywords.
 //!
 //! An anonymous function cannot take keyword parameters yet.
 //!

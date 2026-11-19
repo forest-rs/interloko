@@ -248,15 +248,17 @@ The current slices include:
   and in declaration order, with a kernel marker source cannot write for
   those it leaves out (so passing `$unsupplied` explicitly means what it
   means in a direct call), and the value's entry fills their defaults and
-  checks their types; a call
-  through an untyped `<callable>` passes the keywords it names, by name, in
-  a tail every boxed entry takes, and a value that does not take one
-  signals `<unknown-keyword-error>`, which holds the keyword, rather than
-  dropping it. A typed callable type may declare keywords too, as in
+  checks their types; a call through an untyped `<callable>` passes the
+  keywords it names by name, to a value whose shape says it takes
+  keywords, and a value that does not take one signals
+  `<unknown-keyword-error>`, which holds the keyword, rather than dropping
+  it. Calls passing no keywords, and values taking none, keep the plain
+  boxed callable ABI, so they cost nothing more. A typed callable type may
+  declare keywords too, as in
   `callable(<integer>, #key by :: <integer>) => <integer>`, and only a
-  value with exactly those keywords has it. `apply` passes no keywords. Statically, a keyword its
-  callee does not take, or one passed twice, is an error. Anonymous
-  functions cannot declare keywords yet;
+  value with exactly those keywords has it. `apply` passes no keywords.
+  Statically, a keyword its callee does not take, or one passed twice, is
+  an error. Anonymous functions cannot declare keywords yet;
 - Dylan's class and generic adjectives: `define abstract class` (no direct
   instances, so `make` refuses it), `define sealed class` and `define
   sealed generic`, with `open` and `concrete` as the explicit defaults.

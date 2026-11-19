@@ -88,6 +88,7 @@ fn for_each_read(instr: &Instr, mut f: impl FnMut(Reg)) {
         | Instr::Identical { lhs, rhs, .. }
         | Instr::EqU64 { lhs, rhs, .. }
         | Instr::AddU64 { lhs, rhs, .. }
+        | Instr::AndU64 { lhs, rhs, .. }
         | Instr::StrEq { lhs, rhs, .. } => all(&[*lhs, *rhs]),
         Instr::ConstStr { .. } => {}
         Instr::ArrayNew { values, .. } => all(values),
@@ -219,6 +220,7 @@ fn for_each_write(instr: &Instr, mut f: impl FnMut(Reg)) {
         | Instr::CastClassObject { dst, .. }
         | Instr::EqU64 { dst, .. }
         | Instr::AddU64 { dst, .. }
+        | Instr::AndU64 { dst, .. }
         | Instr::StrEq { dst, .. }
         | Instr::ConstStr { dst, .. }
         | Instr::ArrayNew { dst, .. }
@@ -348,6 +350,7 @@ fn for_each_label_ref(instr: &Instr, mut f: impl FnMut(LabelId)) {
         | Instr::CastClassObject { .. }
         | Instr::EqU64 { .. }
         | Instr::AddU64 { .. }
+        | Instr::AndU64 { .. }
         | Instr::StrEq { .. }
         | Instr::ConstStr { .. }
         | Instr::ArrayNew { .. }
@@ -483,6 +486,7 @@ fn result_mut(instr: &mut Instr) -> Option<&mut Reg> {
         | Instr::I64Compare { dst, .. }
         | Instr::EqU64 { dst, .. }
         | Instr::AddU64 { dst, .. }
+        | Instr::AndU64 { dst, .. }
         | Instr::StrEq { dst, .. }
         | Instr::ConstStr { dst, .. }
         | Instr::ArrayNew { dst, .. }
