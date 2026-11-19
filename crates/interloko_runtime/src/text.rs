@@ -17,7 +17,11 @@
 //!
 //! Each operation is a host call named [`TextFunction::symbol`] whose
 //! signature [`TextFunction::signature`] derives from its parameter and
-//! result kinds ([`TextKind`]). An operation that can reject an argument
+//! result kinds ([`TextKind`]). Compiled code answers the reads that step
+//! through a string itself, from the bytes
+//! [`InterlokoHost::string_bytes`] lends it, and makes the host call only
+//! for a position that has no character, so the two must agree on which
+//! positions those are. An operation that can reject an argument
 //! ([`TextFunction::checked_arg`]) fails with the check-failed tag, so the
 //! calling code can signal a `type-error.range` and retry with a
 //! `use-value` replacement for that argument.

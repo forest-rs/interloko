@@ -397,9 +397,12 @@ The current slices include:
   c)` makes one. A `<string-builder>` (`make(<string-builder>)`, `add!(b,
   c)` or `add!(b, s)`, `size(b)`) is the one mutable text type, and
   `as(<string>, b)` takes its text without a copy, leaving it empty; a
-  builder in the image cannot change during a turn yet. Each operation is
-  a runtime host call: a loop reading a character and stepping costs about
-  220 ns per character today. Normalization and grapheme clusters are
+  builder in the image cannot change during a turn yet. `s[p]`,
+  `element`, `next-position`, `previous-position`, `start-position` and
+  `end-position` read the string's UTF-8 in tape code, with no host call
+  unless a position has no character there; the other operations are
+  runtime host calls. A loop reading a character and stepping costs
+  about 105 ns per character. Normalization and grapheme clusters are
   left to a library;
 - mutable collections, which live in the runtime's heap as instances do
   (a turn's stores into image collections are logged, undone if it aborts

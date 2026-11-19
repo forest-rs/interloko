@@ -1508,9 +1508,12 @@ pub enum Instr {
     /// Call of a text operation the runtime host serves
     /// ([`sem::TextFunction`]), such as `digit?`.
     ///
-    /// The one lowering seam for text: tape instructions that read a
-    /// string's bytes can replace a call here without changing the
-    /// semantic IR.
+    /// The one lowering seam for text. The tape backend reads a string's
+    /// bytes in place of the call for `start-position`, `end-position`,
+    /// `s[p]`, `element(s, p, default:)`, `next-position` and
+    /// `previous-position`, keeping the call for a position the bytes have
+    /// no character at, so code that lowers to these operations, such as a
+    /// loop over a string, never makes a host call per character.
     TextCall {
         /// Destination register.
         dst: Reg,
