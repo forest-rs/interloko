@@ -1,0 +1,13 @@
+// expect: diagnostic code sem.local-not-callable
+// expect: diagnostics 1
+// A local shadows a function of its name even when its value cannot be
+// called, as in Dylan: calling it is an error, not a call of the function.
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function main() => <integer>
+  let inc = 3;
+  inc(1)
+end;

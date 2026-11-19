@@ -248,6 +248,9 @@ pub enum DiagnosticCode {
     DuplicateKeywordArgument,
     /// A definition binds a name the kernel reserves, `$unsupplied`.
     ReservedName,
+    /// A call names a local whose value is not callable; the local shadows
+    /// any function of its name.
+    LocalNotCallable,
     /// A keyword argument has the wrong type for its keyword parameter.
     KeywordArgumentTypeMismatch,
     /// A keyword parameter of a type other than `<object>` declares no
@@ -477,6 +480,7 @@ impl DiagnosticCode {
         Self::UnexpectedKeywordArgument,
         Self::DuplicateKeywordArgument,
         Self::ReservedName,
+        Self::LocalNotCallable,
         Self::KeywordArgumentTypeMismatch,
         Self::KeywordParameterNeedsDefault,
         Self::MethodKeywordNotInGeneric,
@@ -636,6 +640,7 @@ impl DiagnosticCode {
             Self::UnexpectedKeywordArgument => "sem.unexpected-keyword-argument",
             Self::DuplicateKeywordArgument => "sem.duplicate-keyword-argument",
             Self::ReservedName => "sem.reserved-name",
+            Self::LocalNotCallable => "sem.local-not-callable",
             Self::KeywordArgumentTypeMismatch => "sem.keyword-argument-type-mismatch",
             Self::KeywordParameterNeedsDefault => "sem.keyword-parameter-needs-default",
             Self::MethodKeywordNotInGeneric => "sem.method-keyword-not-in-generic",
@@ -796,6 +801,7 @@ impl DiagnosticCode {
             "sem.unexpected-keyword-argument" => Self::UnexpectedKeywordArgument,
             "sem.duplicate-keyword-argument" => Self::DuplicateKeywordArgument,
             "sem.reserved-name" => Self::ReservedName,
+            "sem.local-not-callable" => Self::LocalNotCallable,
             "sem.keyword-argument-type-mismatch" => Self::KeywordArgumentTypeMismatch,
             "sem.keyword-parameter-needs-default" => Self::KeywordParameterNeedsDefault,
             "sem.method-keyword-not-in-generic" => Self::MethodKeywordNotInGeneric,
