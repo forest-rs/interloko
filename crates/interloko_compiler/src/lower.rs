@@ -1281,6 +1281,41 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// Makes the cell of a [shared](sem::Local::shared) local, holding
+    /// `value`; the cell is a runtime object the frame and the closures
+    /// capturing the local share.
+    CellNew {
+        /// Destination register, of kind `Object(None)`.
+        dst: Reg,
+        /// The local's first value.
+        value: Reg,
+        /// The local's value category.
+        kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
+    /// Reads the value a shared local's cell holds.
+    CellGet {
+        /// Destination register.
+        dst: Reg,
+        /// Cell register.
+        cell: Reg,
+        /// The local's value category.
+        kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
+    /// Stores a value in a shared local's cell.
+    CellSet {
+        /// Cell register.
+        cell: Reg,
+        /// Stored value.
+        value: Reg,
+        /// The local's value category.
+        kind: ValueKind,
+        /// Source span.
+        span: Span,
+    },
     /// Boxes a concrete value into the top `<object>` runtime value.
     BoxValue {
         /// Destination register.
@@ -3538,7 +3573,9 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             collect_known_callable_uses_in_expr(receiver, uses);
             collect_known_callable_uses_in_expr(value, uses);
         }
-        sem::Expr::AssignLocal { value, .. } => collect_known_callable_uses_in_expr(value, uses),
+        sem::Expr::AssignLocal { value, .. } | sem::Expr::AssignCapture { value, .. } => {
+            collect_known_callable_uses_in_expr(value, uses);
+        }
         sem::Expr::Loop { test, body, .. } => {
             collect_known_callable_uses_in_expr(test, uses);
             collect_known_callable_uses_in_block(body, uses);
@@ -4182,9 +4219,10 @@ impl<'module> BodyLowering<'module> {
     /// than its register's, such as after an `instance?` test: the value
     /// at that class with no cast, when flow typing established the class
     /// itself. The fact describes the value read, which the register holds
-    /// until the read is used: captures are immutable, and an assignment
-    /// that could change an assigned local's register first is read from a
-    /// copy ([`reads`]).
+    /// until the read is used: a shared local's read is a fresh copy of its
+    /// cell, other captures are immutable, and an assignment that could
+    /// change an assigned local's register first is read from a copy
+    /// ([`reads`]).
     fn proved_read(
         &self,
         value: Value,
@@ -4623,6 +4661,19 @@ impl<'module> BodyLowering<'module> {
     /// not know the shape of a callable value in an assigned local's
     /// register: assignments may store any of them.
     fn home(&mut self, local: sem::LocalId, value: Value, span: Span) -> Value {
+        if self.current_local(local).is_some_and(|local| local.shared) {
+            let cell = self.alloc(ValueKind::Object(None));
+            self.instructions.push(Instr::CellNew {
+                dst: cell.reg,
+                value: value.reg,
+                kind: value.kind,
+                span,
+            });
+            return Value {
+                reachable: value.reachable,
+                ..cell
+            };
+        }
         let assigned = self
             .current_local(local)
             .is_some_and(|local| local.assigned);
@@ -4649,7 +4700,25 @@ impl<'module> BodyLowering<'module> {
         self.source_locals
             .iter()
             .zip(&self.local_regs)
-            .any(|(local, value)| local.assigned && value.is_some_and(|value| value.reg == reg))
+            .any(|(local, value)| {
+                local.assigned && !local.shared && value.is_some_and(|value| value.reg == reg)
+            })
+    }
+
+    /// Reads the value the cell in `cell` holds, of category `kind`.
+    fn cell_get(&mut self, cell: Reg, kind: ValueKind, span: Span) -> Value {
+        let value = self.alloc(kind);
+        self.instructions.push(Instr::CellGet {
+            dst: value.reg,
+            cell,
+            kind,
+            span,
+        });
+        if matches!(kind, ValueKind::Closure(_)) {
+            // Any callable of the local's type may have been stored.
+            self.callable_joins.push((value.reg, false));
+        }
+        value
     }
 
     /// The value of `local` at the read `expr`: its register, or for an
@@ -4666,6 +4735,13 @@ impl<'module> BodyLowering<'module> {
             .get(local.0 as usize)
             .and_then(|value| *value)
             .ok_or_else(|| invalid_semantic("local was read before assignment"))?;
+        if let Some(local) = self.current_local(local).filter(|local| local.shared) {
+            let kind = self.value_kind_with_callable_signature(
+                local.kind,
+                local.callable_signature.as_ref(),
+            )?;
+            return Ok(self.cell_get(value.reg, kind, span));
+        }
         let direct = self
             .direct_reads
             .iter()
@@ -4687,6 +4763,53 @@ impl<'module> BodyLowering<'module> {
         Ok(copy)
     }
 
+    /// The cell a closure's capture of a shared local holds.
+    fn capture_cell(&mut self, env: Value, capture: sem::CaptureId, span: Span) -> Reg {
+        let cell = self.alloc(ValueKind::Object(None));
+        self.instructions.push(Instr::CaptureGet {
+            dst: cell.reg,
+            env: env.reg,
+            index: capture.0 as usize,
+            kind: ValueKind::Object(None),
+            span,
+        });
+        cell.reg
+    }
+
+    /// Lowers `name := value` through a closure's capture of a shared
+    /// local: the value, converted to the local's kind, goes into the cell
+    /// the capture holds, and is the result.
+    fn lower_assign_capture(
+        &mut self,
+        capture: sem::CaptureId,
+        kind: sem::ValueKind,
+        callable_signature: Option<&sem::CallableSignature>,
+        value: &sem::Expr,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let expected = self.value_kind_with_callable_signature(kind, callable_signature)?;
+        let value = self.lower_expr(value)?;
+        let value = self.coerce_value(value, expected, span)?;
+        let env = self
+            .env
+            .ok_or_else(|| invalid_semantic("capture assigned outside closure body"))?;
+        if !self
+            .captures
+            .get(capture.0 as usize)
+            .is_some_and(|capture| capture.shared)
+        {
+            return Err(invalid_semantic("assigned capture is not shared"));
+        }
+        let cell = self.capture_cell(env, capture, span);
+        self.instructions.push(Instr::CellSet {
+            cell,
+            value: value.reg,
+            kind: value.kind,
+            span,
+        });
+        Ok(value)
+    }
+
     /// Lowers `local := value`: the value, converted to the local's kind,
     /// moves into the local's register ([`Self::home`]) and is the result.
     fn lower_assign_local(
@@ -4705,6 +4828,15 @@ impl<'module> BodyLowering<'module> {
             .get(local.0 as usize)
             .and_then(|value| *value)
             .ok_or_else(|| invalid_semantic("local was assigned before its binding"))?;
+        if self.current_local(local).is_some_and(|local| local.shared) {
+            self.instructions.push(Instr::CellSet {
+                cell: home.reg,
+                value: value.reg,
+                kind: value.kind,
+                span,
+            });
+            return Ok(value);
+        }
         if home.kind != value.kind
             || self
                 .unboxed_locals
@@ -5464,17 +5596,23 @@ impl<'module> BodyLowering<'module> {
                     capture_info.kind,
                     capture_info.callable_signature.as_ref(),
                 )?;
-                let result = self.alloc(kind);
-                self.instructions.push(Instr::CaptureGet {
-                    dst: result.reg,
-                    env: env.reg,
-                    index: capture.0 as usize,
-                    kind,
-                    span: *span,
-                });
-                if matches!(kind, ValueKind::Closure(_)) {
-                    self.proven_callables.push(result.reg);
-                }
+                let result = if capture_info.shared {
+                    let cell = self.capture_cell(env, *capture, *span);
+                    self.cell_get(cell, kind, *span)
+                } else {
+                    let result = self.alloc(kind);
+                    self.instructions.push(Instr::CaptureGet {
+                        dst: result.reg,
+                        env: env.reg,
+                        index: capture.0 as usize,
+                        kind,
+                        span: *span,
+                    });
+                    if matches!(kind, ValueKind::Closure(_)) {
+                        self.proven_callables.push(result.reg);
+                    }
+                    result
+                };
                 let expected = self.value_kind_with_callable_signature(
                     *result_kind,
                     callable_signature.as_ref(),
@@ -6273,6 +6411,19 @@ impl<'module> BodyLowering<'module> {
                 value,
                 *span,
             ),
+            sem::Expr::AssignCapture {
+                capture,
+                result_kind,
+                callable_signature,
+                value,
+                span,
+            } => self.lower_assign_capture(
+                *capture,
+                *result_kind,
+                callable_signature.as_ref(),
+                value,
+                *span,
+            ),
             sem::Expr::If { .. }
             | sem::Expr::Handle { .. }
             | sem::Expr::Block { .. }
@@ -6988,7 +7139,23 @@ impl<'module> BodyLowering<'module> {
                 .get(capture.source.0 as usize)
                 .and_then(|value| *value)
                 .ok_or_else(|| invalid_semantic("captured local was read before assignment"))?;
-            let value = self.coerce_value(value, self.value_kind(capture.kind)?, span)?;
+            // A copy of a local that is assigned would go stale: sem shares
+            // every local a closure refers to and `:=` assigns.
+            if !capture.shared
+                && self
+                    .current_local(capture.source)
+                    .is_some_and(|local| local.assigned)
+            {
+                return Err(invalid_semantic(
+                    "a closure captures an assigned local that is not shared",
+                ));
+            }
+            // A shared local's capture is its cell.
+            let value = if capture.shared {
+                value
+            } else {
+                self.coerce_value(value, self.value_kind(capture.kind)?, span)?
+            };
             capture_regs.push(value.reg);
         }
         // A restart guard is never a callable value: the handler search
@@ -10644,6 +10811,36 @@ impl Module {
                 span,
             } => {
                 write!(f, "  %{dst} = capture.get %{env}[{index}]: ")?;
+                self.fmt_kind(f, *kind)?;
+                fmt_span(f, *span)
+            }
+            Instr::CellNew {
+                dst,
+                value,
+                kind,
+                span,
+            } => {
+                write!(f, "  %{dst} = cell.new %{value}: ")?;
+                self.fmt_kind(f, *kind)?;
+                fmt_span(f, *span)
+            }
+            Instr::CellGet {
+                dst,
+                cell,
+                kind,
+                span,
+            } => {
+                write!(f, "  %{dst} = cell.get %{cell}: ")?;
+                self.fmt_kind(f, *kind)?;
+                fmt_span(f, *span)
+            }
+            Instr::CellSet {
+                cell,
+                value,
+                kind,
+                span,
+            } => {
+                write!(f, "  cell.set %{cell}, %{value}: ")?;
                 self.fmt_kind(f, *kind)?;
                 fmt_span(f, *span)
             }

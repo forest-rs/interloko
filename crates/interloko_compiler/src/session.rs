@@ -5852,7 +5852,7 @@ fn collect_dispatch_sites_in_expr(
             collect_dispatch_sites_in_expr(artifacts, owner, receiver, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
         }
-        sem::Expr::AssignLocal { value, .. } => {
+        sem::Expr::AssignLocal { value, .. } | sem::Expr::AssignCapture { value, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
         }
         sem::Expr::Loop { test, body, .. } => {
@@ -8408,11 +8408,12 @@ fn dump_sem(module: &sem::Module) -> String {
         for capture in &closure.captures {
             let _ = writeln!(
                 out,
-                "  capture c{} l{} {} {}",
+                "  capture c{} l{} {} {}{}",
                 capture.id.0,
                 capture.source.0,
                 capture.name,
-                sem_kind_label(module, capture.kind)
+                sem_kind_label(module, capture.kind),
+                if capture.shared { " shared" } else { "" }
             );
         }
         dump_sem_locals(module, &mut out, &closure.locals, 2);
@@ -13834,11 +13835,12 @@ fn dump_sem_locals(module: &sem::Module, out: &mut String, locals: &[sem::Local]
         indent_line(out, indent);
         let _ = writeln!(
             out,
-            "local l{} {} {} {}",
+            "local l{} {} {} {}{}",
             local.id.0,
             local.definition,
             local.name,
-            sem_kind_label(module, local.kind)
+            sem_kind_label(module, local.kind),
+            if local.shared { " shared" } else { "" }
         );
     }
 }
@@ -14212,6 +14214,15 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             ..
         } => {
             let _ = writeln!(out, "assign l{} result={result_kind:?}", local.0);
+            dump_sem_expr(out, value, indent + 2);
+        }
+        sem::Expr::AssignCapture {
+            capture,
+            result_kind,
+            value,
+            ..
+        } => {
+            let _ = writeln!(out, "assign-capture k{} result={result_kind:?}", capture.0);
             dump_sem_expr(out, value, indent + 2);
         }
         sem::Expr::Loop {
@@ -15380,7 +15391,9 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             let _ = write!(out, "closure({}:{result}:", closure.0);
             for capture in captures {
                 let kind = sem_kind_fingerprint(module, capture.kind);
-                let _ = write!(out, "{}:{}:{kind},", capture.id.0, capture.source.0);
+                // A shared capture holds its local's cell, not a copy.
+                let shared = if capture.shared { ":shared" } else { "" };
+                let _ = write!(out, "{}:{}:{kind}{shared},", capture.id.0, capture.source.0);
             }
             // The body belongs to the enclosing definition: typing checks it
             // in place, and lowering emits it with the definition.
@@ -15775,6 +15788,17 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         } => {
             let result = sem_kind_fingerprint(module, *result_kind);
             let _ = write!(out, "assign({}:{result}=", local.0);
+            fingerprint_sem_expr(module, value, out);
+            out.push(')');
+        }
+        sem::Expr::AssignCapture {
+            capture,
+            result_kind,
+            value,
+            ..
+        } => {
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let _ = write!(out, "assign-capture({}:{result}=", capture.0);
             fingerprint_sem_expr(module, value, out);
             out.push(')');
         }

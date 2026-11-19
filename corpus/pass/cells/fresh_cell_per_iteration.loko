@@ -1,0 +1,24 @@
+// expect: run 6
+// expect: diagnostics 0
+
+// A local bound in a loop body is bound afresh each iteration, so a
+// closure made in one iteration keeps that iteration's cell.
+
+define class <box> (<object>)
+  slot get :: callable() => <integer>;
+end;
+
+define function main() => <integer>
+  let first :: <box> = make(<box>, get: function () => <integer> 0 end);
+  let i = 1;
+  while (i <= 3)
+    let mine = 0;
+    let bump = function () => <integer> mine := mine + i end;
+    bump();
+    bump();
+    if (i = 3) first := make(<box>, get: function () => <integer> mine end) end;
+    i := i + 1
+  end;
+  let get = first.get;
+  get()
+end;

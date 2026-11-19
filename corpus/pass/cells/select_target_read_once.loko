@@ -1,0 +1,19 @@
+// expect: run 22
+// expect: diagnostics 0
+
+// A `select` reads its target once, before any key: a key that calls a
+// closure storing in the target's local does not change what is matched.
+
+define function main() => <integer>
+  let n = 1;
+  let bump = function () => <integer>
+    n := 2;
+    2
+  end;
+  let picked = select (n)
+    bump() => 10;
+    1 => 20;
+    otherwise => 30;
+  end;
+  picked + n
+end;

@@ -1,0 +1,12 @@
+// expect: run 110
+// expect: diagnostics 0
+
+// A closure that calls a local callable refers to it, so when the frame
+// assigns the callable afterwards, the closure calls the new one.
+
+define function main() => <integer>
+  let f :: callable(<integer>) => <integer> = function (n :: <integer>) => <integer> n end;
+  let g = function () => <integer> f(10) end;
+  f := function (n :: <integer>) => <integer> n + 100 end;
+  g()
+end;

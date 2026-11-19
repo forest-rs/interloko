@@ -1646,6 +1646,48 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm
                     .tuple_get(*dst, *env, u32::try_from(*index).unwrap_or(u32::MAX));
             }
+            lower::Instr::CellNew {
+                dst,
+                value,
+                kind,
+                span,
+            } => {
+                let sig = self.builder.host_sig_for(
+                    runtime::CELL_NEW,
+                    runtime::cell_new_signature(value_type(*kind)),
+                );
+                self.set_span(*span);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*value], &[*dst]);
+            }
+            lower::Instr::CellGet {
+                dst,
+                cell,
+                kind,
+                span,
+            } => {
+                let sig = self.builder.host_sig_for(
+                    runtime::CELL_GET,
+                    runtime::cell_get_signature(value_type(*kind)),
+                );
+                self.set_span(*span);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*cell], &[*dst]);
+            }
+            lower::Instr::CellSet {
+                cell,
+                value,
+                kind,
+                span,
+            } => {
+                let sig = self.builder.host_sig_for(
+                    runtime::CELL_SET,
+                    runtime::cell_set_signature(value_type(*kind)),
+                );
+                self.set_span(*span);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*cell, *value], &[]);
+            }
             lower::Instr::BoxValue {
                 dst,
                 src,

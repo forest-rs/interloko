@@ -1,0 +1,17 @@
+// expect: run 22
+// expect: diagnostics 0
+
+// A constant's initializer runs in a frame of its own, where a local a
+// closure assigns lives in a cell like anywhere else.
+
+define constant $two :: <integer> = block ()
+  let n = 0;
+  let add = function () => <integer> n := n + 1 end;
+  add();
+  add();
+  n
+end;
+
+define function main() => <integer>
+  $two * 10 + $two
+end;

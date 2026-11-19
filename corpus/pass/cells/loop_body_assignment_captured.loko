@@ -1,0 +1,18 @@
+// expect: run 55
+// expect: diagnostics 0
+
+// A loop assigns a local a closure made before the loop captures: every
+// call of the closure reads the cell, so it sees the loop's last store.
+
+define function main() => <integer>
+  let last = 0;
+  let read-last = function () => <integer> last end;
+  let sum = 0;
+  let i = 1;
+  while (i <= 10)
+    last := i;
+    sum := sum + read-last();
+    i := i + 1
+  end;
+  sum
+end;

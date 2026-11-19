@@ -1,0 +1,29 @@
+// expect: run 1210
+// expect: diagnostics 0
+
+// Each call of `make-account` makes a cell of its own, which the returned
+// closures keep after the frame is gone, within the run.
+
+define class <account> (<object>)
+  slot deposit :: callable(<integer>) => <integer>;
+  slot balance :: callable() => <integer>;
+end;
+
+define function make-account(start :: <integer>) => <account>
+  let money = start;
+  make(<account>,
+       deposit: function (amount :: <integer>) => <integer> money := money + amount end,
+       balance: function () => <integer> money end)
+end;
+
+define function main() => <integer>
+  let a = make-account(1000);
+  let b = make-account(0);
+  let deposit-a = a.deposit;
+  let deposit-b = b.deposit;
+  deposit-a(200);
+  deposit-b(10);
+  let balance-a = a.balance;
+  let balance-b = b.balance;
+  balance-a() + balance-b()
+end;

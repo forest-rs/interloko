@@ -1,0 +1,26 @@
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump sem contains count integer shared
+// expect: dump sem contains capture c0 l0 count integer shared
+// expect: dump lowered contains cell.new
+// expect: dump lowered contains cell.get
+// expect: dump lowered contains cell.set
+// expect: dump tape contains interloko.cell_set
+
+// A closure that assigns a local it captures shares the local with its
+// frame: the local lives in a cell they both refer to. The cell outlives
+// `make-counter`'s frame, so each call of the counter sees the last.
+
+define function make-counter() => callable() => <integer>
+  let count = 0;
+  function () => <integer>
+    count := count + 1
+  end
+end;
+
+define function main() => <integer>
+  let tick = make-counter();
+  tick();
+  tick();
+  tick()
+end;

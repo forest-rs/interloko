@@ -406,7 +406,7 @@ fn visit_exprs(expr: &sem::Expr, visit: &mut impl FnMut(&sem::Expr)) {
             visit_exprs(receiver, visit);
             visit_exprs(value, visit);
         }
-        E::AssignLocal { value, .. } => visit_exprs(value, visit),
+        E::AssignLocal { value, .. } | E::AssignCapture { value, .. } => visit_exprs(value, visit),
         E::Loop { test, body, .. } => {
             visit_exprs(test, visit);
             visit_block(body, visit);

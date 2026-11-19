@@ -75,6 +75,10 @@
 //! that returns at once. Under `proved` the counter's increment is proved
 //! not to overflow; the total's addition is checked.
 //!
+//! `cell access` is what one read and one write of the total cost when a
+//! closure captures it, so it lives in a shared cell, against the same loop
+//! with the total in a register.
+//!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
 use std::hint::black_box;
@@ -350,6 +354,17 @@ end;
 define function unlooped(d :: <integer>) => <integer>
   0
 end;
+
+define function cell-looped(d :: <integer>) => <integer>
+  let total = 0;
+  let read-total = function () => <integer> total end;
+  let i = 0;
+  while (i < 256)
+    total := total + i;
+    i := i + 1
+  end;
+  read-total()
+end;
 ";
 
 /// Cases recurse as a balanced binary tree this deep and operate at its
@@ -443,6 +458,7 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("typed passed", net("typed-passed", "plain")),
         ("untyped passed", net("untyped-passed", "plain")),
         ("loop iteration", net("looped", "unlooped")),
+        ("cell access", net("cell-looped", "looped")),
     ]
 }
 

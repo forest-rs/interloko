@@ -1,0 +1,15 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// Two closures capturing one assigned local share its cell with each
+// other and with the frame: what one stores, the other and the frame read.
+
+define function main() => <integer>
+  let balance = 0;
+  let deposit = function (amount :: <integer>) => <integer> balance := balance + amount end;
+  let read = function () => <integer> balance end;
+  deposit(40);
+  balance := balance + 1;
+  deposit(1);
+  read()
+end;

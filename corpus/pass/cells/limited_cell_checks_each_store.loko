@@ -1,0 +1,13 @@
+// expect: runtime code type-error.range
+// expect: diagnostics 0
+
+// A limited local in a cell checks what each closure stores in it, as
+// its frame's assignments are checked: 7 fits, 12 does not.
+
+define function main() => <integer>
+  let digit :: limited(<integer>, min: 0, max: 9) = 0;
+  let set-digit = function (d :: <integer>) => <integer> digit := d end;
+  set-digit(7);
+  set-digit(12);
+  digit
+end;

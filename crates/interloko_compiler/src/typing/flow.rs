@@ -494,7 +494,17 @@ impl<'a> Analysis<'a> {
                     }
                     None => fact.reason,
                 },
-                Var::Capture(_) => fact.reason,
+                // A shared capture's cell holds whatever is stored last.
+                Var::Capture(_) => match self.shared_declared(var) {
+                    Some(ty) => {
+                        let span = self
+                            .reasons
+                            .get(fact.reason.0 as usize)
+                            .map_or(Span::new(0, 0), |reason| reason.span);
+                        self.reason(ReasonKind::Declared, span, &ty, Vec::new())
+                    }
+                    None => fact.reason,
+                },
             };
             if let Some(context) = self.contexts.last_mut() {
                 *context.bound_slot(var) = Some(reason);
@@ -1443,6 +1453,26 @@ impl<'a> Analysis<'a> {
                 let fact = self.eval(env, value);
                 self.assign(env, *local, fact)
             }
+            // Reads of a shared local's cell rely only on its declared type,
+            // so the store leaves no fact to keep.
+            E::AssignCapture {
+                result_kind,
+                callable_signature: _,
+                value,
+                capture,
+                span,
+            } => {
+                let fact = self.eval(env, value);
+                let declared = self
+                    .shared_declared(Var::Capture(*capture))
+                    .unwrap_or_else(|| self.module.kind_type(*result_kind));
+                let ty = fact.ty.meet(&declared, self.module);
+                if ty == fact.ty {
+                    fact
+                } else {
+                    self.fact(ReasonKind::Declared, *span, ty, vec![fact.reason])
+                }
+            }
             E::Loop {
                 kind,
                 test,
@@ -1473,6 +1503,16 @@ impl<'a> Analysis<'a> {
             self.contexts[context].exits[index].escaped = true;
         }
         let at_use = self.module.kind_type(kind);
+        // A shared local's cell may change in any call that runs a closure,
+        // so a read relies on nothing but the local's declared type.
+        if let Some(declared) = self.shared_declared(var) {
+            let ty = declared.meet(&at_use, self.module);
+            let fact = self.fact(ReasonKind::Declared, span, ty, Vec::new());
+            if env.dead.is_none() {
+                self.record_use(var, span, fact.reason);
+            }
+            return fact;
+        }
         match env.get(var).cloned() {
             Some(fact) => {
                 let ty = fact.ty.meet(&at_use, self.module);
@@ -1487,6 +1527,30 @@ impl<'a> Analysis<'a> {
                 fact
             }
             None => self.fact(ReasonKind::Declared, span, at_use, Vec::new()),
+        }
+    }
+
+    /// The declared type of `var` when it is a [shared](sem::Local::shared)
+    /// local or a capture of one.
+    ///
+    /// The environment may still hold facts for such a var (loop heads,
+    /// `forget` and closure creation write them), but they may be stale: a
+    /// call can run a closure that stores in the cell. Every reader of a
+    /// var's facts ([`Self::read`], [`Self::peek`], [`Self::refine`]) asks
+    /// this first, and a new reader must too.
+    fn shared_declared(&self, var: Var) -> Option<Type> {
+        match var {
+            Var::Local(local) => self
+                .local(local)
+                .filter(|binding| binding.shared)
+                .map(|binding| self.declared_type(binding)),
+            Var::Capture(capture) => self
+                .contexts
+                .last()?
+                .captures
+                .get(capture.0 as usize)
+                .filter(|capture| capture.shared)
+                .map(|capture| declared(self.module, capture.kind, capture.range)),
         }
     }
 
@@ -1511,8 +1575,9 @@ impl<'a> Analysis<'a> {
     }
 
     /// Analyzes a closure body where the closure is created: its captures
-    /// hold the facts of their sources here, which no assignment changes: sem
-    /// rejects capturing an assigned local.
+    /// hold the facts of their sources here, which no assignment changes,
+    /// except a shared local's, whose reads rely only on its declared type
+    /// ([`Self::shared_declared`]).
     fn closure(&mut self, env: &Env, index: usize) {
         let Some(closure) = self.module.closures.get(index) else {
             return;
@@ -1922,6 +1987,11 @@ impl<'a> Analysis<'a> {
         span: Span,
         narrow: impl FnOnce(&Type) -> (Type, Vec<ClassId>),
     ) {
+        // A shared local's reads ignore its facts; narrowing them would
+        // only keep stale ones.
+        if self.shared_declared(var).is_some() {
+            return;
+        }
         let Some(current) = env.get(var).cloned() else {
             return;
         };
@@ -1972,9 +2042,15 @@ impl<'a> Analysis<'a> {
     /// operand, or sem's category.
     fn peek(&self, env: &Env, expr: &sem::Expr) -> Option<(Type, Option<ReasonId>)> {
         match expr {
-            sem::Expr::Local { .. } | sem::Expr::Capture { .. } => env
-                .get(var_of(expr)?)
-                .map(|fact| (fact.ty.clone(), Some(fact.reason))),
+            sem::Expr::Local { .. } | sem::Expr::Capture { .. } => {
+                let var = var_of(expr)?;
+                // Only its declared type describes a shared local.
+                if let Some(declared) = self.shared_declared(var) {
+                    return Some((declared, None));
+                }
+                env.get(var)
+                    .map(|fact| (fact.ty.clone(), Some(fact.reason)))
+            }
             sem::Expr::ConstI64 { value, .. } => {
                 Some((range_type(self.module, IntRange::singleton(*value)), None))
             }
@@ -3070,7 +3146,7 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
             walk(module, receiver, visit);
             walk(module, value, visit);
         }
-        E::AssignLocal { value, .. } => walk(module, value, visit),
+        E::AssignLocal { value, .. } | E::AssignCapture { value, .. } => walk(module, value, visit),
         E::Loop { test, body, .. } => {
             walk(module, test, visit);
             walk_block(module, body, visit);

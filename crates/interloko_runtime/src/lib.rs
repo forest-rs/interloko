@@ -69,6 +69,13 @@ pub const CLASS_OF: &str = "interloko.class_of";
 pub const SLOT_GET: &str = "interloko.slot_get";
 /// Host-call symbol for writing a typed runtime-managed slot.
 pub const SLOT_SET: &str = "interloko.slot_set";
+/// Host-call symbol for making a shared local's cell holding its first
+/// value; see [`InterlokoHost::make_cell`].
+pub const CELL_NEW: &str = "interloko.cell_new";
+/// Host-call symbol for reading the value a cell holds.
+pub const CELL_GET: &str = "interloko.cell_get";
+/// Host-call symbol for storing a value in a cell.
+pub const CELL_SET: &str = "interloko.cell_set";
 /// Host-call symbol for boxing a concrete value as the top `<object>` value.
 pub const BOX_VALUE: &str = "interloko.box_value";
 /// Host-call symbol for unboxing an integer, float or boolean from a boxed
@@ -565,6 +572,8 @@ pub struct RuntimeLayout {
 #[non_exhaustive]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeError {
+    /// A cell operation named an object that is not a cell.
+    NotACell,
     /// Runtime layout omits a built-in value class required by an operation.
     MissingBuiltinClass {
         /// Stable source-level class name.
@@ -1852,6 +1861,50 @@ impl InterlokoHost {
         Ok(())
     }
 
+    /// Makes a cell holding `value`: the storage of a local that `:=`
+    /// assigns and closures capture, which the frame and each closure share.
+    ///
+    /// A cell is a native `<object>` with one slot that only the cell
+    /// operations touch; the compiler keeps it out of reach of source code,
+    /// and keeps what it stores within the local's declared type. It lives
+    /// in the heap like any object, so it survives its frame for as long as
+    /// a closure refers to it, within the run that made it.
+    pub fn make_cell(&mut self, value: Value) -> Value {
+        self.push_object(RuntimeObject {
+            class: OBJECT_CLASS_ID,
+            storage: RuntimeObjectStorage::Native { slots: vec![value] },
+        })
+    }
+
+    /// Reads the value the cell `cell` holds.
+    pub fn read_cell(&self, cell: Obj) -> Result<Value, RuntimeError> {
+        match &self.object(cell)?.storage {
+            RuntimeObjectStorage::Native { slots } if slots.len() == 1 => Ok(slots[0].clone()),
+            _ => Err(RuntimeError::NotACell),
+        }
+    }
+
+    /// Stores `value` in the cell `cell`, logging an image cell's old value
+    /// as a slot store is logged, so an aborted turn restores it.
+    pub fn write_cell(&mut self, cell: Obj, value: Value) -> Result<(), RuntimeError> {
+        let location = self.object_ref(cell)?;
+        let RuntimeObjectStorage::Native { slots } = &self.object(cell)?.storage else {
+            return Err(RuntimeError::NotACell);
+        };
+        let [old] = slots.as_slice() else {
+            return Err(RuntimeError::NotACell);
+        };
+        if self.turn.is_some() && location.space == Space::Image {
+            let old = old.clone();
+            self.log_image_store(location.index, 0, old);
+        }
+        let RuntimeObjectStorage::Native { slots } = &mut self.object_mut(cell)?.storage else {
+            return Err(RuntimeError::NotACell);
+        };
+        slots[0] = value;
+        Ok(())
+    }
+
     /// Writes one mutable runtime effective slot and returns the stored value.
     pub fn write_slot(
         &mut self,
@@ -2606,6 +2659,27 @@ impl Host for InterlokoHost {
                 rets[0] = self.write_slot(*obj, runtime_slot_id(*slot_raw)?, *value)?;
                 Ok(0)
             }
+            CELL_NEW => {
+                let [value] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.make_cell(value.to_value());
+                Ok(0)
+            }
+            CELL_GET => {
+                let [ValueRef::Obj(cell)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.read_cell(*cell)?;
+                Ok(0)
+            }
+            CELL_SET => {
+                let [ValueRef::Obj(cell), value] = args else {
+                    return Err(HostError::Failed);
+                };
+                self.write_cell(*cell, value.to_value())?;
+                Ok(0)
+            }
             BOX_VALUE => {
                 let value = match args {
                     [ValueRef::I64(value)] => Value::I64(*value),
@@ -3116,6 +3190,33 @@ pub fn slot_set_signature(kind: ValueKind) -> Option<HostSig> {
         args: vec![object_type(), ValueType::U64, value_type(kind)?],
         rets: vec![value_type(kind)?],
     })
+}
+
+/// Host signature for [`CELL_NEW`] with a value of type `value`.
+#[must_use]
+pub fn cell_new_signature(value: ValueType) -> HostSig {
+    HostSig {
+        args: vec![value],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for [`CELL_GET`] of a value of type `value`.
+#[must_use]
+pub fn cell_get_signature(value: ValueType) -> HostSig {
+    HostSig {
+        args: vec![object_type()],
+        rets: vec![value],
+    }
+}
+
+/// Host signature for [`CELL_SET`] of a value of type `value`.
+#[must_use]
+pub fn cell_set_signature(value: ValueType) -> HostSig {
+    HostSig {
+        args: vec![object_type(), value],
+        rets: vec![],
+    }
 }
 
 /// Host signature for boxing a concrete value as top `<object>`.
@@ -3649,6 +3750,23 @@ mod tests {
         host.abort_turn().expect("turn aborts");
         assert_eq!(host.heap_stats().objects, 4);
         assert!(host.image_root(ImageRootId(2)).is_err());
+    }
+
+    #[test]
+    fn cells_hold_any_value_and_aborted_turns_restore_them() {
+        let mut host = InterlokoHost::new_checked(cell_layout()).expect("layout");
+        // Made outside a turn, the cell is in the image.
+        let cell = object_of(&host.make_cell(Value::I64(1)));
+        assert_eq!(host.read_cell(cell), Ok(Value::I64(1)));
+        host.begin_turn().expect("turn opens");
+        host.write_cell(cell, Value::Bool(true)).expect("store");
+        assert_eq!(host.read_cell(cell), Ok(Value::Bool(true)));
+        let stats = host.abort_turn().expect("turn aborts");
+        assert_eq!(stats.logged_stores, 1);
+        assert_eq!(host.read_cell(cell), Ok(Value::I64(1)));
+        // A value that is not a cell is refused.
+        let boxed = object_of(&host.box_top_value(Value::I64(2)).expect("box"));
+        assert!(host.read_cell(boxed).is_err());
     }
 
     #[test]

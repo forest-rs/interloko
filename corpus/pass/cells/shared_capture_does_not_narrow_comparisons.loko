@@ -1,0 +1,20 @@
+// expect: runtime code type-error.range
+// expect: diagnostics 0
+// expect: dump typing contains range checked
+
+// Inside a closure, a shared capture holds whatever its frame stored
+// last, not the value it had when the closure was made.
+
+define function main() => <integer>
+  let n = 0;
+  let pick = function (y :: limited(<integer>, min: 0, max: 1000)) => <integer>
+    if (y <= n)
+      let z :: limited(<integer>, min: 0, max: 0) = y;
+      z
+    else
+      -1
+    end
+  end;
+  n := 1000;
+  pick(500)
+end;
