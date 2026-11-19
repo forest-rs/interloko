@@ -5363,6 +5363,12 @@ const SELECT_TARGET_LOCAL: &str = "select target";
 const DIVISION_DIVIDEND_LOCAL: &str = "division dividend";
 const DIVISION_DIVISOR_LOCAL: &str = "division divisor";
 
+/// The kernel-only name of the built-in `values`, which the code sem writes
+/// for a division or the iteration protocol calls. A `%` cannot appear in a
+/// source name, so no binding or definition of the program's own `values`
+/// can capture it.
+const KERNEL_VALUES: &str = "%values";
+
 /// The kernel-only name a division's lowering calls for one of its
 /// results, such as `%floor/-quotient`. A `%` cannot appear in a source
 /// name, so no program can call or shadow it.
@@ -9048,10 +9054,13 @@ impl Lowering {
                         expected_results,
                     );
                 }
-                if callee == "apply" {
+                // `apply` and `values` are built in only where no binding
+                // or definition of the program takes the name.
+                let built_in = !self.defines_callable(ctx, callee);
+                if built_in && callee == "apply" {
                     return self.lower_apply(ctx, args, expected_results, *span);
                 }
-                if callee == "values" {
+                if callee == KERNEL_VALUES || (built_in && callee == "values") {
                     let mut values = args
                         .iter()
                         .map(|arg| self.lower_expr(ctx, arg))
@@ -11014,9 +11023,9 @@ impl Lowering {
     /// ```text
     /// let dividend :: <integer> = a; let divisor :: <integer> = b;
     /// if (divisor = 0) signal(make(<division-by-zero-error>, dividend: dividend))
-    /// elseif (divisor = -1) values(- dividend, 0)
-    /// else values(%floor/-quotient(dividend, divisor),
-    ///             %floor/-remainder(dividend, divisor)) end
+    /// elseif (divisor = -1) %values(- dividend, 0)
+    /// else %values(%floor/-quotient(dividend, divisor),
+    ///              %floor/-remainder(dividend, divisor)) end
     /// ```
     ///
     /// so a zero divisor signals a `<division-by-zero-error>` whose
@@ -11086,7 +11095,7 @@ impl Lowering {
         };
         let values = |values: Vec<ast::Expr>| ast::Expr::Call {
             id,
-            callee: "values".into(),
+            callee: KERNEL_VALUES.into(),
             args: values,
             keywords: Vec::new(),
             span,
