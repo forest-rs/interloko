@@ -1821,11 +1821,17 @@ impl<'a> FunctionEmitter<'a> {
                         runtime::BOX_VALUE,
                         runtime::box_value_signature(ValueType::Agg),
                     ),
+                    // A runtime object boxes in its handle: `obj.convert`,
+                    // no host call or allocation.
                     lower::ValueKind::Object(_)
                     | lower::ValueKind::ClassObject(_)
                     | lower::ValueKind::GenericFunctionObject(_)
                     | lower::ValueKind::MethodObject(_)
-                    | lower::ValueKind::SlotDescriptorObject => self.abi.box_object,
+                    | lower::ValueKind::SlotDescriptorObject => {
+                        self.set_span(*span);
+                        self.asm.obj_convert(*dst, *src);
+                        return Ok(());
+                    }
                     // `<i32>` and `<u32>` widen to the `<integer>` they
                     // are before boxing.
                     lower::ValueKind::Any
@@ -2567,22 +2573,24 @@ impl<'a> FunctionEmitter<'a> {
                 otherwise,
                 span,
             } => {
-                // The cast to `<object>` accepts any runtime object and
-                // raises the check-failed tag for a scalar.
-                let check_failed = self.abi.control()?.check_failed;
-                let sig = self.cast_sig(lower::ValueKind::Any)?;
-                let class = self.alloc_temp(ValueType::U64);
+                // A boxed value's key carries `SCALAR_KEY_BIT` unless it
+                // holds a runtime object, which `obj.convert` unboxes; a
+                // scalar goes to `otherwise`. Neither is a host call.
                 let otherwise = self.label(*otherwise)?;
+                let key = self.alloc_temp(ValueType::U64);
+                let bit = self.alloc_temp(ValueType::U64);
+                let is_object = self.alloc_temp(ValueType::Bool);
+                let object = self.asm.label();
                 self.set_span(*span);
                 self.asm
-                    .const_u64(class, u64::from(interloko_model::OBJECT_CLASS_ID.0));
+                    .obj_key(key, *value)
+                    .const_u64(bit, runtime::SCALAR_KEY_BIT)
+                    .u64_lt(is_object, key, bit)
+                    .br(is_object, object, otherwise);
                 self.asm
-                    .begin_region(&[Catch::Tag(check_failed, otherwise)]);
-                self.asm
-                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*value, class], &[*dst]);
-                self.asm
-                    .end_region()
-                    .ok_or_else(|| invalid_lowered("unbox region is not open"))?;
+                    .place(object)
+                    .map_err(|_| invalid_lowered("unbox label is placed twice"))?;
+                self.asm.obj_convert(*dst, *value);
             }
             lower::Instr::CheckedRuntimeCall {
                 dst,
@@ -3331,6 +3339,42 @@ mod tests {
         assert!(!four.contains("interloko.instance_of"), "{four}");
         let five = text("five?");
         assert!(five.contains("interloko.instance_of"), "{five}");
+    }
+
+    #[test]
+    fn untyped_receivers_unbox_and_objects_box_without_host_calls() {
+        // `describe` sends to an `<object>`, which the send unboxes to the
+        // object it holds; `wrap` passes a `<shape>` as an `<object>`.
+        let module = lower_source(
+            "define class <shape> (<object>)\nend;\n\
+             define generic name(s) => <integer>;\n\
+             define method name(s :: <shape>) => <integer>\n  1\nend;\n\
+             define function describe(x :: <object>) => <integer>\n  name(x)\nend;\n\
+             define function wrap(s :: <shape>) => <integer>\n  describe(s)\nend;",
+        );
+        let tape = emit(&module).expect("tape emission should succeed");
+        let text = |name: &str| {
+            let function = module
+                .functions
+                .iter()
+                .find(|function| function.name == name)
+                .expect("function");
+            execution_tape::disasm::disassemble_function(
+                tape.program().program(),
+                FuncId(function.id.0),
+            )
+            .expect("disassembles")
+            .instrs()
+            .map(|instr| instr.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        let describe = text("describe");
+        assert!(describe.contains("obj.convert"), "{describe}");
+        assert!(!describe.contains("interloko.cast_object"), "{describe}");
+        let wrap = text("wrap");
+        assert!(wrap.contains("obj.convert"), "{wrap}");
+        assert!(!wrap.contains("interloko.box_value"), "{wrap}");
     }
 
     #[test]
