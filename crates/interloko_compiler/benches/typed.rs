@@ -70,6 +70,11 @@
 //! it, against `plain`: `typed passed` through a typed callable parameter,
 //! `untyped passed` through a `<callable>` one.
 //!
+//! `loop iteration` is one iteration of a `while` loop that adds its
+//! counter to a total, `2^DEPTH` of them in one frame, against a function
+//! that returns at once. Under `proved` the counter's increment is proved
+//! not to overflow; the total's addition is checked.
+//!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
 use std::hint::black_box;
@@ -331,10 +336,24 @@ end;
 define function untyped-passed(d :: <integer>) => <integer>
   untyped-carry(inc, d)
 end;
+
+define function looped(d :: <integer>) => <integer>
+  let total = 0;
+  let i = 0;
+  while (i < 256)
+    total := total + i;
+    i := i + 1
+  end;
+  total
+end;
+
+define function unlooped(d :: <integer>) => <integer>
+  0
+end;
 ";
 
 /// Cases recurse as a balanced binary tree this deep and operate at its
-/// `2^DEPTH` leaves.
+/// `2^DEPTH` leaves; `looped` iterates `2^DEPTH` times.
 const DEPTH: i64 = 8;
 const LEAVES: f64 = 256.0;
 const SAMPLES: usize = 15;
@@ -423,6 +442,7 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("mismatched call", net("mismatched", "inc-called")),
         ("typed passed", net("typed-passed", "plain")),
         ("untyped passed", net("untyped-passed", "plain")),
+        ("loop iteration", net("looped", "unlooped")),
     ]
 }
 
