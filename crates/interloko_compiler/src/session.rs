@@ -7294,6 +7294,13 @@ impl Host for SharedFunctionCallHost<'_> {
     fn object_key(&self, object: execution_tape::value::Obj) -> Option<u64> {
         self.0.borrow().object_key(object)
     }
+    fn convert_object(
+        &self,
+        object: execution_tape::value::Obj,
+        to: execution_tape::program::HostTypeId,
+    ) -> Option<execution_tape::value::Obj> {
+        self.0.borrow().convert_object(object, to)
+    }
 }
 
 struct FunctionCallHost<'a> {
@@ -7374,6 +7381,13 @@ impl Host for FunctionCallHost<'_> {
     }
     fn object_key(&self, object: execution_tape::value::Obj) -> Option<u64> {
         self.runtime.object_key(object)
+    }
+    fn convert_object(
+        &self,
+        object: execution_tape::value::Obj,
+        to: execution_tape::program::HostTypeId,
+    ) -> Option<execution_tape::value::Obj> {
+        self.runtime.convert_object(object, to)
     }
     fn call(
         &mut self,
@@ -26925,6 +26939,13 @@ end;
         }
         fn object_key(&self, object: execution_tape::value::Obj) -> Option<u64> {
             self.0.object_key(object)
+        }
+        fn convert_object(
+            &self,
+            object: execution_tape::value::Obj,
+            to: execution_tape::program::HostTypeId,
+        ) -> Option<execution_tape::value::Obj> {
+            self.0.convert_object(object, to)
         }
     }
 

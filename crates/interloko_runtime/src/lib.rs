@@ -2369,6 +2369,9 @@ impl Host for InterlokoHost {
     fn object_key(&self, object: Obj) -> Option<u64> {
         Self::object_key(self, object)
     }
+    fn convert_object(&self, object: Obj, to: HostTypeId) -> Option<Obj> {
+        Self::convert_object(self, object, to)
+    }
     fn call(
         &mut self,
         symbol: &str,
@@ -3155,7 +3158,7 @@ impl Host for InterlokoHost {
 ///
 /// [`InterlokoHost::object_key`] keys an object by its class, so guests test
 /// classes with `obj.key`; the bit also tells a boxed scalar from a boxed
-/// object without a host call.
+/// object, which `obj.convert` can unbox, without a host call.
 pub const SCALAR_KEY_BIT: u64 = 1 << 63;
 
 impl InterlokoHost {
@@ -3181,6 +3184,26 @@ impl InterlokoHost {
                     Some(u64::from(class.0) | SCALAR_KEY_BIT)
                 }
             },
+            _ => None,
+        }
+    }
+
+    /// `object` in the representation of host type `to`, for `obj.convert`:
+    /// a boxed `<object>` value holding a runtime object unboxed to it, or a
+    /// runtime object boxed. Both carry the object's handle, so neither
+    /// allocates; `None` for any other conversion.
+    #[must_use]
+    pub fn convert_object(&self, object: Obj, to: HostTypeId) -> Option<Obj> {
+        match (object.host_type, to) {
+            (INTERLOKO_VALUE_TYPE, INTERLOKO_OBJECT_TYPE) => {
+                self.value_object(ValueRef::Obj(object))
+            }
+            (INTERLOKO_OBJECT_TYPE, INTERLOKO_VALUE_TYPE) => {
+                BoxedHandle::immediate_object(object.handle).map(|handle| Obj {
+                    host_type: INTERLOKO_VALUE_TYPE,
+                    handle,
+                })
+            }
             _ => None,
         }
     }
