@@ -188,7 +188,8 @@ The current slices include:
   keywords, and a value that does not take one signals
   `<unknown-keyword-error>`, which holds the keyword, rather than dropping
   it. Calls passing no keywords, and values taking none, keep the plain
-  boxed callable ABI, so they cost nothing more. A typed callable type may declare keywords too, as in
+  boxed callable ABI, so they cost nothing more. A typed callable type may
+  declare keywords too, as in
   `callable(<integer>, #key by :: <integer>) => <integer>`, and only a
   value with exactly those keywords has it. `apply` passes no keywords. Statically, a keyword its
   callee does not take, or one passed twice, is an error. Anonymous
