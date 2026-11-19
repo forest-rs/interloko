@@ -13861,6 +13861,7 @@ fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
             sem::CompareOp::Ge => "position>=",
         },
         sem::Intrinsic::PositionToInteger => "byte-offset",
+        sem::Intrinsic::IntegerDivision(function) => function.symbol(),
         sem::Intrinsic::ObjectClass => "object-class",
         sem::Intrinsic::ClassName => "class-name",
         sem::Intrinsic::ClassDirectSuperclass => "class-direct-superclass",

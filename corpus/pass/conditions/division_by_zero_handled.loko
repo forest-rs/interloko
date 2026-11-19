@@ -1,0 +1,14 @@
+// expect: run -12
+// expect: diagnostics 0
+
+// Dividing by zero signals a `<division-by-zero-error>`, a kernel `<error>`
+// holding the dividend; a handler supplies the division's two results.
+
+define function main() => <integer>
+  let (q, r) = handle
+    floor/(7, 0)
+  with restart e :: <division-by-zero-error>
+    values(-1, -2)
+  end;
+  q * 10 + r
+end;

@@ -1492,6 +1492,19 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// One result of an integer division the runtime host computes
+    /// ([`sem::IntegerDivision`]), from a divisor that is neither zero nor
+    /// `-1`.
+    IntegerCall {
+        /// Destination register.
+        dst: Reg,
+        /// The result computed.
+        function: sem::IntegerDivision,
+        /// The dividend and divisor registers, `i64`s.
+        args: Vec<Reg>,
+        /// Source span.
+        span: Span,
+    },
     /// Call of a text operation the runtime host serves
     /// ([`sem::TextFunction`]), such as `digit?`.
     ///
@@ -8095,6 +8108,27 @@ impl<'module> BodyLowering<'module> {
                 });
                 return Ok(result);
             }
+            sem::Intrinsic::IntegerDivision(function) => {
+                let mut regs = Vec::with_capacity(args.len());
+                for arg in args {
+                    let mut value = self.lower_expr(arg)?;
+                    if matches!(value.kind, ValueKind::I32 | ValueKind::U32) {
+                        value = self.widen_integer(value, arg.span());
+                    }
+                    if value.kind != ValueKind::I64 {
+                        return Err(invalid_semantic("an integer division takes integers"));
+                    }
+                    regs.push(value.reg);
+                }
+                let result = self.alloc(ValueKind::I64);
+                self.instructions.push(Instr::IntegerCall {
+                    dst: result.reg,
+                    function,
+                    args: regs,
+                    span,
+                });
+                return Ok(result);
+            }
             sem::Intrinsic::PositionToInteger => {
                 let [value] = args else {
                     return Err(invalid_semantic("byte-offset takes one operand"));
@@ -10955,7 +10989,8 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> Option<RuntimeOp> {
         | sem::Intrinsic::CharCompare(_)
         | sem::Intrinsic::CharToInteger
         | sem::Intrinsic::PositionCompare(_)
-        | sem::Intrinsic::PositionToInteger => return None,
+        | sem::Intrinsic::PositionToInteger
+        | sem::Intrinsic::IntegerDivision(_) => return None,
         sem::Intrinsic::ObjectClass => RuntimeOp::ObjectClass,
         sem::Intrinsic::ClassName => RuntimeOp::ClassName,
         sem::Intrinsic::ClassDirectSuperclass => RuntimeOp::ClassDirectSuperclass,
@@ -12237,6 +12272,16 @@ impl Module {
                 span,
             } => {
                 write!(f, "  %{dst} = float.call {}", function.symbol())?;
+                self.fmt_arg_list(f, args)?;
+                fmt_span(f, *span)
+            }
+            Instr::IntegerCall {
+                dst,
+                function,
+                args,
+                span,
+            } => {
+                write!(f, "  %{dst} = integer.call {}", function.symbol())?;
                 self.fmt_arg_list(f, args)?;
                 fmt_span(f, *span)
             }

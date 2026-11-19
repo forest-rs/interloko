@@ -70,6 +70,9 @@ pub enum ConditionClass {
     /// `<constant-cycle-error>`: a constant was read while its own
     /// initializer was running.
     ConstantCycleError,
+    /// `<division-by-zero-error>`: an integer division's divisor was zero.
+    /// Its `use-value` restart supplies the division's results.
+    DivisionByZeroError,
 }
 
 impl ConditionClass {
@@ -87,6 +90,7 @@ impl ConditionClass {
         Self::ImmutableCollectionError,
         Self::CollectionModifiedError,
         Self::ConstantCycleError,
+        Self::DivisionByZeroError,
     ];
 
     /// Returns the Loko-visible class name.
@@ -102,6 +106,7 @@ impl ConditionClass {
             Self::ImmutableCollectionError => "<immutable-collection-error>",
             Self::CollectionModifiedError => "<collection-modified-error>",
             Self::ConstantCycleError => "<constant-cycle-error>",
+            Self::DivisionByZeroError => "<division-by-zero-error>",
         }
     }
 
@@ -118,6 +123,7 @@ impl ConditionClass {
             b"<immutable-collection-error>" => Some(Self::ImmutableCollectionError),
             b"<collection-modified-error>" => Some(Self::CollectionModifiedError),
             b"<constant-cycle-error>" => Some(Self::ConstantCycleError),
+            b"<division-by-zero-error>" => Some(Self::DivisionByZeroError),
             _ => None,
         }
     }
@@ -135,7 +141,8 @@ impl ConditionClass {
             | Self::NotFoundError
             | Self::ImmutableCollectionError
             | Self::CollectionModifiedError
-            | Self::ConstantCycleError => Some(Self::Error),
+            | Self::ConstantCycleError
+            | Self::DivisionByZeroError => Some(Self::Error),
         }
     }
 
@@ -151,6 +158,7 @@ impl ConditionClass {
             Self::ImmutableCollectionError => &IMMUTABLE_COLLECTION_ERROR_SLOTS,
             Self::CollectionModifiedError => &COLLECTION_MODIFIED_ERROR_SLOTS,
             Self::ConstantCycleError => &CONSTANT_CYCLE_ERROR_SLOTS,
+            Self::DivisionByZeroError => &DIVISION_BY_ZERO_ERROR_SLOTS,
         }
     }
 }
@@ -247,6 +255,14 @@ pub const SELECT_ERROR_SLOTS: [ConditionSlot; 1] = [ConditionSlot {
     name: "select-error-value",
     type_name: "<object>",
     init_keyword: "value",
+}];
+
+/// The slot of `<division-by-zero-error>`: the dividend that was divided
+/// by zero.
+pub const DIVISION_BY_ZERO_ERROR_SLOTS: [ConditionSlot; 1] = [ConditionSlot {
+    name: "division-by-zero-error-dividend",
+    type_name: "<integer>",
+    init_keyword: "dividend",
 }];
 
 /// The slots of `<constant-cycle-error>`, in layout order:

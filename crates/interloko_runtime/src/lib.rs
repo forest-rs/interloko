@@ -18,6 +18,7 @@ mod constant;
 pub mod control;
 pub mod driver;
 mod evacuate;
+mod integer;
 mod no_applicable_method;
 mod region;
 mod send;
@@ -77,6 +78,7 @@ pub use constant::{
     CONSTANT_ABANDON, CONSTANT_CLAIM, CONSTANT_GET, CONSTANT_READ, CONSTANT_SET, ConstantCellError,
     ConstantCycleReport, constant_abandon_signature, constant_claim_signature,
 };
+pub use integer::{IntegerDivision, Rounding};
 pub use no_applicable_method::NoApplicableMethodReport;
 use region::{NurserySerials, ObjectRef, OpenTurn, Region, Space};
 pub use send::SendCacheReport;
@@ -2390,6 +2392,17 @@ impl Host for InterlokoHost {
         }
         if let Some(result) = self.constant_call(symbol, &ctx, args, rets) {
             return result;
+        }
+        if let Some(function) = IntegerDivision::from_symbol(symbol) {
+            let ([ValueRef::I64(dividend), ValueRef::I64(divisor)], [ret]) = (args, rets) else {
+                return Err(HostError::Failed);
+            };
+            *ret = Value::I64(
+                function
+                    .apply(*dividend, *divisor)
+                    .ok_or(HostError::Failed)?,
+            );
+            return Ok(0);
         }
         if let Some(function) = TextFunction::from_symbol(symbol) {
             let [ret] = rets else {

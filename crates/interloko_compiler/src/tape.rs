@@ -2135,6 +2135,20 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm
                     .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
             }
+            lower::Instr::IntegerCall {
+                dst,
+                function,
+                args,
+                span,
+            } => {
+                // Declared at its first use, as only a division calls it.
+                let sig = self
+                    .builder
+                    .host_sig_for(function.symbol(), function.signature());
+                self.set_span(*span);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
+            }
             lower::Instr::TextCall {
                 dst,
                 function,

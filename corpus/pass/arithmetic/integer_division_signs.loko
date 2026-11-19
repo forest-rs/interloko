@@ -1,0 +1,18 @@
+// expect: run #t
+// expect: diagnostics 0
+
+// Each division's remainder has the sign its rounding gives it, and
+// `q * b + r` is the dividend.
+
+define function agrees?(a :: <integer>, b :: <integer>) => <boolean>
+  let (fq, fr) = floor/(a, b);
+  let (cq, cr) = ceiling/(a, b);
+  let (tq, tr) = truncate/(a, b);
+  fq * b + fr = a & cq * b + cr = a & tq * b + tr = a
+end;
+
+define function main() => <boolean>
+  let (q, r) = floor/(-7, 2);
+  let (q2, r2) = round/(-5, 2);
+  q = -4 & r = 1 & q2 = -2 & r2 = -1 & agrees?(-7, 2) & agrees?(7, -2) & agrees?(-7, -2)
+end;
