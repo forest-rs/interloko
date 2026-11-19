@@ -250,6 +250,8 @@ pub enum DiagnosticCode {
     CollectionMethodOverridesKernel,
     /// A slot default `init-value:` has the wrong type.
     SlotDefaultTypeMismatch,
+    /// A slot's `init-value` binds locals, which slot defaults cannot hold yet.
+    SlotDefaultBindsLocals,
     /// A required init keyword is missing.
     MissingRequiredInitKeyword,
     /// A non-defaulted slot is missing an initializer.
@@ -452,6 +454,7 @@ impl DiagnosticCode {
         Self::CollectionDefaultUnsupported,
         Self::CollectionMethodOverridesKernel,
         Self::SlotDefaultTypeMismatch,
+        Self::SlotDefaultBindsLocals,
         Self::MissingRequiredInitKeyword,
         Self::MissingSlotInitializer,
         Self::UnknownSlot,
@@ -601,6 +604,7 @@ impl DiagnosticCode {
             Self::CollectionDefaultUnsupported => "sem.collection-default-unsupported",
             Self::CollectionMethodOverridesKernel => "sem.collection-method-overrides-kernel",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
+            Self::SlotDefaultBindsLocals => "sem.slot-default-binds-locals",
             Self::MissingRequiredInitKeyword => "sem.missing-required-init-keyword",
             Self::MissingSlotInitializer => "sem.missing-slot-initializer",
             Self::UnknownSlot => "sem.unknown-slot",
@@ -751,6 +755,7 @@ impl DiagnosticCode {
             "sem.collection-default-unsupported" => Self::CollectionDefaultUnsupported,
             "sem.collection-method-overrides-kernel" => Self::CollectionMethodOverridesKernel,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,
+            "sem.slot-default-binds-locals" => Self::SlotDefaultBindsLocals,
             "sem.missing-required-init-keyword" => Self::MissingRequiredInitKeyword,
             "sem.missing-slot-initializer" => Self::MissingSlotInitializer,
             "sem.unknown-slot" => Self::UnknownSlot,

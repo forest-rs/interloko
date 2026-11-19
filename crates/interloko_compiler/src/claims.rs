@@ -996,7 +996,7 @@ fn unannotated_input(
         .binding;
     let span = match binding {
         typing::Binding::Local(local) => {
-            let (locals, params) = definition_locals(module, typed.definition)?;
+            let (locals, params) = module.definition_locals(typed.definition)?;
             params.contains(&local).then_some(())?;
             locals.iter().find(|record| record.id == local)?.span
         }
@@ -1021,24 +1021,6 @@ fn unannotated_input(
         format!("parameter {}", site.target),
         Some(site.target.clone()),
     ))
-}
-
-fn definition_locals(
-    module: &sem::Module,
-    definition: DefinitionId,
-) -> Option<(&[sem::Local], &[sem::LocalId])> {
-    if let Some(function) = module
-        .functions
-        .iter()
-        .find(|function| function.definition == definition)
-    {
-        return Some((&function.locals, &function.params));
-    }
-    module
-        .methods
-        .iter()
-        .find(|method| method.definition == definition)
-        .map(|method| (method.locals.as_slice(), method.params.as_slice()))
 }
 
 fn class_name(module: &sem::Module, class: ClassId) -> String {

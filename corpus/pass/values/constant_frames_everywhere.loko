@@ -1,0 +1,59 @@
+// expect: run 0
+// expect: diagnostics 0
+
+// A constant with locals of its own may be read anywhere: in a closure, a
+// loop over assigned locals, a method, another constant's initializer, and
+// a branch that unboxed a refined local. Each read keeps the reader's
+// locals and the initializer's apart. `main` returns 0 when all agree.
+
+define constant $k = begin
+  let t = 2;
+  t + 1
+end;
+
+define constant $looped = begin
+  let t = 2;
+  let u = 0;
+  while (u < 3)
+    u := u + t
+  end;
+  u
+end;
+
+define constant $outer = begin
+  let x = 1;
+  let w = $k + x;
+  w * 10
+end;
+
+define generic g(x);
+
+define method g(x :: <integer>) => <integer>
+  let m = x * 2;
+  m + $k
+end;
+
+define function in-closure() => <integer>
+  let a = 10;
+  let f = function () => <integer> let z = 5; $k + a + z end;
+  f()
+end;
+
+define function in-loop() => <integer>
+  let s = 0;
+  let i = 0;
+  while (i < 3)
+    i := i + 1;
+    s := s + $looped + i
+  end;
+  s
+end;
+
+define function refined(o :: <object>) => <integer>
+  if (instance?(o, <integer>)) $k + o + $k else 0 end
+end;
+
+define function main() => <integer>
+  (in-closure() - 18) + (in-loop() - 18) + (g(5) - 13) + ($outer - 40)
+    + (refined(5) - 11)
+end;

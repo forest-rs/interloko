@@ -97,6 +97,7 @@
 "sem.collection-default-unsupported" = "`{ $function }` with `default:` needs a collection known to be one of { $expected }, not { $actual }, until methods can take keyword parameters"
 "sem.collection-method-overrides-kernel" = "`{ $function }` already has the kernel's method for { $class }; a method for it or a subclass would override it"
 "sem.slot-default-type-mismatch" = "slot `{ $slot }` expects { $expected } but default init-value has { $actual }"
+"sem.slot-default-binds-locals" = "slot `{ $slot }`'s init-value binds the local `{ $local }`; slot defaults cannot bind locals yet, so define a function and call it"
 "sem.missing-required-init-keyword" = "missing required init keyword `{ $keyword }` for slot `{ $slot }`"
 "sem.missing-slot-initializer" = "missing initializer for slot `{ $slot }`"
 "sem.unknown-slot" = "class `{ $class }` has no slot `{ $slot }`"

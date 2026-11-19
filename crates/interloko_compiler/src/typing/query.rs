@@ -634,19 +634,8 @@ fn binding_info(
 ) -> Option<BindingInfo<'_>> {
     let (name, kind, range, span, role) = match binding {
         Binding::Local(local) => {
-            if let Some(function) = module
-                .functions
-                .iter()
-                .find(|function| function.definition == definition)
-            {
-                local_info(&function.locals, &function.params, local)?
-            } else {
-                let method = module
-                    .methods
-                    .iter()
-                    .find(|method| method.definition == definition)?;
-                local_info(&method.locals, &method.params, local)?
-            }
+            let (locals, params) = module.definition_locals(definition)?;
+            local_info(locals, params, local)?
         }
         Binding::ClosureLocal { closure, local } => {
             let closure = module.closures.get(closure.0 as usize)?;

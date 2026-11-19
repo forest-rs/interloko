@@ -141,7 +141,12 @@ The current slices include:
   (`type-error.overflow`) instead of wrapping when `+`, `-`, `*`, or
   negation leaves the 64-bit range (bignum promotion is planned);
 - immutable top-level constants named in the Dylan style, such as
-  `define constant $answer :: <integer> = 42;`;
+  `define constant $answer :: <integer> = 42;`. The initializer may be any
+  expression, including a `begin … end` body with its own `let`s, loops and
+  closures. For now it is evaluated where the constant is read, rather than
+  once;
+- `begin body end`, a body as an expression, whose `let`s are its own and
+  whose last expression is its value;
 - nominal classes with typed slots, init keywords, inherited slots, and slot
   assignment through setter generics;
 - generic functions and multi-argument method dispatch over nominal classes;

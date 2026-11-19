@@ -1,0 +1,9 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.unresolved-local
+
+// A `let` in a `begin` is scoped to it.
+
+define function main() => <integer>
+  let n = begin let inner = 1; inner end;
+  inner + n
+end;

@@ -3411,6 +3411,7 @@ fn collect_known_callable_uses(module: &sem::Module) -> CallableUses<'_> {
         ..CallableUses::default()
     };
     for constant in &module.constants {
+        uses.locals = &constant.locals;
         collect_known_callable_uses_in_expr(&constant.value, &mut uses);
     }
     for function in &module.functions {
@@ -5493,14 +5494,8 @@ impl<'module> BodyLowering<'module> {
                     constant_info.result_kind,
                     constant_info.callable_signature.as_ref(),
                 )?;
-                let value = constant_info.value.clone();
                 self.active_constants.push(*constant);
-                // The value's check sites are the constant's own.
-                let owner = self.owner.replace(constant_info.definition);
-                let site_owner = self.site_owner.replace(constant_info.definition);
-                let lowered = self.lower_expr(&value);
-                self.owner = owner;
-                self.site_owner = site_owner;
+                let lowered = self.lower_constant_value(constant_info);
                 self.active_constants.pop();
                 self.coerce_value(lowered?, expected, *span)
             }
@@ -9455,6 +9450,37 @@ impl<'module> BodyLowering<'module> {
         let label = LabelId(self.next_label);
         self.next_label = self.next_label.saturating_add(1);
         label
+    }
+
+    /// Lowers a constant's initializer where the constant is read, in a
+    /// frame of its own: its locals are the initializer's, not the reading
+    /// body's, and none of the body's captures, block exits or closure
+    /// bindings are in scope. Its check sites are the constant's.
+    fn lower_constant_value(
+        &mut self,
+        constant: &'module sem::Constant,
+    ) -> Result<Value, LowerError> {
+        let source_locals = core::mem::replace(&mut self.source_locals, &constant.locals);
+        let captures = core::mem::take(&mut self.captures);
+        let env = self.env.take();
+        let local_regs =
+            core::mem::replace(&mut self.local_regs, vec![None; constant.locals.len()]);
+        let locals = core::mem::take(&mut self.locals);
+        let exits = core::mem::take(&mut self.exits);
+        let closure = self.closure.take();
+        let owner = self.owner.replace(constant.definition);
+        let site_owner = self.site_owner.replace(constant.definition);
+        let lowered = self.lower_expr(&constant.value);
+        self.source_locals = source_locals;
+        self.captures = captures;
+        self.env = env;
+        self.local_regs = local_regs;
+        self.locals = locals;
+        self.exits = exits;
+        self.closure = closure;
+        self.owner = owner;
+        self.site_owner = site_owner;
+        lowered
     }
 
     fn set_local(&mut self, id: sem::LocalId, value: Value) -> Result<(), LowerError> {
