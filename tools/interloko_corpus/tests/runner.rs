@@ -171,7 +171,32 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/control_flow/case.loko"));
     assert!(out.contains("ok fail/syntax/old_if_then.loko"));
     assert!(out.contains("ok pass/generics/sends_in_handlers.loko"));
-    assert!(out.contains("corpus: 608 passed, 0 failed, 608 total"));
+    // Every case in the directory ran and passed: the total is counted
+    // from the corpus itself, so adding a case never edits this test.
+    let cases = count_cases(&corpus_root());
+    assert!(cases > 0, "the corpus has cases");
+    assert!(
+        out.contains(&format!("corpus: {cases} passed, 0 failed, {cases} total")),
+        "every one of the {cases} cases runs and passes"
+    );
+}
+
+/// Counts the `.loko` cases under `dir`, as the runner finds them.
+fn count_cases(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .expect("corpus directory is readable")
+        .map(|entry| entry.expect("corpus entry is readable").path())
+        .map(|path| {
+            if path.is_dir() {
+                count_cases(&path)
+            } else {
+                usize::from(
+                    path.extension()
+                        .is_some_and(|extension| extension == "loko"),
+                )
+            }
+        })
+        .sum()
 }
 
 #[test]
