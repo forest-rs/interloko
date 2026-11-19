@@ -1,0 +1,20 @@
+// expect: run 31313939
+// expect: diagnostics 0
+
+// Dylan's `truncate/`, `floor/`, `ceiling/` and `round/` divide two
+// integers into a quotient, rounded toward zero, down, up or to the
+// nearest (a tie to the even one), and the remainder `a - q * b`, as two
+// values. Rounding an integer with `floor` and the others leaves it as it
+// is.
+
+define function encode(a :: <integer>, b :: <integer>) => <integer>
+  let (q1, r1) = truncate/(a, b);
+  let (q2, r2) = floor/(a, b);
+  let (q3, r3) = ceiling/(a, b);
+  let (q4, r4) = round/(a, b);
+  ((q1 * 10 + r1) * 100 + (q2 * 10 + r2)) * 10000 + (q3 * 10 + r3) * 100 + (q4 * 10 + r4)
+end;
+
+define function main() => <integer>
+  encode(7, 2) + floor(5) + truncate(as(<i32>, 3)) - 8
+end;

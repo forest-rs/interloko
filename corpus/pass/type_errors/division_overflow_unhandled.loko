@@ -1,0 +1,14 @@
+// expect: runtime code type-error.overflow
+// expect: diagnostics 0
+
+// The one quotient outside the integers, the least integer divided by -1,
+// signals `type-error.overflow` as negating it does.
+
+define function divide(a :: <integer>, b :: <integer>) => <integer>
+  let (q, r) = truncate/(a, b);
+  q
+end;
+
+define function main() => <integer>
+  divide(-9223372036854775807 - 1, -1)
+end;

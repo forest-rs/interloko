@@ -193,6 +193,12 @@ The current slices include:
 - `<integer>` arithmetic on 64-bit fixnums that signals a `<type-error>`
   (`type-error.overflow`) instead of wrapping when `+`, `-`, `*`, or
   negation leaves the 64-bit range (bignum promotion is planned);
+  Dylan's integer divisions `truncate/(a, b)`, `floor/`, `ceiling/` and
+  `round/` (a tie to the even quotient) answer the quotient and the
+  remainder `a - q * b` as two values, a zero divisor signals a
+  `<division-by-zero-error>` whose `use-value` supplies them, and the
+  least integer divided by -1 signals `type-error.overflow`; `floor` and
+  the other roundings leave an integer as it is;
 - immutable top-level constants named in the Dylan style, such as
   `define constant $answer :: <integer> = 42;`. The initializer may be any
   expression, including a `begin … end` body with its own `let`s, loops and

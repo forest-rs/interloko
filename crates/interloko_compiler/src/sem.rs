@@ -37,7 +37,7 @@ pub use interloko_model::{
     BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, LimitedInteger, MethodId, Number32,
     OBJECT_CLASS_ID, SingleFloatBits, SlotId,
 };
-pub use interloko_runtime::{FloatFunction, TextFunction};
+pub use interloko_runtime::{FloatFunction, IntegerDivision, Rounding, TextFunction};
 
 /// Durable direct function identifier within a semantic module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -330,6 +330,12 @@ fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
         "%end-position" => Intrinsic::Text(TextFunction::EndPosition),
         "%next-position" => Intrinsic::Text(TextFunction::NextPosition),
         "%string-element" => Intrinsic::Text(TextFunction::StringElement),
+        name if name.starts_with('%') => {
+            return IntegerDivision::ALL
+                .iter()
+                .find(|function| integer_division_name(**function) == name)
+                .map(|function| Intrinsic::IntegerDivision(*function));
+        }
         "float-to-string" => Intrinsic::FloatToString,
         "integer-to-string" => Intrinsic::IntegerToString,
         "concatenate" => Intrinsic::Concatenate,
@@ -381,7 +387,9 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         Intrinsic::MakeVector | Intrinsic::MakeStretchyVector => 2,
         Intrinsic::MakeTable => 0,
         Intrinsic::Text(function) => function.params().len(),
-        Intrinsic::CharCompare(_) | Intrinsic::PositionCompare(_) => 2,
+        Intrinsic::CharCompare(_)
+        | Intrinsic::PositionCompare(_)
+        | Intrinsic::IntegerDivision(_) => 2,
         Intrinsic::CharToInteger | Intrinsic::PositionToInteger => 1,
         Intrinsic::TableVersion | Intrinsic::TablePositions => 1,
         Intrinsic::TablePositionValue | Intrinsic::TablePositionKey => 3,
@@ -461,6 +469,7 @@ fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
             .map_or("<object>", |kind| text::text_kind_name(*kind)),
         (Intrinsic::CharCompare(_) | Intrinsic::CharToInteger, _) => "<character>",
         (Intrinsic::PositionCompare(_) | Intrinsic::PositionToInteger, _) => "<string-position>",
+        (Intrinsic::IntegerDivision(_), _) => "<integer>",
         _ => "<object>",
     }
 }
@@ -3897,6 +3906,10 @@ pub enum Intrinsic {
     PositionCompare(CompareOp),
     /// `byte-offset(p)`: a `<string-position>`'s byte offset, inline.
     PositionToInteger,
+    /// One result of an integer division, which the runtime host computes.
+    /// Only the division builtins (`floor/` and the others) call it, with a
+    /// divisor that is neither zero nor `-1`.
+    IntegerDivision(IntegerDivision),
 }
 
 /// Semantic expression.
@@ -4994,6 +5007,24 @@ fn visit_evaluated_block(block: &Block, visit: &mut impl FnMut(&Expr)) {
 /// already a local, suffixed with where the `select` starts. Its name has a
 /// space, so source cannot name it.
 const SELECT_TARGET_LOCAL: &str = "select target";
+
+/// The hidden locals a division such as `floor/` binds its operands to,
+/// suffixed with where the call starts. Their names have a space, so source
+/// cannot name them.
+const DIVISION_DIVIDEND_LOCAL: &str = "division dividend";
+const DIVISION_DIVISOR_LOCAL: &str = "division divisor";
+
+/// The kernel-only name a division's lowering calls for one of its
+/// results, such as `%floor/-quotient`. A `%` cannot appear in a source
+/// name, so no program can call or shadow it.
+fn integer_division_name(function: IntegerDivision) -> String {
+    let part = if function.remainder {
+        "remainder"
+    } else {
+        "quotient"
+    };
+    format!("%{}-{part}", function.rounding.name())
+}
 
 /// The hidden local `copy-sequence` and `starts-with?` bind their string
 /// to, suffixed with where the call starts. Its name has a space, so source
@@ -8301,6 +8332,20 @@ impl Lowering {
                     ctx.diagnostics
                         .push(Self::unexpected_keyword(callee, keyword));
                 }
+                if let Some(rounding) = Rounding::from_name(callee)
+                    && !self.defines_callable(ctx, callee)
+                    && self.resolve_function(callee).is_none()
+                    && self.resolve_generic(callee).is_none()
+                {
+                    return self.lower_integer_division(
+                        ctx,
+                        *id,
+                        rounding,
+                        args,
+                        *span,
+                        expected_results,
+                    );
+                }
                 if callee == "apply" {
                     return self.lower_apply(ctx, args, expected_results, *span);
                 }
@@ -8524,6 +8569,19 @@ impl Lowering {
                             )),
                     );
                     return Expr::Error { span: *span };
+                }
+                // Rounding an integer leaves it as it is.
+                if matches!(callee.as_str(), "floor" | "ceiling" | "round" | "truncate")
+                    && let [value] = lowered_args.as_slice()
+                    && matches!(
+                        self.expr_kind(value),
+                        ValueKind::I64 | ValueKind::I32 | ValueKind::U32
+                    )
+                {
+                    return lowered_args
+                        .into_iter()
+                        .next()
+                        .expect("one argument was matched");
                 }
                 if let Some(builtin) = FloatBuiltin::from_name(callee) {
                     return self.lower_float_call(ctx, builtin, lowered_args, *span);
@@ -9790,6 +9848,159 @@ impl Lowering {
         }
     }
 
+    /// Lowers Dylan's `truncate/(a, b)`, `floor/`, `ceiling/` or `round/`:
+    /// the quotient rounded as named and the remainder `a - q * b`, as two
+    /// `<integer>` values. It is written as the Loko it abbreviates:
+    ///
+    /// ```text
+    /// let dividend :: <integer> = a; let divisor :: <integer> = b;
+    /// if (divisor = 0) signal(make(<division-by-zero-error>, dividend: dividend))
+    /// elseif (divisor = -1) values(- dividend, 0)
+    /// else values(%floor/-quotient(dividend, divisor),
+    ///             %floor/-remainder(dividend, divisor)) end
+    /// ```
+    ///
+    /// so a zero divisor signals a `<division-by-zero-error>` whose
+    /// `use-value` supplies the results, and the only quotient outside the
+    /// integers, `- i64::MIN`, signals `type-error.overflow` as negation
+    /// does. The runtime host computes the other results.
+    fn lower_integer_division(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        rounding: Rounding,
+        args: &[ast::Expr],
+        span: Span,
+        expected_results: Option<&[ValueKind]>,
+    ) -> Expr {
+        let [dividend_arg, divisor_arg] = args else {
+            ctx.diagnostics
+                .push(Self::arity_mismatch(rounding.name(), 2, args.len(), span));
+            return Expr::Error { span };
+        };
+        let dividend = format!("{DIVISION_DIVIDEND_LOCAL}@{}", span.start);
+        let divisor = format!("{DIVISION_DIVISOR_LOCAL}@{}", span.start);
+        let name = |name: &str| ast::Expr::Name {
+            id,
+            name: name.into(),
+            span,
+        };
+        let int = |value: i64| ast::Expr::Number { id, value, span };
+        let integer = || ast::TypeExpr::Named {
+            name: "<integer>".into(),
+            span,
+        };
+        let bind = |local: &str, value: &ast::Expr| {
+            let definition = DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Local,
+                local,
+                &id.raw().to_string(),
+            );
+            ast::Statement::Let(Box::new(ast::Let {
+                id,
+                definition,
+                name: local.into(),
+                pattern: ast::LetPattern::Name(ast::LetBinding {
+                    definition,
+                    name: local.into(),
+                    type_annotation: Some(integer()),
+                    span,
+                }),
+                type_annotation: Some(integer()),
+                value: value.clone(),
+                span: value.span(),
+            }))
+        };
+        let block = |result: ast::Expr| ast::Block {
+            id,
+            statements: Vec::new(),
+            result,
+            span,
+        };
+        let is = |value: i64| ast::Expr::Compare {
+            id,
+            op: ast::CompareOp::Eq,
+            lhs: Box::new(name(&divisor)),
+            rhs: Box::new(int(value)),
+            span,
+        };
+        let values = |values: Vec<ast::Expr>| ast::Expr::Call {
+            id,
+            callee: "values".into(),
+            args: values,
+            keywords: Vec::new(),
+            span,
+        };
+        let part = |function: IntegerDivision| ast::Expr::Call {
+            id,
+            callee: integer_division_name(function),
+            args: vec![name(&dividend), name(&divisor)],
+            keywords: Vec::new(),
+            span,
+        };
+        let by_zero = ast::Expr::Signal {
+            id,
+            condition: Box::new(ast::Expr::MakeObject {
+                id,
+                class: Box::new(ast::Expr::ClassName {
+                    id,
+                    class_name: ConditionClass::DivisionByZeroError.name().into(),
+                    span,
+                }),
+                fields: vec![ast::KeywordArg {
+                    id,
+                    name: "dividend".into(),
+                    value: name(&dividend),
+                    span,
+                }],
+                span,
+            }),
+            span,
+        };
+        let negated = values(vec![
+            ast::Expr::UnaryMinus {
+                id,
+                expr: Box::new(name(&dividend)),
+                span,
+            },
+            int(0),
+        ]);
+        let divided = values(vec![
+            part(IntegerDivision::quotient(rounding)),
+            part(IntegerDivision::remainder(rounding)),
+        ]);
+        let tree = ast::Expr::Block {
+            id,
+            exit: None,
+            body: Box::new(ast::Block {
+                id,
+                statements: vec![bind(&dividend, dividend_arg), bind(&divisor, divisor_arg)],
+                result: ast::Expr::If {
+                    id,
+                    arms: vec![
+                        ast::CondArm {
+                            test: is(0),
+                            body: block(by_zero),
+                            span,
+                        },
+                        ast::CondArm {
+                            test: is(-1),
+                            body: block(negated),
+                            span,
+                        },
+                    ],
+                    else_body: Some(Box::new(block(divided))),
+                    span,
+                },
+                span,
+            }),
+            cleanup: None,
+            span,
+        };
+        self.lower_expr_expected_results(ctx, &tree, expected_results)
+    }
+
     /// The diagnostic for a keyword argument `callee` does not take.
     fn unexpected_keyword(callee: &str, keyword: &ast::KeywordArg) -> Diagnostic {
         Diagnostic::error(keyword.span, DiagnosticCode::UnexpectedKeywordArgument)
@@ -9969,9 +10180,10 @@ impl Lowering {
             | Intrinsic::InstanceOfType
             | Intrinsic::CharCompare(_)
             | Intrinsic::PositionCompare(_) => ValueKind::Bool,
-            Intrinsic::CollectionSize | Intrinsic::CharToInteger | Intrinsic::PositionToInteger => {
-                ValueKind::I64
-            }
+            Intrinsic::CollectionSize
+            | Intrinsic::CharToInteger
+            | Intrinsic::PositionToInteger
+            | Intrinsic::IntegerDivision(_) => ValueKind::I64,
             Intrinsic::Text(function) => self.text_classes().map_or(ValueKind::Error, |classes| {
                 classes.result_kind(function.result())
             }),
@@ -10199,6 +10411,9 @@ impl Lowering {
             }
             (Intrinsic::PositionCompare(_), 0 | 1) | (Intrinsic::PositionToInteger, 0) => {
                 actual == ValueKind::Position
+            }
+            (Intrinsic::IntegerDivision(_), 0 | 1) => {
+                matches!(actual, ValueKind::I64 | ValueKind::I32 | ValueKind::U32)
             }
             _ => false,
         }
@@ -15906,7 +16121,18 @@ mod tests {
         let cycle = class(&module, "<constant-cycle-error>");
         assert_eq!(cycle.superclass, Some(error));
         assert_eq!(cycle.id.0, modified.id.0 + 1);
-        assert_eq!(cycle.id.0 as usize, module.classes.len() - 1);
+        let by_zero = class(&module, "<division-by-zero-error>");
+        assert_eq!(by_zero.superclass, Some(error));
+        assert_eq!(by_zero.id.0, cycle.id.0 + 1);
+        assert_eq!(by_zero.id.0 as usize, module.classes.len() - 1);
+        assert_eq!(
+            by_zero
+                .effective_slots
+                .iter()
+                .map(|slot| (slot.name.as_str(), slot.kind))
+                .collect::<Vec<_>>(),
+            [("division-by-zero-error-dividend", ValueKind::I64)]
+        );
         let string = ValueKind::String(class_id(&module, "<string>"));
         assert_eq!(
             cycle

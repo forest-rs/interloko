@@ -1,0 +1,12 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports <division-by-zero-error>
+// expect: diagnostics 0
+
+define function divide(a :: <integer>, b :: <integer>) => <integer>
+  let (q, r) = round/(a, b);
+  q
+end;
+
+define function main() => <integer>
+  divide(1, 0)
+end;
