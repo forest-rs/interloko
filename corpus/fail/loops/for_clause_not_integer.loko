@@ -1,11 +1,11 @@
-// expect: diagnostics 3
+// expect: diagnostics 2
 // expect: diagnostic code sem.for-clause-type-mismatch
 // expect: diagnostic contains `for` clause `from` expects <integer> but has <double-float>
-// expect: diagnostic contains `for` clause `below` expects <integer> but has <object>
 // expect: diagnostic contains `for` clause `by` expects <integer> but has <string>
 
 // A numeric `for` counts in `<integer>`s: its start, bound and step must
-// be integers (an `<i32>` or `<u32>` widens). An `<object>` needs an `as`.
+// be integers (an `<i32>` or `<u32>` widens). An `<object>` is checked as
+// one where the loop starts, but a float or a string never is one.
 
 define function count(limit :: <object>) => <integer>
   let total = 0;

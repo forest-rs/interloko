@@ -1,6 +1,8 @@
-// expect: diagnostics 1
-// expect: diagnostic code sem.scalar-result-arity-mismatch
-// expect: diagnostic contains this expression needs exactly 1 value, not 2 values (<integer>, <integer>); bind several with `let (a, b) = …` first
+// expect: run 2
+// expect: diagnostics 0
+
+// A call through a `<callable>` that returns several values where one is
+// expected keeps the first, as in Dylan.
 
 define function split(flag :: <boolean>) => (<integer>, <integer>)
   if (flag)

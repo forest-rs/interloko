@@ -1,0 +1,16 @@
+// expect: diagnostics 2
+// expect: diagnostic code sem.local-type-mismatch
+// expect: diagnostic contains local `s` expects <string> but initializer has <integer>
+// expect: diagnostic contains function `twice` argument 1 expects <integer> but got <string>
+
+// Only a declaration that narrows a value's type is checked at run time;
+// one of a class the value can never be an instance of is an error.
+
+define function twice(n :: <integer>) => <integer>
+  n * 2
+end;
+
+define function main() => <integer>
+  let s :: <string> = 3;
+  twice("three")
+end;

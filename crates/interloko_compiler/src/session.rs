@@ -23084,6 +23084,44 @@ end;
     }
 
     #[test]
+    fn an_implicit_cast_signals_a_type_error_whose_use_value_continues() {
+        // An `<object>` meeting an `<integer>` binding is checked there, as
+        // `as` would check it, and `use-value` supplies the integer.
+        let artifacts = CompilerSession::compile_source(
+            "implicit.loko",
+            "define function bump(o :: <object>) => <integer>\n  \
+             let n :: <integer> = o;\n  n + 1\nend;\n\
+             define function main() => <integer>\n  bump(\"forty-one\")\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let decision = artifacts
+            .typing
+            .decisions()
+            .find(|decision| decision.check == typing::TypingCheck::Cast)
+            .expect("the inserted cast's decision");
+        assert_eq!(decision.origin, typing::CheckOrigin::Implicit);
+        assert_eq!(decision.verdict, typing::TypingVerdict::Checked);
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut reports = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                let report = condition.type_error().expect("a type error");
+                reports.push(report);
+                Choice::UseValue(vec![Value::I64(41)])
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+            assert_eq!(value, FunctionValue::Integer(42), "{policy:?}");
+            let [report] = reports.as_slice() else {
+                panic!("{policy:?}: {reports:?}");
+            };
+            assert_eq!(report.code, "type-error.cast");
+            assert_eq!(report.expected, "<integer>");
+            assert_eq!(report.site, typing_decision_object_id(decision));
+        }
+    }
+
+    #[test]
     fn a_failed_cast_signals_a_type_error_and_checks_its_replacement() {
         let artifacts =
             CompilerSession::compile_source("cast.loko", SHAPE_CAST, RuntimeMode::CompileOnly);

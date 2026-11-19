@@ -1,0 +1,34 @@
+// expect: run 321
+// expect: diagnostics 0
+
+// An argument whose type is a supertype of its parameter's is checked
+// where it meets the parameter: a function's, a generic function's, or a
+// typed callable's.
+
+define class <node> (<object>)
+end;
+
+define class <num> (<node>)
+  slot value :: <integer>, init-keyword: value:;
+end;
+
+define generic eval(node :: <node>) => <integer>;
+
+define method eval(node :: <num>) => <integer>
+  node.value
+end;
+
+define function double(n :: <integer>) => <integer>
+  n * 2
+end;
+
+define function apply-to(f :: callable(<integer>) => <integer>, x :: <object>) => <integer>
+  f(x)
+end;
+
+define function main() => <integer>
+  let held :: <object> = make(<num>, value: 3);
+  let n :: <object> = 5;
+  let r = eval(held) * 100 + double(n) * 2;
+  r + apply-to(function (x :: <integer>) => <integer> x + 1 end, n - 4 + 0) - 1
+end;

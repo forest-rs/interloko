@@ -1,0 +1,42 @@
+// expect: run 1111111
+// expect: diagnostics 0
+// expect: dump typing contains cast checked rule=cast-narrowing
+// expect: dump typing contains origin=implicit
+
+// A value whose type is a supertype of a binding's, an `<object>` most
+// often, is checked where it meets the binding, as `as` would check it, and
+// unboxed on the way when the binding holds a scalar. Each check is one the
+// compiler inserted, so soft typing records it as implicit.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-keyword: radius:;
+end;
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["count"] := 1;
+  t["flag"] := #t;
+  t["mark"] := 'x';
+  t["half"] := 0.5;
+  t["name"] := "loko";
+  t["twice"] := function (n :: <integer>) => <integer> n * 2 end;
+  let s :: <shape> = make(<circle>, radius: 1);
+  let c :: <circle> = s;
+  let count :: <integer> = t["count"];
+  let flag :: <boolean> = t["flag"];
+  let mark :: <character> = t["mark"];
+  let half :: <double-float> = t["half"];
+  let name :: <string> = t["name"];
+  let twice :: <function> = t["twice"];
+  let (first :: <integer>, second :: <string>) = values(t["count"], t["name"]);
+  c.radius * 1000000
+    + count * 100000
+    + (if (flag) 10000 else 0 end)
+    + (if (mark = 'x') 1000 else 0 end)
+    + (if (half = 0.5) 100 else 0 end)
+    + size(name) - 4 + size(second) - 4
+    + twice(5) - 10 + first * 10 + count
+end;

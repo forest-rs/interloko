@@ -1,0 +1,13 @@
+// expect: runtime code type-error.cast
+// expect: diagnostics 1
+// expect: diagnostic code typing.cast-always-fails
+// expect: diagnostic contains cast of <string> to <integer> always fails when reached
+
+// When typing knows the value a declaration narrows can never pass, it
+// warns that the inserted check always fails; the check still runs.
+
+define function main() => <integer>
+  let held :: <object> = "text";
+  let n :: <integer> = held;
+  n
+end;

@@ -1,0 +1,13 @@
+// expect: run 333
+// expect: diagnostics 0
+
+// `values(x)` where one value is expected is `x`, the first value of a
+// call inside it included.
+
+define function main() => <integer>
+  let a = values(truncate/(7, 2));
+  let b :: <integer> = values(truncate/(10, 3));
+  let held :: <object> = 3;
+  let c :: <integer> = values(held);
+  a * 100 + b * 10 + values(truncate/(9, 3)) + c - 3
+end;

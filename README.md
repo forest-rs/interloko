@@ -204,6 +204,18 @@ The current slices include:
   `<division-by-zero-error>` whose `use-value` supplies them, and the
   least integer divided by -1 signals `type-error.overflow`; `floor` and
   the other roundings leave an integer as it is;
+- declarations checked where values meet them, as in Dylan: a value whose
+  type is a supertype of a binding's, argument's, slot's, constant's or
+  result's declared type, an `<object>` read from a table most often, is
+  checked there as `as` would check it, unboxed on the way to a scalar,
+  and signals a `<type-error>` (`type-error.cast`) with `use-value` when it
+  fails; an argument is checked as it is evaluated, before the next one.
+  A callable signature is more than a class, so a binding that declares
+  one still takes only a value known to have it. Soft typing records each check and proves it away when it can; a
+  value of a class it can never be an instance of is still an error. Where
+  one value is expected, a call returning several keeps the first (an
+  argument, a `let` without a values pattern, a `select` arm); one
+  returning none is an error;
 - immutable top-level constants named in the Dylan style, such as
   `define constant $answer :: <integer> = 42;`. The initializer may be any
   expression, including a `begin … end` body with its own `let`s, loops and
@@ -282,7 +294,8 @@ The current slices include:
   typing policy for every definition at once. A strict definition must
   prove the checks the compiler inserts into it: every send's dispatch,
   every range check where a value meets a `limited` declaration, and every
-  cast of a value returned through an untyped `<callable>`. Each one typing
+  cast where a value meets a narrower declared type, one returned through
+  an untyped `<callable>` included. Each one typing
   leaves to the runtime is an error (`typing.unproved-dispatch`, `-range`,
   `-cast`) naming its decision, the reasons behind the operand types, and
   the fixes (annotate a parameter, test with `instance?`, seal a class, or

@@ -586,7 +586,7 @@ fn read_binding<'a>(
 }
 
 /// Writes `ty` as an annotation's source: a class name for a class cone,
-/// `limited(<integer>, ...)` for an integer range. `None` for a type an
+/// `<integer>` for every integer, `limited(<integer>, ...)` for a range. `None` for a type an
 /// annotation cannot write, such as a union.
 #[must_use]
 pub fn type_source(module: &sem::Module, ty: &Type) -> Option<String> {
@@ -598,6 +598,9 @@ pub fn type_source(module: &sem::Module, ty: &Type) -> Option<String> {
 }
 
 fn limited_source(range: IntRange) -> String {
+    if range.min.is_none() && range.max.is_none() {
+        return "<integer>".into();
+    }
     let mut out = String::from("limited(<integer>");
     if let Some(min) = range.min {
         let _ = write!(out, ", min: {min}");

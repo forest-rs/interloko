@@ -1,0 +1,17 @@
+// expect: runtime code type-error.cast
+// expect: run reports "seven" is not of type <integer>
+// expect: diagnostics 0
+
+// A value that fails the check where it meets a declaration signals a
+// `<type-error>`, as a failed `as` does.
+
+define function count(env :: <table>) => <integer>
+  let n :: <integer> = env["n"];
+  n
+end;
+
+define function main() => <integer>
+  let env = make(<table>);
+  env["n"] := "seven";
+  count(env)
+end;

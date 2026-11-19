@@ -1,0 +1,39 @@
+// expect: run 4321
+// expect: diagnostics 0
+
+// A result whose type is a supertype of the declared one is checked where
+// it is returned: a function's, a method's (against its own declaration or
+// else its generic's), a closure's, and each of several values.
+
+define generic lookup(env :: <table>, key :: <string>) => <integer>;
+
+define method lookup(env :: <table>, key :: <string>) => <integer>
+  element(env, key, default: 0)
+end;
+
+define generic peek(env :: <table>) => <integer>;
+
+define method peek(env :: <table>)
+  env["b"]
+end;
+
+define function fetch(env :: <table>) => <integer>
+  env["c"]
+end;
+
+define function both(env :: <table>) => (<integer>, <string>)
+  values(env["d"], env["name"])
+end;
+
+define function main() => <integer>
+  let env = make(<table>);
+  env["a"] := 4;
+  env["b"] := 3;
+  env["c"] := 2;
+  env["d"] := 1;
+  env["name"] := "x";
+  let get = function (key :: <string>) => <integer> env[key] end;
+  let (d, name) = both(env);
+  lookup(env, "a") * 1000 + peek(env) * 100 + fetch(env) * 10 + d
+    + size(name) - get("d")
+end;

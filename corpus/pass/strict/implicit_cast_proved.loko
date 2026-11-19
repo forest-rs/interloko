@@ -1,0 +1,13 @@
+// typing: strict
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump typing contains cast proved rule=cast-upcast
+
+// An inserted check typing proves holds a strict definition to nothing:
+// the `<object>` local holds an `<integer>` wherever it reaches the binding.
+
+define function main() => <integer>
+  let held :: <object> = 40;
+  let n :: <integer> = held;
+  n + 2
+end;

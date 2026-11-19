@@ -5366,6 +5366,13 @@ enum CallableResultCheck {
     Cast(ClassId),
     /// An `<integer>` result is checked to be in the range.
     Range(IntRange),
+    /// A value of kind `from` is cast, as a declaration narrows it, to the
+    /// class, and then checked to be in the range when it is limited.
+    Narrow {
+        from: ValueKind,
+        class: ClassId,
+        range: Option<IntRange>,
+    },
 }
 
 impl CallableResultCheck {
@@ -5375,6 +5382,7 @@ impl CallableResultCheck {
             Self::Trusted(kind) => kind,
             Self::Convert(_) | Self::Range(_) => ValueKind::I64,
             Self::Cast(_) => ValueKind::Object(OBJECT_CLASS_ID),
+            Self::Narrow { from, .. } => from,
         }
     }
 
@@ -5404,6 +5412,13 @@ impl CallableResultCheck {
                 explicit: false,
                 span,
             },
+            Self::Narrow { class, range, .. } => {
+                let cast = Self::Cast(class).apply(value, span);
+                match range {
+                    Some(range) => Self::Range(range).apply(cast, span),
+                    None => cast,
+                }
+            }
         }
     }
 }
@@ -6290,6 +6305,7 @@ impl Lowering {
                     self.lower_expr(&mut ctx, init_value),
                     Some(core::slice::from_ref(&slot_kind)),
                 );
+                let value = self.narrow(value, slot_kind, slot_signature.as_ref());
                 self.diagnostics.extend(ctx.diagnostics);
                 // A default is lowered inline wherever an instance is made,
                 // in the making body's frame, so it has none of its own to
@@ -7413,6 +7429,12 @@ impl Lowering {
                 .and_then(|symbol| symbol.callable_signature.clone());
             ctx.shared_names = ast::shared_local_names_in(&constant.value);
             let value = self.lower_expr_expected(&mut ctx, &constant.value, expected_kind);
+            let value = match expected_kind {
+                Some(expected) => {
+                    self.narrow(value, expected, expected_callable_signature.as_ref())
+                }
+                None => value,
+            };
             self.diagnostics.extend(ctx.diagnostics);
             let actual_kind = self.expr_kind(&value);
             let actual_callable_signature = self.expr_callable_signature(&value);
@@ -7840,6 +7862,19 @@ impl Lowering {
         let mut body = self.lower_block(&mut ctx, &method.body, return_annotation.as_deref());
         if return_annotation.as_deref() == Some(&[]) {
             discard_results(&mut body);
+        } else if let Some((expected, sigs)) = match (&return_annotation, &generic_symbol) {
+            (Some(kinds), _) => Some((
+                kinds.as_slice(),
+                annotated_callable_sigs.as_deref().unwrap_or_default(),
+            )),
+            (None, Some(symbol)) => symbol
+                .return_annotation
+                .as_deref()
+                .map(|kinds| (kinds, symbol.return_callable_sigs.as_slice())),
+            (None, None) => None,
+        } {
+            let result = core::mem::replace(&mut body.result, Expr::Error { span: body.span });
+            body.result = self.narrow_results(&mut ctx, result, expected, sigs, "method-result");
         }
         let body_kinds = self.expr_kinds(&body.result);
         let body_callable_sigs = self.expr_result_callable_signatures(&body.result);
@@ -8011,6 +8046,15 @@ impl Lowering {
         let mut body = self.lower_block(&mut ctx, &function.body, return_annotation.as_deref());
         if return_annotation.as_deref() == Some(&[]) {
             discard_results(&mut body);
+        } else if let Some(expected) = return_annotation.as_deref() {
+            let result = core::mem::replace(&mut body.result, Expr::Error { span: body.span });
+            body.result = self.narrow_results(
+                &mut ctx,
+                result,
+                expected,
+                &annotated_return_callable_sigs,
+                "function-result",
+            );
         }
         let body_kinds = self.expr_kinds(&body.result);
         let body_callable_sigs = self.expr_result_callable_signatures(&body.result);
@@ -8164,6 +8208,7 @@ impl Lowering {
                         ),
                         None => self.lower_expr_expected_results(ctx, &local.value, None),
                     };
+                    let value = self.take_values(ctx, value, 1);
                     let actual_kind = self.expr_kind(&value);
                     let actual_callable_signature = self.expr_callable_signature(&value);
                     let actual_kinds = self.expr_kinds(&value);
@@ -8181,10 +8226,20 @@ impl Lowering {
                             )),
                         );
                     }
+                    let value = match expected_kind {
+                        Some(expected) => self.narrow(
+                            value,
+                            expected,
+                            expected_type
+                                .as_ref()
+                                .and_then(|resolved| resolved.callable_signature.as_ref()),
+                        ),
+                        None => value,
+                    };
                     // A value that did not check has been reported already.
                     if let Some(expected) = expected_kind
                         && actual_kind != ValueKind::Error
-                        && !self.kinds_match(expected, actual_kind)
+                        && !self.kinds_match(expected, self.expr_kind(&value))
                     {
                         ctx.diagnostics.push(
                             Diagnostic::error(
@@ -8315,6 +8370,15 @@ impl Lowering {
                             actual_kinds.get(index).copied().unwrap_or(ValueKind::Error);
                         if let Some(expected) = expected_kind
                             && !self.kinds_match(expected, actual_kind)
+                            && self
+                                .implicit_cast_class(
+                                    expected,
+                                    actual_kind,
+                                    expected_type
+                                        .as_ref()
+                                        .and_then(|resolved| resolved.callable_signature.as_ref()),
+                                )
+                                .is_none()
                         {
                             ctx.diagnostics.push(
                                 Diagnostic::error(
@@ -8386,32 +8450,53 @@ impl Lowering {
                         ctx.allow_assignment(id);
                         local_ids.push(id);
                     }
-                    // Each limited binding checks its own value.
-                    let ranges = expected_kinds
+                    // Each binding checks its own value: one a declaration
+                    // narrows is cast, and a limited one is range checked.
+                    let checks = actual_kinds
                         .iter()
-                        .map(|resolved| resolved.as_ref().and_then(|resolved| resolved.range))
-                        .collect::<Vec<_>>();
-                    let value = if bindings.len() == actual_kinds.len()
-                        && ranges.iter().any(Option::is_some)
-                        && !result_kinds_contain_error(&actual_kinds)
-                    {
-                        let checks = actual_kinds
-                            .iter()
-                            .zip(&ranges)
-                            .map(|(kind, range)| match range {
-                                Some(range)
+                        .zip(&expected_kinds)
+                        .map(|(kind, resolved)| {
+                            let range = resolved.as_ref().and_then(|resolved| resolved.range);
+                            let narrow = resolved.as_ref().and_then(|resolved| {
+                                (!self.kinds_match(resolved.kind, *kind))
+                                    .then(|| {
+                                        self.implicit_cast_class(
+                                            resolved.kind,
+                                            *kind,
+                                            resolved.callable_signature.as_ref(),
+                                        )
+                                    })
+                                    .flatten()
+                            });
+                            match (narrow, range) {
+                                (Some(class), range) => CallableResultCheck::Narrow {
+                                    from: *kind,
+                                    class,
+                                    range,
+                                },
+                                (None, Some(range))
                                     if NumericKind::of(*kind)
                                         .is_some_and(NumericKind::is_integer) =>
                                 {
-                                    CallableResultCheck::Range(*range)
+                                    CallableResultCheck::Range(range)
                                 }
-                                _ => CallableResultCheck::Trusted(*kind),
-                            })
-                            .collect::<Vec<_>>();
+                                (None, _) => CallableResultCheck::Trusted(*kind),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let value = if bindings.len() == actual_kinds.len()
+                        && checks
+                            .iter()
+                            .any(|check| !matches!(check, CallableResultCheck::Trusted(_)))
+                        && !result_kinds_contain_error(&actual_kinds)
+                    {
                         let kinds = checks
                             .iter()
                             .map(|check| match check {
                                 CallableResultCheck::Trusted(kind) => *kind,
+                                CallableResultCheck::Narrow { class, .. } => self
+                                    .kind_for_builtin_class(*class)
+                                    .unwrap_or(ValueKind::Object(*class)),
                                 check => check.wire_kind(),
                             })
                             .collect::<Vec<_>>();
@@ -8471,8 +8556,88 @@ impl Lowering {
             }
             None => self.lower_expr_expected_results(ctx, expr, None),
         };
+        let lowered = self.take_values(ctx, lowered, 1);
         self.require_scalar_result(ctx, &lowered, expr.span(), context);
         lowered
+    }
+
+    /// The first `count` of the values `value` produces, as Dylan keeps
+    /// the first where fewer are expected: `value` itself when it produces
+    /// no more. The values are bound to temporaries no source name can
+    /// reach, so every one is still computed, in order.
+    fn take_values(&self, ctx: &mut FunctionContext, value: Expr, count: usize) -> Expr {
+        // `values(x)` is `x` where one value is expected.
+        let value = match value {
+            Expr::Values { mut values, .. } if count == 1 && values.len() == 1 => {
+                values.pop().unwrap_or(Expr::Error {
+                    span: Span::default(),
+                })
+            }
+            value => value,
+        };
+        let kinds = self.expr_kinds(&value);
+        if kinds.len() <= count || count == 0 || result_kinds_contain_error(&kinds) {
+            return value;
+        }
+        let span = value.span();
+        let sigs = self.expr_result_callable_signatures(&value);
+        let sig = |index: usize| sigs.get(index).cloned().flatten();
+        let scope = ctx.scope_start();
+        let temporaries = kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| {
+                ctx.add_local(
+                    DefinitionId::new(
+                        self.source_file,
+                        DefinitionKind::Local,
+                        "$value",
+                        &format!("first-values:{}:{}:{index}", span.start, span.end),
+                    ),
+                    format!("$value{index}"),
+                    *kind,
+                    sig(index),
+                    span,
+                )
+            })
+            .collect::<Vec<_>>();
+        ctx.hide_locals_from(scope);
+        let kept = temporaries
+            .iter()
+            .zip(&kinds)
+            .take(count)
+            .enumerate()
+            .map(|(index, (local, kind))| Expr::Local {
+                local: *local,
+                result_kind: *kind,
+                callable_signature: sig(index),
+                span,
+            })
+            .collect::<Vec<_>>();
+        let result = if count == 1 {
+            kept.into_iter().next().unwrap_or(Expr::Error { span })
+        } else {
+            Expr::Values {
+                values: kept,
+                result_kinds: kinds[..count].to_vec(),
+                span,
+            }
+        };
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements: vec![Statement::Let(Let {
+                    local: temporaries[0],
+                    locals: temporaries,
+                    value,
+                    span,
+                })],
+                result,
+                span,
+            }),
+            cleanup: None,
+            span,
+        }
     }
 
     fn require_scalar_result(
@@ -8741,6 +8906,7 @@ impl Lowering {
                             &mut lowered_args,
                             function.param_kinds.iter().map(Some),
                         );
+                        self.narrow_args(&mut lowered_args, &function.param_kinds, &[]);
                         for (index, (arg, expected)) in
                             lowered_args.iter().zip(&function.param_kinds).enumerate()
                         {
@@ -9246,6 +9412,20 @@ impl Lowering {
             self.lower_block(&mut closure_ctx, body, return_annotation.as_deref());
         if return_annotation.as_deref() == Some(&[]) {
             discard_results(&mut lowered_body);
+        } else if let Some(expected) = return_annotation.as_deref() {
+            let result = core::mem::replace(
+                &mut lowered_body.result,
+                Expr::Error {
+                    span: lowered_body.span,
+                },
+            );
+            lowered_body.result = self.narrow_results(
+                &mut closure_ctx,
+                result,
+                expected,
+                &annotated_return_callable_sigs,
+                "closure-result",
+            );
         }
         let body_kinds = self.expr_kinds(&lowered_body.result);
         let body_callable_sigs = self.expr_result_callable_signatures(&lowered_body.result);
@@ -9611,16 +9791,27 @@ impl Lowering {
             return None;
         }
         adapt_literal_args(&mut positional, param_kinds.iter().map(Option::as_ref));
+        // Each argument is checked where it meets its parameter's declared
+        // type, before any keyword's default function sees it. A callable
+        // parameter's signature is the call's to check.
+        let narrow = |this: &Self, value: &mut Expr, kind: Option<&ValueKind>| {
+            if let Some(kind) = kind.filter(|kind| **kind != ValueKind::Callable) {
+                let taken = core::mem::replace(value, Expr::Error { span: value.span() });
+                *value = this.narrow(taken, *kind, None);
+            }
+        };
+        for (value, kind) in positional.iter_mut().zip(param_kinds) {
+            narrow(self, value, kind.as_ref());
+        }
         for (position, index) in supplied.iter().enumerate() {
             if let Some(index) = index
                 && let Some(value) = passed[*index].as_mut()
             {
-                adapt_literal_args(
-                    core::slice::from_mut(value),
-                    [param_kinds
-                        .get(signature.required + position)
-                        .and_then(Option::as_ref)],
-                );
+                let kind = param_kinds
+                    .get(signature.required + position)
+                    .and_then(Option::as_ref);
+                adapt_literal_args(core::slice::from_mut(value), [kind]);
+                narrow(self, value, kind);
             }
         }
         let runs_defaults = signature
@@ -9740,6 +9931,11 @@ impl Lowering {
     ) -> Expr {
         if symbol.arity() == lowered_args.len() {
             adapt_literal_args(&mut lowered_args, symbol.param_kinds.iter().map(Some));
+            self.narrow_args(
+                &mut lowered_args,
+                &symbol.param_kinds,
+                &symbol.param_callable_sigs,
+            );
             for (index, (arg, expected)) in lowered_args.iter().zip(&symbol.param_kinds).enumerate()
             {
                 let actual = self.expr_kind(arg);
@@ -9837,6 +10033,7 @@ impl Lowering {
             return Expr::Error { span };
         }
         adapt_literal_args(&mut args, symbol.param_kinds.iter().map(Option::as_ref));
+        self.narrow_generic_args(&mut args, &symbol.param_kinds);
         for (index, (arg, declared)) in args.iter().zip(&symbol.param_kinds).enumerate() {
             ctx.diagnostics
                 .extend(self.generic_argument_diagnostic(arg, symbol.id, index, *declared));
@@ -11200,6 +11397,7 @@ impl Lowering {
             return Expr::Error { span };
         }
         adapt_literal_args(&mut args, symbol.param_kinds.iter().map(Some));
+        self.narrow_args(&mut args, &symbol.param_kinds, &symbol.param_callable_sigs);
         for (index, (arg, expected)) in args.iter().zip(&symbol.param_kinds).enumerate() {
             let actual = self.expr_kind(arg);
             if !self.kinds_match(*expected, actual) {
@@ -11299,6 +11497,8 @@ impl Lowering {
             return Expr::Error { span };
         }
         let expected = ValueKind::Object(class);
+        let mut args = args;
+        self.narrow_args(&mut args, &[expected], &[]);
         let actual = self.expr_kind(&args[0]);
         if !self.kinds_match(expected, actual) {
             ctx.diagnostics.push(
@@ -11350,6 +11550,7 @@ impl Lowering {
             return Expr::Error { span };
         }
         adapt_literal_args(&mut args, symbol.param_kinds.iter().map(Option::as_ref));
+        self.narrow_generic_args(&mut args, &symbol.param_kinds);
         for (index, (arg, declared)) in args.iter().zip(&symbol.param_kinds).enumerate() {
             ctx.diagnostics
                 .extend(self.generic_argument_diagnostic(arg, generic, index, *declared));
@@ -11679,6 +11880,7 @@ impl Lowering {
                 return Expr::Error { span };
             }
             adapt_literal_args(&mut args, signature.params.iter().map(Some));
+            self.narrow_args(&mut args, &signature.params, &signature.param_sigs);
             for (index, (arg, expected)) in args.iter().zip(&signature.params).enumerate() {
                 let actual = self.expr_kind(arg);
                 let mismatch = |expected: String, actual: String| {
@@ -12263,6 +12465,23 @@ impl Lowering {
         }
         self.adopt_divergent_kinds(&mut then_branch, &else_branch);
         self.adopt_divergent_kinds(&mut else_branch, &then_branch);
+        // Arms of different counts keep as many values as every arm has,
+        // or as many as are expected, as a single-value position keeps the
+        // first of several.
+        let then_count = self.expr_kinds(&then_branch).len();
+        let else_count = self.expr_kinds(&else_branch).len();
+        if then_count != else_count && then_count > 0 && else_count > 0 {
+            // A body whose values are discarded keeps them all until then.
+            let count = expected_results
+                .map(<[ValueKind]>::len)
+                .filter(|expected| *expected > 0)
+                .map_or_else(
+                    || then_count.min(else_count),
+                    |expected| expected.min(then_count).min(else_count),
+                );
+            then_branch = self.take_values(ctx, then_branch, count);
+            else_branch = self.take_values(ctx, else_branch, count);
+        }
         self.join_integer_branches(&mut then_branch, &mut else_branch);
         let then_kinds = self.expr_kinds(&then_branch);
         let else_kinds = self.expr_kinds(&else_branch);
@@ -12668,7 +12887,11 @@ impl Lowering {
                 restart.condition_span,
             )
         });
+        // Where fewer values are expected than an arm has, it keeps the
+        // first, as a single-value position does.
+        let expected_count = expected_results.map_or(0, <[ValueKind]>::len);
         let restart_body = self.lower_expr_expected_results(ctx, &restart.body, expected_results);
+        let restart_body = self.take_values(ctx, restart_body, expected_count);
         let restart_kinds = self.expr_kinds(&restart_body);
         let restart_callable_sigs = self.expr_result_callable_signatures(&restart_body);
         ctx.hide_locals_from(scope_start);
@@ -12678,7 +12901,8 @@ impl Lowering {
             result_kinds: restart_kinds.clone(),
             result_callable_sigs: restart_callable_sigs.clone(),
         });
-        let mut body = self.lower_expr_expected_results(ctx, body, expected_results);
+        let body = self.lower_expr_expected_results(ctx, body, expected_results);
+        let mut body = self.take_values(ctx, body, expected_count);
         ctx.pop_restart();
         self.adopt_divergent_kinds(&mut body, &restart_body);
 
@@ -13519,6 +13743,204 @@ impl Lowering {
         }
     }
 
+    /// `value` where it meets a declared `expected` kind, and callable
+    /// `signature` when it has one, as Dylan has it:
+    /// as it is when its kind already holds, or wrapped in an inserted
+    /// check when it may hold at run time. A value that never can is left
+    /// as it is, for the caller to report.
+    ///
+    /// The check is an implicit cast to the class `expected` names, which
+    /// signals a `<type-error>` with a `use-value` restart as `as` does and
+    /// unboxes a scalar on the way. It narrows only: a value whose class is
+    /// a superclass of the declared one, an `<object>` among them, may be
+    /// an instance of it, while one of a disjoint class never is. Soft
+    /// typing records the check like any other, proves it away when it can,
+    /// and holds a strict definition to proving it.
+    fn narrow(
+        &self,
+        value: Expr,
+        expected: ValueKind,
+        signature: Option<&CallableSignature>,
+    ) -> Expr {
+        let actual = self.expr_kind(&value);
+        if self.kinds_match(expected, actual) {
+            return value;
+        }
+        let Some(class) = self.implicit_cast_class(expected, actual, signature) else {
+            return value;
+        };
+        let span = value.span();
+        Expr::Cast {
+            value: Box::new(value),
+            class,
+            site: SiteId::PENDING,
+            explicit: false,
+            span,
+        }
+    }
+
+    /// Narrows each of `args` to the parameter kind it meets; see
+    /// [`Self::narrow`].
+    fn narrow_args(
+        &self,
+        args: &mut [Expr],
+        kinds: &[ValueKind],
+        sigs: &[Option<CallableSignature>],
+    ) {
+        for (index, (arg, expected)) in args.iter_mut().zip(kinds).enumerate() {
+            let value = core::mem::replace(arg, Expr::Error { span: arg.span() });
+            let signature = sigs.get(index).and_then(Option::as_ref);
+            *arg = self.narrow(value, *expected, signature);
+        }
+    }
+
+    /// Narrows each of `args` to the type its generic parameter declares,
+    /// if any; see [`Self::narrow`].
+    fn narrow_generic_args(&self, args: &mut [Expr], declared: &[Option<ValueKind>]) {
+        for (arg, declared) in args.iter_mut().zip(declared) {
+            let Some(expected) = *declared else {
+                continue;
+            };
+            if self.generic_argument_matches(expected, self.expr_kind(arg)) {
+                continue;
+            }
+            let value = core::mem::replace(arg, Expr::Error { span: arg.span() });
+            *arg = self.narrow(value, expected, None);
+        }
+    }
+
+    /// Narrows the values `value` produces to the `expected` kinds they
+    /// meet, each on its own; see [`Self::narrow`]. Values of another count
+    /// are left for the caller to report.
+    fn narrow_results(
+        &self,
+        ctx: &mut FunctionContext,
+        value: Expr,
+        expected: &[ValueKind],
+        sigs: &[Option<CallableSignature>],
+        tag: &str,
+    ) -> Expr {
+        // A result of more values than declared keeps the first.
+        let value = self.take_values(ctx, value, expected.len());
+        let actual = self.expr_kinds(&value);
+        if actual.len() != expected.len() {
+            return value;
+        }
+        let sig = |index: usize| sigs.get(index).and_then(Option::as_ref);
+        if let [expected] = expected {
+            return self.narrow(value, *expected, sig(0));
+        }
+        let checks = actual
+            .iter()
+            .zip(expected)
+            .enumerate()
+            .map(|(index, (actual, expected))| {
+                match (!self.kinds_match(*expected, *actual))
+                    .then(|| self.implicit_cast_class(*expected, *actual, sig(index)))
+                    .flatten()
+                {
+                    Some(class) => CallableResultCheck::Narrow {
+                        from: *actual,
+                        class,
+                        range: None,
+                    },
+                    None => CallableResultCheck::Trusted(*actual),
+                }
+            })
+            .collect::<Vec<_>>();
+        if checks
+            .iter()
+            .all(|check| matches!(check, CallableResultCheck::Trusted(_)))
+        {
+            return value;
+        }
+        let kinds = checks
+            .iter()
+            .map(|check| match check {
+                CallableResultCheck::Narrow { class, .. } => self
+                    .kind_for_builtin_class(*class)
+                    .unwrap_or(ValueKind::Object(*class)),
+                check => check.wire_kind(),
+            })
+            .collect::<Vec<_>>();
+        let sigs = self.expr_result_callable_signatures(&value);
+        let span = value.span();
+        self.check_values(ctx, value, &checks, &kinds, &sigs, tag, span)
+    }
+
+    /// `receiver` of the slot accessor `name`, cast to the one class that
+    /// declares an accessor of that name when the receiver's own type does
+    /// not have it but may be an instance of that class, as a send of the
+    /// accessor would find its only method; see [`Self::narrow`].
+    fn narrow_receiver(&self, receiver: Expr, name: &str) -> Expr {
+        let actual = self.expr_kind(&receiver);
+        let known = self.value_kind_class(actual).and_then(|class| {
+            self.classes.get(class.0 as usize).filter(|class| {
+                class
+                    .effective_slots
+                    .iter()
+                    .any(|slot| slot.accessor.name == name || slot.name == name)
+            })
+        });
+        if known.is_some() {
+            return receiver;
+        }
+        let mut owners = self.classes.iter().filter(|class| {
+            class
+                .direct_slots
+                .iter()
+                .any(|slot| slot.accessor.name == name || slot.name == name)
+        });
+        let (Some(owner), None) = (owners.next(), owners.next()) else {
+            return receiver;
+        };
+        self.narrow(receiver, ValueKind::Object(owner.id), None)
+    }
+
+    /// The class an implicit cast from `actual` to `expected` checks, when
+    /// one may succeed: `expected` names a class whose values have a single
+    /// representation, and that class is a proper subclass of `actual`'s.
+    /// A limited integer has its own conversions, and a callable `signature`
+    /// is more than a class a run-time cast could check, so neither is one.
+    fn implicit_cast_class(
+        &self,
+        expected: ValueKind,
+        actual: ValueKind,
+        signature: Option<&CallableSignature>,
+    ) -> Option<ClassId> {
+        if signature.is_some() {
+            return None;
+        }
+        let target = match expected {
+            ValueKind::Object(class)
+            | ValueKind::String(class)
+            | ValueKind::Symbol(class)
+            | ValueKind::Vector(class) => class,
+            ValueKind::I64
+            | ValueKind::F64
+            | ValueKind::F32
+            | ValueKind::Bool
+            | ValueKind::Char
+            | ValueKind::Position
+            | ValueKind::Callable => self.value_kind_class(expected)?,
+            ValueKind::Any
+            | ValueKind::Error
+            | ValueKind::I32
+            | ValueKind::U32
+            | ValueKind::ClassObject(_)
+            | ValueKind::GenericFunctionObject(_)
+            | ValueKind::MethodObject(_)
+            | ValueKind::SlotDescriptorObject { .. }
+            | ValueKind::KnownCallable(_) => return None,
+        };
+        let source = match actual {
+            ValueKind::Any => OBJECT_CLASS_ID,
+            ValueKind::Error => return None,
+            actual => self.value_kind_class(actual)?,
+        };
+        (target != source && self.is_same_or_subclass(target, source)).then_some(target)
+    }
+
     /// The operation `make` on the built-in collection class `kind` is.
     const fn collection_maker(kind: BuiltinValueClass) -> Option<Intrinsic> {
         match kind {
@@ -13687,6 +14109,7 @@ impl Lowering {
                 self.lower_expr(ctx, &field.value),
                 Some(core::slice::from_ref(&slot.kind)),
             );
+            let value = self.narrow(value, slot.kind, slot.callable_signature.as_ref());
             let value_kind = self.expr_kind(&value);
             if !self.kinds_match(slot.kind, value_kind) {
                 ctx.diagnostics.push(
@@ -13989,6 +14412,7 @@ impl Lowering {
     ) -> Expr {
         let value_expr =
             self.lower_expr_expected_results(ctx, value, Some(core::slice::from_ref(&kind)));
+        let value_expr = self.take_values(ctx, value_expr, 1);
         let actual_kinds = self.expr_kinds(&value_expr);
         let actual_kind = self.expr_kind(&value_expr);
         let mismatch = |expected: String, actual: String| {
@@ -13997,14 +14421,18 @@ impl Lowering {
                 .with_arg(DiagnosticArg::text("expected", expected))
                 .with_arg(DiagnosticArg::text("actual", actual))
         };
+        let mut value_expr = value_expr;
         if actual_kinds.len() != 1 && !result_kinds_contain_error(&actual_kinds) {
             ctx.diagnostics.push(mismatch(
                 "1 value".into(),
                 self.result_kinds_name(&actual_kinds),
             ));
         } else if !self.kinds_match(kind, actual_kind) {
-            ctx.diagnostics
-                .push(mismatch(self.kind_name(kind), self.kind_name(actual_kind)));
+            value_expr = self.narrow(value_expr, kind, signature);
+            if !self.kinds_match(kind, self.expr_kind(&value_expr)) {
+                ctx.diagnostics
+                    .push(mismatch(self.kind_name(kind), self.kind_name(actual_kind)));
+            }
         } else if let Some(expected) = signature {
             let actual = self.expr_callable_signature(&value_expr);
             if !self.callable_signatures_match(Some(expected), actual.as_ref()) {
@@ -14583,6 +15011,7 @@ impl Lowering {
         expr: &ast::Expr,
     ) -> Expr {
         let value = self.lower_expr_expected(ctx, expr, Some(ValueKind::I64));
+        let value = self.narrow(value, ValueKind::I64, None);
         let kinds = self.expr_kinds(&value);
         let kind = self.expr_kind(&value);
         let single = kinds.len() == 1 || result_kinds_contain_error(&kinds);
@@ -14656,6 +15085,7 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let receiver = self.lower_expr(ctx, receiver);
+        let receiver = self.narrow_receiver(receiver, slot_name);
         let value = self.lower_expr(ctx, value);
         let receiver_kind = self.expr_kind(&receiver);
         let ValueKind::Object(class_id) = receiver_kind else {
@@ -14707,6 +15137,7 @@ impl Lowering {
             return Expr::Error { span };
         }
         let value = adapt_literal(value, Some(core::slice::from_ref(&slot.kind)));
+        let value = self.narrow(value, slot.kind, slot.callable_signature.as_ref());
         let value_kind = self.expr_kind(&value);
         if !self.kinds_match(slot.kind, value_kind) {
             ctx.diagnostics.push(
@@ -14754,6 +15185,7 @@ impl Lowering {
         accessor_name: &str,
         span: Span,
     ) -> Expr {
+        let receiver = self.narrow_receiver(receiver, accessor_name);
         let Some(class_id) = self.value_kind_class(self.expr_kind(&receiver)) else {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::SlotReceiverTypeMismatch)
