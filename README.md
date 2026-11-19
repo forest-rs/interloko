@@ -112,7 +112,9 @@ The current slices include:
   conditional without `else` or `otherwise` produces no values: its arms
   run for their effects, and using it where a value is expected is a type
   error. An `instance?` test narrows its arm, and each later `elseif`,
-  `else` or `case` arm sees what the earlier tests ruled out;
+  `else` or `case` arm sees what the earlier tests ruled out. Arms of
+  different classes join at their least common superclass (a `<call>` arm
+  and a `<var>` arm at `<node>`), as the type lattice bounds their union;
 - bodies of `let`s and `expression;` statements, where, as in Dylan, `;`
   separates expressions, so a body's last expression is its value with or
   without one;
