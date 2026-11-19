@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.scalar-result-arity-mismatch
+
+// A statement is an operand, but one that produces no values, such as an
+// `if` without `else`, has no value to add.
+
+define function main() => <integer>
+  let x = 1;
+  x + if (x = 1) 2 end
+end;

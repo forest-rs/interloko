@@ -1,0 +1,33 @@
+// expect: run 9
+// expect: diagnostics 0
+
+// As in Dylan, a statement is an operand like any other: a conditional,
+// `select`, `case`, `begin`, `block` or `handle` may appear wherever an
+// expression may, in arithmetic, as an argument, under a unary operator,
+// or before an index.
+
+define function tenfold(x :: <integer>) => <integer>
+  x * 10
+end;
+
+define function main() => <integer>
+  let x = 1;
+  let key = #b;
+  let passed = 0;
+  let check = method (test :: <boolean>) => ()
+    if (test) passed := passed + 1 end
+  end;
+  check(x + if (x = 1) 2 else 5 end = 3);
+  check(tenfold(select (key) #a => 1; #b => 2; end) = 20);
+  let y = 1 + case x = 2 => 10; otherwise => 20; end;
+  check(y = 21);
+  check(begin let a = 4; a * a end - 1 = 15);
+  check(- if (#t) 3 else 4 end = -3);
+  check(if (#t) #[1, 2] else #[3] end[1] = 2);
+  check(1 + block (out) out(5) end = 6);
+  check(2 * handle 3 with restart e :: <error> 0 end = 6);
+  let z = 0;
+  z := if (x = 1) 7 else 8 end + 1;
+  check(z = 8);
+  passed
+end;

@@ -56,7 +56,7 @@ rule let-binding = let-name-binding | let-values-binding
 rule let-name-binding = let-name type-annotation?
 rule let-name = name
 rule let-values-binding = `(` trailing-list-of<let-name-binding, `,`> `)`
-rule expression = handle-expression | block-expression | begin-expression | while-expression | until-expression | for-expression | if-expression | unless-expression | case-expression | select-expression | assignment-expression
+rule expression = assignment-expression
 rule handle-expression = `handle` expression `with` restart-clause `end`
 rule restart-clause = `restart` restart-condition restart-guard? expression
 rule restart-guard = `when` expression `=>`
@@ -109,7 +109,9 @@ rule not-expression = `~` unary-expression
 rule postfix-expression = primary-expression (`.` member-name | index-access)*
 rule member-name = name
 rule index-access = `[` expression `]`
-rule primary-expression = method-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | name-expression
+// As in Dylan, a statement is an operand: `x + if (c) 1 else 2 end`.
+rule primary-expression = statement | method-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | name-expression
+rule statement = handle-expression | block-expression | begin-expression | while-expression | until-expression | for-expression | if-expression | unless-expression | case-expression | select-expression
 rule method-expression = `method` `(` parameter-list? `)` result-annotation? body `end`
 rule parenthesized-expression = `(` expression `)`
 rule vector-expression = `#[` vector-items? `]`
