@@ -2828,6 +2828,15 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.u64_add(*dst, *lhs, *rhs);
             }
+            lower::Instr::AndU64 {
+                dst,
+                lhs,
+                rhs,
+                span,
+            } => {
+                self.set_span(*span);
+                self.asm.u64_and(*dst, *lhs, *rhs);
+            }
             lower::Instr::ConstStr { dst, value, span } => {
                 let value = self.builder.const_str(value);
                 self.set_span(*span);
