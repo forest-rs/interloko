@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.if-branch-type-mismatch
+// expect: diagnostic contains select branches must produce the same types, not <boolean> and <integer>
+
+define function main(n :: <integer>)
+  select (n)
+    1 => 1;
+    2 => #t;
+    otherwise => 3;
+  end
+end;

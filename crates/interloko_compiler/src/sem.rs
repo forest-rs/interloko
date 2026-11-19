@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use crate::ast;
 use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode, DiagnosticLabel};
-use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
+use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
 use crate::syntax::{self, Span};
 
@@ -4251,6 +4251,8 @@ enum Conditional {
     Elseif,
     /// An arm of `case test => body; … otherwise => body end`.
     Case,
+    /// An arm of `select (target) key, key => body; … end`.
+    Select,
 }
 
 impl Conditional {
@@ -4259,6 +4261,7 @@ impl Conditional {
         match self {
             Self::If | Self::Elseif => Self::Elseif,
             Self::Case => Self::Case,
+            Self::Select => Self::Select,
         }
     }
 
@@ -4268,6 +4271,7 @@ impl Conditional {
             Self::If => "if",
             Self::Elseif => "elseif",
             Self::Case => "case",
+            Self::Select => "select",
         }
     }
 
@@ -4276,8 +4280,85 @@ impl Conditional {
         match self {
             Self::If | Self::Elseif => "if",
             Self::Case => "case",
+            Self::Select => "select",
         }
     }
+}
+
+/// One arm of a conditional being lowered: its test and its body.
+#[derive(Clone, Copy)]
+struct ArmRef<'a> {
+    test: ArmTest<'a>,
+    body: &'a ast::Block,
+    span: Span,
+}
+
+/// How an arm of a conditional tests whether it runs.
+#[derive(Clone, Copy)]
+enum ArmTest<'a> {
+    /// A written `<boolean>` test.
+    Expr(&'a ast::Expr),
+    /// A `select` arm's keys, matched against the target in turn.
+    Keys(&'a [ast::Expr]),
+}
+
+fn arm_refs(arms: &[ast::CondArm]) -> Vec<ArmRef<'_>> {
+    arms.iter()
+        .map(|arm| ArmRef {
+            test: ArmTest::Expr(&arm.test),
+            body: &arm.body,
+            span: arm.span,
+        })
+        .collect()
+}
+
+/// How a `select`'s keys match its target: `target == key`, or
+/// `callee(target, key)` with `by`.
+struct SelectMatcher {
+    id: AstNodeId,
+    /// Reads the target: a local, a literal, or the hidden target local.
+    target: ast::Expr,
+    /// The `by` test's name, or the hidden local holding it.
+    callee: Option<String>,
+}
+
+/// The hidden local a `select` binds its target to when the target is not
+/// already a local, suffixed with where the `select` starts. Its name has a
+/// space, so source cannot name it.
+const SELECT_TARGET_LOCAL: &str = "select target";
+
+/// The hidden local a `select` binds a `by` test that is not a name to.
+const SELECT_TEST_LOCAL: &str = "select test";
+
+/// The refinement `boxed == literal` proves where it is true: a boxed
+/// `<object>` local identical to an integer or boolean literal holds that
+/// scalar, so it unboxes.
+fn identical_refinement(lhs: &Expr, rhs: &Expr) -> Option<Refinement> {
+    [(lhs, rhs), (rhs, lhs)]
+        .into_iter()
+        .find_map(|(value, literal)| {
+            let Expr::Local {
+                local,
+                result_kind: ValueKind::Any,
+                ..
+            } = value
+            else {
+                return None;
+            };
+            let kind = match literal {
+                Expr::ConstI64 { .. }
+                | Expr::Const32 {
+                    value: Number32::I32(_) | Number32::U32(_),
+                    ..
+                } => ValueKind::I64,
+                Expr::ConstBool { .. } => ValueKind::Bool,
+                _ => return None,
+            };
+            Some(Refinement {
+                local: *local,
+                kind,
+            })
+        })
 }
 
 /// An expression producing no values, as a conditional without a default
@@ -7771,10 +7852,11 @@ impl Lowering {
             } => self.lower_conditional(
                 ctx,
                 Conditional::If,
-                arms,
+                &arm_refs(arms),
                 else_body.as_deref(),
                 *span,
                 expected_results,
+                None,
             ),
             ast::Expr::Case {
                 arms,
@@ -7784,6 +7866,24 @@ impl Lowering {
             } => self.lower_conditional(
                 ctx,
                 Conditional::Case,
+                &arm_refs(arms),
+                otherwise.as_deref(),
+                *span,
+                expected_results,
+                None,
+            ),
+            ast::Expr::Select {
+                id,
+                target,
+                test,
+                arms,
+                otherwise,
+                span,
+            } => self.lower_select(
+                ctx,
+                *id,
+                target,
+                test.as_deref(),
                 arms,
                 otherwise.as_deref(),
                 *span,
@@ -9175,14 +9275,19 @@ impl Lowering {
     /// join of its bodies. Without a default body (`else` or `otherwise`) the
     /// chain produces no values: each arm's values are discarded, and using
     /// the chain where a value is expected is a type error there.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a conditional's written parts, plus how a select matches its keys"
+    )]
     fn lower_conditional(
         &mut self,
         ctx: &mut FunctionContext,
         form: Conditional,
-        arms: &[ast::CondArm],
+        arms: &[ArmRef<'_>],
         default: Option<&ast::Block>,
         span: Span,
         expected_results: Option<&[ValueKind]>,
+        matcher: Option<&SelectMatcher>,
     ) -> Expr {
         let Some((arm, rest)) = arms.split_first() else {
             return match default {
@@ -9195,8 +9300,17 @@ impl Lowering {
         } else {
             None
         };
-        let condition = self.lower_expr(ctx, &arm.test);
-        self.check_test_is_boolean(ctx, form.test_keyword(), &condition);
+        let condition = match (arm.test, matcher) {
+            (ArmTest::Keys(keys), Some(matcher)) => {
+                self.lower_key_tests(ctx, matcher, keys, arm.span)
+            }
+            (ArmTest::Expr(test), _) => {
+                let condition = self.lower_expr(ctx, test);
+                self.check_test_is_boolean(ctx, form.test_keyword(), &condition);
+                condition
+            }
+            (ArmTest::Keys(_), None) => Expr::Error { span: arm.span },
+        };
         // A body that assigns the local may store any value of its declared
         // type, so the test no longer describes it there.
         let refinement = self
@@ -9208,7 +9322,7 @@ impl Lowering {
             });
         let previous_kind =
             refinement.and_then(|refinement| ctx.refine_local(refinement.local, refinement.kind));
-        let mut then_branch = self.lower_body_expr(ctx, &arm.body, arm_expected);
+        let mut then_branch = self.lower_body_expr(ctx, arm.body, arm_expected);
         if let (Some(refinement), Some(previous_kind)) = (refinement, previous_kind) {
             let _ = ctx.refine_local(refinement.local, previous_kind);
         }
@@ -9220,6 +9334,7 @@ impl Lowering {
             default,
             Span::new(rest_start, span.end),
             expected_results,
+            matcher,
         );
         if default.is_none() {
             then_branch = discard_values(self, then_branch);
@@ -9253,6 +9368,269 @@ impl Lowering {
             else_branch: Box::new(else_branch),
             span,
         }
+    }
+
+    /// Lowers `select (target by test) key, key => body; … end` as a
+    /// conditional whose arm tests match the target against each key in turn.
+    ///
+    /// The target is evaluated once, before any key. A local or a literal is
+    /// read where it is, so each arm narrows a local as `if (x == key)`
+    /// would; anything else is bound to a hidden local first, as is a `by`
+    /// test that is not a name. A key matches when `target == key`, or
+    /// `test(target, key)` with `by`; integer keys against an integer target
+    /// compare inline. Without an `otherwise`, the default body signals a
+    /// `<select-error>` holding the target, so the arms keep their values and
+    /// a handler or restart can supply one.
+    ///
+    /// Reading a local target again for each key relies on locals being
+    /// immutable until the arms run: only a key could change it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the written parts of a select, threaded as the other conditionals are"
+    )]
+    fn lower_select(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        target: &ast::Expr,
+        test: Option<&ast::Expr>,
+        arms: &[ast::SelectArm],
+        otherwise: Option<&ast::Block>,
+        span: Span,
+        expected_results: Option<&[ValueKind]>,
+    ) -> Expr {
+        let scope_start = ctx.scope_start();
+        let mut lets = Vec::new();
+        // Reading a literal again cannot be observed, nor a local that the
+        // test and keys, which run between the reads, do not assign.
+        let reassigned = |name: &str| {
+            test.is_some_and(|test| test.assigns(name))
+                || arms
+                    .iter()
+                    .any(|arm| arm.keys.iter().any(|key| key.assigns(name)))
+        };
+        let target_ref = if matches!(target, ast::Expr::Name { name, .. } if !reassigned(name))
+            || matches!(
+                target,
+                ast::Expr::Number { .. }
+                    | ast::Expr::Float { .. }
+                    | ast::Expr::Number32 { .. }
+                    | ast::Expr::Bool { .. }
+                    | ast::Expr::Symbol { .. }
+                    | ast::Expr::ClassName { .. }
+            ) {
+            target.clone()
+        } else {
+            let value = self.lower_expr_expected_results(ctx, target, None);
+            self.require_scalar_result(ctx, &value, target.span(), "select target");
+            if self.expr_kinds(&value).len() != 1 {
+                return Expr::Error { span };
+            }
+            let name = format!("{SELECT_TARGET_LOCAL}@{}", span.start);
+            lets.push(self.bind_hidden_local(ctx, id, &name, value, target.span()));
+            ast::Expr::Name {
+                id,
+                name,
+                span: target.span(),
+            }
+        };
+        let read = self.lower_expr(ctx, &target_ref);
+        let target_kind = self.expr_kind(&read);
+        if target_kind == ValueKind::Error {
+            ctx.hide_locals_from(scope_start);
+            return Expr::Error { span };
+        }
+        let callee = match test {
+            None => None,
+            Some(test) => {
+                let value = self.lower_expr_expected_results(ctx, test, None);
+                if !self.check_select_test(ctx, test.span(), &value) {
+                    ctx.hide_locals_from(scope_start);
+                    return Expr::Error { span };
+                }
+                match test {
+                    ast::Expr::Name { name, .. } => Some(name.clone()),
+                    test => {
+                        let name = format!("{SELECT_TEST_LOCAL}@{}", span.start);
+                        lets.push(self.bind_hidden_local(ctx, id, &name, value, test.span()));
+                        Some(name)
+                    }
+                }
+            }
+        };
+        let matcher = SelectMatcher {
+            id,
+            target: target_ref.clone(),
+            callee,
+        };
+        let no_match;
+        let default = match otherwise {
+            Some(otherwise) => otherwise,
+            None => {
+                let end = Span::new(span.end, span.end);
+                no_match = ast::Block {
+                    id,
+                    statements: Vec::new(),
+                    result: ast::Expr::Signal {
+                        id,
+                        condition: Box::new(ast::Expr::MakeObject {
+                            id,
+                            class: Box::new(ast::Expr::ClassName {
+                                id,
+                                class_name: ConditionClass::SelectError.name().into(),
+                                span: end,
+                            }),
+                            fields: vec![ast::KeywordArg {
+                                id,
+                                name: "value".into(),
+                                value: target_ref,
+                                span: end,
+                            }],
+                            span: end,
+                        }),
+                        span: end,
+                    },
+                    span: end,
+                };
+                &no_match
+            }
+        };
+        let arms = arms
+            .iter()
+            .map(|arm| ArmRef {
+                test: ArmTest::Keys(&arm.keys),
+                body: &arm.body,
+                span: arm.span,
+            })
+            .collect::<Vec<_>>();
+        let chain = self.lower_conditional(
+            ctx,
+            Conditional::Select,
+            &arms,
+            Some(default),
+            span,
+            expected_results,
+            Some(&matcher),
+        );
+        ctx.hide_locals_from(scope_start);
+        if lets.is_empty() {
+            return chain;
+        }
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements: lets.into_iter().map(Statement::Let).collect(),
+                result: chain,
+                span,
+            }),
+            cleanup: None,
+            span,
+        }
+    }
+
+    /// Reports a `select`'s `by` test, lowered to `test`, unless it is a
+    /// function of the target and a key that answers a `<boolean>`, as far
+    /// as its signature says. Returns whether the arms can call it.
+    fn check_select_test(&self, ctx: &mut FunctionContext, span: Span, test: &Expr) -> bool {
+        let kinds = self.expr_kinds(test);
+        if result_kinds_contain_error(&kinds) {
+            return false;
+        }
+        let actual = match kinds.as_slice() {
+            [ValueKind::GenericFunctionObject(_)] => return true,
+            [kind] if self.is_callable_kind(*kind) => match self.expr_callable_signature(test) {
+                Some(signature)
+                    if signature.params.len() != 2
+                        || !matches!(signature.results.as_slice(), [ValueKind::Bool]) =>
+                {
+                    self.callable_signature_name(&signature)
+                }
+                _ => return true,
+            },
+            [kind] => self.kind_name(*kind),
+            kinds => self.result_kinds_name(kinds),
+        };
+        ctx.diagnostics.push(
+            Diagnostic::error(span, DiagnosticCode::SelectTestTypeMismatch)
+                .with_arg(DiagnosticArg::text("actual", actual)),
+        );
+        false
+    }
+
+    /// Binds `value` to the hidden local `name`, which source cannot name.
+    fn bind_hidden_local(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        name: &str,
+        value: Expr,
+        span: Span,
+    ) -> Let {
+        let definition = DefinitionId::new(
+            self.source_file,
+            DefinitionKind::Local,
+            name,
+            &id.raw().to_string(),
+        );
+        let local = ctx.add_local(
+            definition,
+            name.into(),
+            self.expr_kind(&value),
+            self.expr_callable_signature(&value),
+            span,
+        );
+        Let {
+            local,
+            locals: vec![local],
+            value,
+            span,
+        }
+    }
+
+    /// Lowers a `select` arm's keys to its test: whether any key matches the
+    /// target, tried in order. Each key's own test must be a `<boolean>`.
+    fn lower_key_tests(
+        &mut self,
+        ctx: &mut FunctionContext,
+        matcher: &SelectMatcher,
+        keys: &[ast::Expr],
+        span: Span,
+    ) -> Expr {
+        let mut tests = Vec::with_capacity(keys.len());
+        for key in keys {
+            let test = match &matcher.callee {
+                None => ast::Expr::Identical {
+                    id: matcher.id,
+                    lhs: Box::new(matcher.target.clone()),
+                    rhs: Box::new(key.clone()),
+                    span: key.span(),
+                },
+                Some(callee) => ast::Expr::Call {
+                    id: matcher.id,
+                    callee: callee.clone(),
+                    args: vec![matcher.target.clone(), key.clone()],
+                    span: key.span(),
+                },
+            };
+            let test = self.lower_expr(ctx, &test);
+            self.check_test_is_boolean(ctx, Conditional::Select.test_keyword(), &test);
+            tests.push(test);
+        }
+        // `k1, k2 => body` runs its body when either key matches.
+        let mut tests = tests.into_iter().rev();
+        let Some(last) = tests.next() else {
+            return Expr::Error { span };
+        };
+        tests.fold(last, |rest, test| Expr::If {
+            span: Span::new(test.span().start, rest.span().end),
+            refinement: None,
+            then_branch: Box::new(Expr::ConstBool {
+                value: true,
+                span: test.span(),
+            }),
+            condition: Box::new(test),
+            else_branch: Box::new(rest),
+        })
     }
 
     /// Reports a conditional test, written after `keyword`, whose value is
@@ -10657,6 +11035,19 @@ impl Lowering {
         let (value, class) = match condition {
             Expr::InstanceOf { value, class, .. } => (value, Some(*class)),
             Expr::InstanceOfLimited { value, .. } => (value, None),
+            Expr::Identical { lhs, rhs, .. } => return identical_refinement(lhs, rhs),
+            // `a or b`, as a `select` arm with several keys tests: it refines
+            // where both sides refine alike.
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } if matches!(then_branch.as_ref(), Expr::ConstBool { value: true, .. }) => {
+                let refinement = self.true_branch_refinement(condition)?;
+                return (self.true_branch_refinement(else_branch) == Some(refinement))
+                    .then_some(refinement);
+            }
             _ => return None,
         };
         let Expr::Local {
@@ -13015,11 +13406,22 @@ mod tests {
                 .iter()
                 .all(|generic| !generic.name.starts_with("type-error-"))
         );
-        // `<no-applicable-method>` comes last, so no other class id moves.
+        // Kernel classes are appended, so no other class id moves.
         let no_method = class(&module, "<no-applicable-method>");
         assert_eq!(no_method.superclass, Some(error));
         assert_eq!(no_method.id.0, type_error.id.0 + 1);
-        assert_eq!(no_method.id.0 as usize, module.classes.len() - 1);
+        let select_error = class(&module, "<select-error>");
+        assert_eq!(select_error.superclass, Some(error));
+        assert_eq!(select_error.id.0, no_method.id.0 + 1);
+        assert_eq!(select_error.id.0 as usize, module.classes.len() - 1);
+        assert_eq!(
+            select_error
+                .effective_slots
+                .iter()
+                .map(|slot| (slot.name.as_str(), slot.kind))
+                .collect::<Vec<_>>(),
+            [("select-error-value", ValueKind::Any)]
+        );
         let kinds = no_method
             .effective_slots
             .iter()

@@ -1,0 +1,38 @@
+// expect: run 1101
+// expect: diagnostics 0
+
+// `by` names the test a key must pass instead of `==`: a function, a local
+// holding a callable, or any expression whose value is one. The test is
+// called with the target first and the key second.
+
+define function within-two(a :: <integer>, b :: <integer>) => <boolean>
+  if (a < b) b - a < 3 else a - b < 3 end
+end;
+
+define function near(n :: <integer>) => <integer>
+  select (n by within-two)
+    10 => 1;
+    20 => 2;
+    otherwise => 0;
+  end
+end;
+
+define function successor(n :: <integer>) => <integer>
+  select (n by function (a :: <integer>, b :: <integer>) => <boolean> a = b + 1 end)
+    10 => 1;
+    otherwise => 0;
+  end
+end;
+
+define function match-with(n :: <integer>, test :: callable(<integer>, <integer>) => <boolean>)
+    => <integer>
+  select (n by test)
+    7 => 1;
+    otherwise => 0;
+  end
+end;
+
+define function main() => <integer>
+  near(11) * 1000 + successor(11) * 100 + near(50) * 10
+    + match-with(7, function (a :: <integer>, b :: <integer>) => <boolean> a = b end)
+end;

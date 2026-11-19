@@ -69,6 +69,8 @@ pub enum TokenKind {
     Case,
     /// `otherwise`.
     Otherwise,
+    /// `select`.
+    Select,
     /// `handle`.
     Handle,
     /// `with`.
@@ -205,6 +207,7 @@ impl TokenKind {
             | Self::Unless
             | Self::Case
             | Self::Otherwise
+            | Self::Select
             | Self::Handle
             | Self::With
             | Self::Restart
@@ -280,6 +283,7 @@ impl Token {
             | TokenKind::Unless
             | TokenKind::Case
             | TokenKind::Otherwise
+            | TokenKind::Select
             | TokenKind::Handle
             | TokenKind::With
             | TokenKind::Restart
@@ -384,8 +388,14 @@ pub enum CstKind {
     CaseExpr,
     /// `test => body` clause of a `case` expression.
     CaseClause,
-    /// `otherwise => body` clause of a `case` expression.
+    /// `otherwise => body` clause of a `case` or `select` expression.
     OtherwiseClause,
+    /// `select (target by test) keys => body; … end` expression.
+    SelectExpr,
+    /// `by test` part of a `select` expression.
+    SelectTest,
+    /// `key, key => body` clause of a `select` expression.
+    SelectClause,
     /// Recoverable condition handler expression.
     HandleExpr,
     /// Anonymous function expression.
@@ -731,6 +741,9 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::ExprStmt => 57,
         CstKind::WhileExpr => 58,
         CstKind::UntilExpr => 59,
+        CstKind::SelectExpr => 60,
+        CstKind::SelectTest => 61,
+        CstKind::SelectClause => 62,
     }
 }
 
@@ -755,6 +768,7 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Star => 17,
         TokenKind::Equal => 18,
         TokenKind::EqualEqual => 58,
+        TokenKind::Select => 59,
         TokenKind::Arrow => 19,
         TokenKind::Colon => 20,
         TokenKind::Assign => 45,
@@ -1005,6 +1019,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "unless" => TokenKind::Unless,
                     "case" => TokenKind::Case,
                     "otherwise" => TokenKind::Otherwise,
+                    "select" => TokenKind::Select,
                     "handle" => TokenKind::Handle,
                     "with" => TokenKind::With,
                     "restart" => TokenKind::Restart,

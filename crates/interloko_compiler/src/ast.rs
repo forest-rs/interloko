@@ -837,6 +837,26 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// `select (target by test) key, key => body; … otherwise => body; end`.
+    ///
+    /// The target is evaluated once. The arms are tried in order, and an arm
+    /// runs when one of its keys matches the target: when `test(target,
+    /// key)` is true, or `target == key` without `by`. Without an
+    /// `otherwise`, a target that matches no key signals a `<select-error>`.
+    Select {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// The value the keys are matched against.
+        target: Box<Expr>,
+        /// The `by` test, when one is written; `==` otherwise.
+        test: Option<Box<Expr>>,
+        /// The `key, key => body` arms in source order.
+        arms: Vec<SelectArm>,
+        /// Body run when no key matches, when an `otherwise` is written.
+        otherwise: Option<Box<Block>>,
+        /// Source span.
+        span: Span,
+    },
     /// Recoverable condition handler expression.
     Handle {
         /// Stable-ish AST node identity.
@@ -943,6 +963,20 @@ impl Expr {
             Self::Unless {
                 condition, body, ..
             } => condition.assigns(name) || body.assigns(name),
+            Self::Select {
+                target,
+                test,
+                arms,
+                otherwise,
+                ..
+            } => {
+                target.assigns(name)
+                    || test.as_ref().is_some_and(|test| test.assigns(name))
+                    || arms.iter().any(|arm| {
+                        arm.keys.iter().any(|key| key.assigns(name)) || arm.body.assigns(name)
+                    })
+                    || otherwise.as_ref().is_some_and(|body| body.assigns(name))
+            }
             Self::Handle { body, restart, .. } => {
                 body.assigns(name)
                     || restart
@@ -1002,6 +1036,7 @@ impl Expr {
             | Self::If { id, .. }
             | Self::Unless { id, .. }
             | Self::Case { id, .. }
+            | Self::Select { id, .. }
             | Self::Handle { id, .. }
             | Self::Block { id, .. }
             | Self::Error { id, .. } => *id,
@@ -1039,6 +1074,7 @@ impl Expr {
             | Self::If { span, .. }
             | Self::Unless { span, .. }
             | Self::Case { span, .. }
+            | Self::Select { span, .. }
             | Self::Handle { span, .. }
             | Self::Block { span, .. }
             | Self::Error { span, .. } => *span,
@@ -1055,6 +1091,17 @@ pub struct CondArm {
     /// Body run when the test is true.
     pub body: Block,
     /// Source span, from the arm's keyword or test through its body.
+    pub span: Span,
+}
+
+/// One arm of a `select`: `key, key => body`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelectArm {
+    /// Keys matched against the target, in order.
+    pub keys: Vec<Expr>,
+    /// Body run when a key matches.
+    pub body: Block,
+    /// Source span, from the first key through the body.
     pub span: Span,
 }
 
@@ -1923,6 +1970,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::IfExpr => self.lower_if(node),
             CstKind::UnlessExpr => self.lower_unless(node),
             CstKind::CaseExpr => self.lower_case(node),
+            CstKind::SelectExpr => self.lower_select(node),
             CstKind::HandleExpr => self.lower_handle(node),
             CstKind::BlockExpr => self.lower_block_expr(node),
             CstKind::WhileExpr => self.lower_loop(node, LoopKind::While),
@@ -2824,6 +2872,69 @@ impl<'tree> Lowering<'tree> {
             arms,
             otherwise,
             span: node.span,
+        }
+    }
+
+    fn lower_select(&mut self, node: &CstNode) -> Expr {
+        let mut target = None;
+        let mut test = None;
+        let mut arms = Vec::new();
+        let mut otherwise = None;
+        for child in &node.children {
+            let CstElement::Node(child) = child else {
+                continue;
+            };
+            match child.kind {
+                CstKind::SelectTest => {
+                    test = child
+                        .children
+                        .iter()
+                        .find_map(|element| match element {
+                            CstElement::Node(expr) if !expr.kind.is_role() => Some(expr),
+                            _ => None,
+                        })
+                        .map(|expr| Box::new(self.lower_expr(expr)));
+                }
+                CstKind::SelectClause => arms.push(self.lower_select_arm(child)),
+                CstKind::OtherwiseClause => {
+                    otherwise = Some(Box::new(self.lower_clause_body(child)));
+                }
+                kind if kind.is_role() => {}
+                _ if target.is_none() => target = Some(self.lower_expr(child)),
+                _ => {}
+            }
+        }
+        Expr::Select {
+            id: self.ast_id(node),
+            target: Box::new(target.unwrap_or_else(|| Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            })),
+            test,
+            arms,
+            otherwise,
+            span: node.span,
+        }
+    }
+
+    fn lower_select_arm(&mut self, node: &CstNode) -> SelectArm {
+        let mut keys = Vec::new();
+        let mut body = None;
+        for child in &node.children {
+            let CstElement::Node(child) = child else {
+                continue;
+            };
+            match child.kind {
+                CstKind::Body => body = Some(self.lower_block(child)),
+                kind if kind.is_role() => {}
+                _ => keys.push(self.lower_expr(child)),
+            }
+        }
+        let body = body.unwrap_or_else(|| self.missing_block(node));
+        SelectArm {
+            keys,
+            span: Span::new(node.span.start, body.span.end.max(node.span.start)),
+            body,
         }
     }
 
@@ -4247,6 +4358,41 @@ mod tests {
             &args[0],
             Expr::MakeObject { class, .. }
                 if matches!(class.as_ref(), Expr::ClassName { class_name, .. } if class_name == "<circle>")
+        ));
+    }
+
+    #[test]
+    fn lowers_select_targets_tests_and_keys() {
+        let tree = parse(
+            "define function f(x, by)\n  select (x by by) 1, 2 => 0; otherwise => 1 end\nend;\n\
+             define function g(x)\n  select (x) #a => 0 end\nend;",
+        );
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+
+        let Expr::Select {
+            target,
+            test,
+            arms,
+            otherwise,
+            ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected select");
+        };
+        assert!(matches!(target.as_ref(), Expr::Name { name, .. } if name == "x"));
+        assert!(matches!(test.as_deref(), Some(Expr::Name { name, .. }) if name == "by"));
+        assert_eq!(arms.len(), 1);
+        assert!(matches!(
+            arms[0].keys.as_slice(),
+            [Expr::Number { value: 1, .. }, Expr::Number { value: 2, .. }]
+        ));
+        assert!(otherwise.is_some());
+
+        assert!(matches!(
+            &module.functions[1].body.result,
+            Expr::Select { test: None, arms, otherwise: None, .. }
+                if matches!(arms[0].keys.as_slice(), [Expr::Symbol { .. }])
         ));
     }
 

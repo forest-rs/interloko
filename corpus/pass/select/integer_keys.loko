@@ -1,0 +1,22 @@
+// expect: run 1221
+// expect: diagnostics 0
+
+// `select` matches its target against each arm's keys in order, with `==`
+// unless `by` names another test, and runs the first arm with a matching
+// key; `otherwise` runs when none matches. An arm may list several keys,
+// and its body may bind locals of its own.
+
+define function classify(n :: <integer>) => <integer>
+  select (n)
+    0 => 1;
+    1, 2, 3 =>
+      let small = 2;
+      small;
+    3 => 99;
+    otherwise => 3;
+  end
+end;
+
+define function main() => <integer>
+  classify(0) * 1000 + classify(2) * 100 + classify(3) * 10 + classify(-1) - 2
+end;

@@ -79,6 +79,7 @@
 "sem.class-of-type-mismatch" = "[ps] class-of got { $actual }, need object"
 "sem.instance-of-impossible" = "[ps] instance? cannot match { $actual } as { $expected }"
 "sem.cast-impossible" = "[ps] cannot cast { $actual } to { $expected }"
+"sem.select-test-type-mismatch" = "[ps] select `by` needs a <boolean> function of target and key, got { $actual }"
 "sem.make-class-argument-type-mismatch" = "[ps] make class arg got { $actual }, need class object"
 "sem.host-backed-make" = "[ps] make cannot construct host-backed { $class }"
 "sem.builtin-value-make" = "[ps] make cannot construct built-in value { $class }"

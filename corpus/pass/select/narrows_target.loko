@@ -1,0 +1,22 @@
+// expect: run 250
+// expect: diagnostics 0
+// expect: dump sem contains refinement l0 => integer
+// expect: dump typing contains overflow proved rule=overflow-impossible
+// expect: dump typing contains actual=(singleton(1), singleton(1))
+
+// An arm whose key is a literal sees the target as that value: here an
+// `<object>` target matched against `1` is the integer 1 in its arm, so it
+// unboxes once and `x + 1` cannot overflow; matched against `#t` it is the
+// boolean true.
+
+define function f(x :: <object>) => <integer>
+  select (x)
+    1 => x + 1;
+    #t => if (x) 5 else 6 end;
+    otherwise => 0;
+  end
+end;
+
+define function main() => <integer>
+  f(1) * 100 + f(#t) * 10 + f("other")
+end;

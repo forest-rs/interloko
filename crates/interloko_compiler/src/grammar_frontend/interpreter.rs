@@ -31,6 +31,7 @@ const LOKO_RESERVED_WORDS: &[&str] = &[
     "unless",
     "case",
     "otherwise",
+    "select",
     "handle",
     "with",
     "restart",

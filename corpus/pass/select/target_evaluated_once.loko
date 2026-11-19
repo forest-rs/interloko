@@ -1,0 +1,28 @@
+// expect: run 31
+// expect: diagnostics 0
+
+// The target is evaluated once, before any key, however many keys are
+// tried. A `select` in another's arm binds its own target.
+
+define class <counter> (<object>)
+  slot count :: <integer>, init-value: 0;
+end;
+
+define function next(c :: <counter>) => <integer>
+  c.count := c.count + 1
+end;
+
+define function main() => <integer>
+  let c = make(<counter>);
+  let picked = select (next(c))
+    5 => 0;
+    6 => 0;
+    1 => select (next(c) * 10)
+           10 => 0;
+           20 => 30;
+           otherwise => 0;
+         end;
+    otherwise => 0;
+  end;
+  picked + c.count - 1
+end;

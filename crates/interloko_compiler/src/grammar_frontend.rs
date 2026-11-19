@@ -3126,7 +3126,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "expression",
-            "handle-expression | block-expression | while-expression | until-expression | if-expression | unless-expression | case-expression | assignment-expression",
+            "handle-expression | block-expression | while-expression | until-expression | if-expression | unless-expression | case-expression | select-expression | assignment-expression",
             "syntax.rs:Parser::parse_expr",
         ),
         (
@@ -3216,13 +3216,28 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "case-label",
-            "expression `=>` | `otherwise` `=>`",
+            "list-of<expression, `,`> `=>` | `otherwise` `=>`",
             "base_loko_primary::BaseLokoCstBuilder::build_expression_statement",
         ),
         (
             "otherwise-clause",
             "`otherwise` `=>` body `;`?",
             "base_loko_primary::BaseLokoCstBuilder::build_case",
+        ),
+        (
+            "select-expression",
+            "`select` `(` expression select-test? `)` select-clause* otherwise-clause? `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_select",
+        ),
+        (
+            "select-test",
+            "`by` expression",
+            "base_loko_primary::BaseLokoCstBuilder::build_select",
+        ),
+        (
+            "select-clause",
+            "list-of<expression, `,`> `=>` body case-clause-end",
+            "base_loko_primary::BaseLokoCstBuilder::build_select",
         ),
         (
             "assignment-expression",
@@ -3927,6 +3942,9 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::CaseExpr => Some("case-expression"),
         CstKind::CaseClause => Some("case-clause"),
         CstKind::OtherwiseClause => Some("otherwise-clause"),
+        CstKind::SelectExpr => Some("select-expression"),
+        CstKind::SelectTest => Some("select-test"),
+        CstKind::SelectClause => Some("select-clause"),
         CstKind::HandleExpr => Some("handle-expression"),
         CstKind::RestartClause => Some("restart-clause"),
         CstKind::BlockExpr => Some("block-expression"),
@@ -4372,7 +4390,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 68);
+        assert_eq!(grammar.effective_rules.len(), 71);
 
         assert!(
             !records

@@ -1,0 +1,13 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports unhandled condition <select-error>
+// expect: diagnostics 0
+
+define function size(n :: <integer>) => <integer>
+  select (n)
+    1 => 100;
+  end
+end;
+
+define function main() => <integer>
+  size(7)
+end;

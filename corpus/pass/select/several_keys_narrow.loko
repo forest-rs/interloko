@@ -1,0 +1,17 @@
+// expect: run 30
+// expect: diagnostics 0
+// expect: dump sem contains refinement l0 => integer
+
+// An arm with several integer keys sees the target as an integer when
+// every key is one: whichever matched, `x` holds it, so it unboxes once.
+
+define function f(x :: <object>) => <integer>
+  select (x)
+    1, 2 => x + 1;
+    otherwise => 0;
+  end
+end;
+
+define function main() => <integer>
+  f(2) * 10 + f("two")
+end;
