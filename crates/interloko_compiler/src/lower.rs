@@ -280,6 +280,23 @@ pub enum ValueKind {
     SlotDescriptorObject,
 }
 
+/// A decode of one string position that two [`Instr::TextCall`]s share, by
+/// a slot number unique within the function.
+///
+/// `s[p]` (or `element(s, p, default:)`) decodes the character at `p` and,
+/// in the same step, the position after it. When `next-position(s, p)`
+/// follows with nothing in between able to change `s` or `p`, and nothing
+/// able to reach it without passing the read, it uses that position instead
+/// of decoding again; if the read found no character, it decodes as usual,
+/// so it signals as it would have.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DecodeShare {
+    /// The character read keeps its decode in the slot.
+    Keeps(u32),
+    /// The `next-position` uses the slot's decode.
+    Uses(u32),
+}
+
 /// What a [`Instr::TextCall`] that rejects its checked argument does.
 ///
 /// The call fails with the check-failed tag; the failure signals
@@ -1538,6 +1555,11 @@ pub enum Instr {
         /// For an operation that can reject its argument
         /// ([`sem::TextFunction::checked_arg`]), what a rejection signals.
         check: Option<Box<TextCheck>>,
+        /// Whether a character read keeps its decode for a later
+        /// `next-position` of the same string and position, or this
+        /// `next-position` uses one ([`DecodeShare`]). Lowering leaves it
+        /// `None`; the peephole pass pairs reads.
+        share: Option<DecodeShare>,
         /// Source span.
         span: Span,
     },
@@ -8300,6 +8322,7 @@ impl<'module> BodyLowering<'module> {
             function,
             args: regs,
             check,
+            share: None,
             span,
         });
         Ok(result)
@@ -8774,6 +8797,7 @@ impl<'module> BodyLowering<'module> {
                     span,
                 ),
             })),
+            share: None,
             span,
         });
         Ok(result)
@@ -12357,11 +12381,17 @@ impl Module {
                 function,
                 args,
                 check,
+                share,
                 span,
             } => {
                 let checked = if check.is_some() { ".checked" } else { "" };
                 write!(f, "  %{dst} = text.call{checked} {}", function.symbol())?;
                 self.fmt_arg_list(f, args)?;
+                match share {
+                    Some(DecodeShare::Keeps(slot)) => write!(f, " keeps decode#{slot}")?,
+                    Some(DecodeShare::Uses(slot)) => write!(f, " uses decode#{slot}")?,
+                    None => {}
+                }
                 fmt_span(f, *span)
             }
             Instr::F64NotEqual {

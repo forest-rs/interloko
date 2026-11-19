@@ -1581,6 +1581,10 @@ struct FunctionEmitter<'a> {
     /// The runtime layout, whose class hierarchy `instance?` tests compare
     /// keys against.
     layout: Option<&'a RuntimeLayout>,
+    /// The registers of each shared decode ([`lower::DecodeShare`]): its
+    /// slot, the position after the character it read, and whether it found
+    /// none.
+    decode_slots: Vec<(u32, Reg, Reg)>,
     /// Where control goes after the instruction being emitted when the
     /// next lowered instruction is a jump: its target. An expansion that
     /// would otherwise jump to its own end and then on can go there directly.
@@ -1646,6 +1650,7 @@ impl<'a> FunctionEmitter<'a> {
             shared: Vec::new(),
             layout: None,
             continuation: None,
+            decode_slots: Vec::new(),
         }
     }
 
@@ -2174,6 +2179,7 @@ impl<'a> FunctionEmitter<'a> {
                 function,
                 args,
                 check,
+                share,
                 span,
             } => {
                 self.set_span(*span);
@@ -2190,7 +2196,7 @@ impl<'a> FunctionEmitter<'a> {
                 ) {
                     (Some(check), Some(checked)) => {
                         self.emit_checked_text_call(
-                            *dst, *function, sig, args, checked, check, *span,
+                            *dst, *function, sig, args, checked, check, *share, *span,
                         )?;
                     }
                     (None, None) => {
@@ -3142,10 +3148,22 @@ impl<'a> FunctionEmitter<'a> {
         dst: Reg,
         function: sem::TextFunction,
         args: &[Reg],
+        share: Option<lower::DecodeShare>,
         slow: Label,
         done: Label,
     ) -> Result<bool, TapeError> {
         use sem::TextFunction as F;
+        // A `next-position` whose read kept its decode uses it: the position
+        // after the character, unless the read found none.
+        if let (F::NextPosition, Some(lower::DecodeShare::Uses(slot))) = (function, share) {
+            let (moved, missing) = self.decode_slot(slot);
+            let found = self.asm.label();
+            self.asm.br(missing, slow, found);
+            self.asm.place(found).map_err(build_error)?;
+            self.asm.u64_to_i64_wrap(dst, moved);
+            self.asm.jmp(done);
+            return Ok(true);
+        }
         let (string, position) = match (function, args) {
             (F::StringElement | F::NextPosition | F::PreviousPosition, [string, position])
             | (F::StringElementOr, [string, position, _]) => (*string, *position),
@@ -3156,8 +3174,13 @@ impl<'a> FunctionEmitter<'a> {
         };
         let reads_character = matches!(function, F::StringElement | F::StringElementOr);
         let at = self.shared_temp(SharedTemp::TextPosition, ValueType::U64);
-        let moved = self.shared_temp(SharedTemp::TextMoved, ValueType::U64);
-        let missing = self.shared_temp(SharedTemp::TextMissing, ValueType::Bool);
+        let (moved, missing) = match share {
+            Some(lower::DecodeShare::Keeps(slot)) if reads_character => self.decode_slot(slot),
+            _ => (
+                self.shared_temp(SharedTemp::TextMoved, ValueType::U64),
+                self.shared_temp(SharedTemp::TextMissing, ValueType::Bool),
+            ),
+        };
         // The decode writes its character before the host call that follows
         // a miss reads the arguments, so it writes `dst` itself only when
         // `dst` is no argument, such as `element`'s default: the call must
@@ -3225,6 +3248,7 @@ impl<'a> FunctionEmitter<'a> {
         args: &[Reg],
         checked: usize,
         check: &lower::TextCheck,
+        share: Option<lower::DecodeShare>,
         span: Span,
     ) -> Result<(), TapeError> {
         let control = self.abi.control()?;
@@ -3239,7 +3263,7 @@ impl<'a> FunctionEmitter<'a> {
         // A read that finds its character skips the call; when a jump follows
         // the call, it goes straight to that jump's target.
         let found = self.continuation.unwrap_or(done);
-        if self.emit_string_decode(dst, function, args, slow, found)? {
+        if self.emit_string_decode(dst, function, args, share, slow, found)? {
             self.asm.place(slow).map_err(build_error)?;
         }
         let copy_type = self.register_type(args[checked])?;
@@ -3424,6 +3448,22 @@ impl<'a> FunctionEmitter<'a> {
         let register = self.alloc_temp(kind);
         self.shared.push((role, kind, register));
         register
+    }
+
+    /// The registers of shared decode `slot`: the position after the
+    /// character the read decoded, and whether it found none.
+    fn decode_slot(&mut self, slot: u32) -> (Reg, Reg) {
+        if let Some((_, moved, missing)) = self
+            .decode_slots
+            .iter()
+            .find(|(candidate, _, _)| *candidate == slot)
+        {
+            return (*moved, *missing);
+        }
+        let moved = self.alloc_temp(ValueType::U64);
+        let missing = self.alloc_temp(ValueType::Bool);
+        self.decode_slots.push((slot, moved, missing));
+        (moved, missing)
     }
 
     fn alloc_temp(&mut self, kind: ValueType) -> Reg {
