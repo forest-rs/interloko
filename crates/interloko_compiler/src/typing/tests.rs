@@ -2700,3 +2700,50 @@ fn a_select_arm_ruled_out_by_a_contract_relies_on_it() {
         "{dependencies:?}"
     );
 }
+
+#[test]
+fn a_shared_local_is_read_at_its_declared_type() {
+    // `n` lives in a cell `bump` may store in during any call, so even the
+    // read right after its binding relies only on `<integer>`; a local no
+    // closure assigns keeps its literal's type.
+    let (module, artifact) = decisions_for(
+        "define function f() => <i32>\n  \
+         let n = 1;\n  \
+         let bump = function () => <integer> n := n + 1 end;\n  \
+         let m = 1;\n  \
+         as(<i32>, n) + as(<i32>, m)\nend;",
+    );
+    let ranges = checks_of(&module, &artifact, "f", TypingCheck::Range);
+    let summary = ranges
+        .iter()
+        .map(|decision| (decision.verdict, type_name(&module, &decision.actual[0])))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        summary,
+        [
+            (TypingVerdict::Checked, "<integer>".into()),
+            (TypingVerdict::Proved, "singleton(1)".into()),
+        ]
+    );
+}
+
+#[test]
+fn a_shared_capture_is_bound_at_its_declared_type() {
+    // The closure is made while `n` is 0, but the frame stores 7 before
+    // calling it, so the capture's binding fact is only `<integer>`.
+    let (module, artifact) = decisions_for(
+        "define function main() => <integer>\n  \
+         let n = 0;\n  \
+         let read = function () => <integer> n end;\n  \
+         n := 7;\n  \
+         read()\nend;",
+    );
+    let typed = typed(&module, &artifact, "main");
+    let bound = typed
+        .binding_type(Binding::Capture {
+            closure: sem::ClosureId(0),
+            capture: sem::CaptureId(0),
+        })
+        .expect("capture bound");
+    assert_eq!(type_name(&module, bound), "<integer>");
+}

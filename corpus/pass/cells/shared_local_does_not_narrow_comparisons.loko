@@ -1,0 +1,26 @@
+// expect: runtime code type-error.range
+// expect: diagnostics 0
+// expect: dump typing contains range checked
+
+// Comparing with a shared local narrows nothing by the value it once
+// had: `bump` stores 1000 in `n`, so `y <= n` says nothing that fits
+// `z`'s range, and its check stays.
+
+define function pick(y :: limited(<integer>, min: 0, max: 1000)) => <integer>
+  let n = 0;
+  let bump = function () => <integer>
+    n := 1000;
+    0
+  end;
+  bump();
+  if (y <= n)
+    let z :: limited(<integer>, min: 0, max: 0) = y;
+    z
+  else
+    -1
+  end
+end;
+
+define function main() => <integer>
+  pick(500)
+end;

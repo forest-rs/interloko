@@ -1,0 +1,19 @@
+// expect: run 40
+// expect: diagnostics 0
+// expect: dump lowered contains cell.get
+
+// A restart guard runs as a closure over the handler's locals, made when
+// the handler is installed. The handled body assigns `limit` after that,
+// so `limit` is shared and the guard reads the body's store.
+
+define class <oops> (<error>)
+end;
+
+define function main() => <integer>
+  let limit = 0;
+  handle block ()
+    limit := 5;
+    signal(make(<oops>))
+  end
+  with restart c :: <oops> when limit > 3 => 40 end
+end;

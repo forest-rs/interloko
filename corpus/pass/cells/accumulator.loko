@@ -1,0 +1,19 @@
+// expect: run 125
+// expect: diagnostics 0
+
+// A callback updates its frame's local, which the frame reads after.
+
+define function each-up-to(n :: <integer>, visit :: callable(<integer>) => <integer>) => <integer>
+  let i = 1;
+  while (i <= n)
+    visit(i);
+    i := i + 1
+  end;
+  n
+end;
+
+define function main() => <integer>
+  let total = 0;
+  let count = each-up-to(10, function (i :: <integer>) => <integer> total := total + i end);
+  total * 2 + count + 5
+end;

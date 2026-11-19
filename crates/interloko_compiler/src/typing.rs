@@ -42,8 +42,11 @@
 //! captures to [`Type`]s of the shared lattice in
 //! [`interloko_model::types`]. An assignment `x := v` gives `x` the fact of
 //! `v` (within `x`'s declared type), which replaces any narrowing of `x`.
-//! Closures never capture an assigned local, so captures are immutable.
-//! Slots are mutable, so slot reads are never narrowed.
+//! A local that is assigned and captured lives in a cell its frame and its
+//! closures share ([`sem::Local::shared`]); any call may run a closure that
+//! stores in it, so every read of it has its declared type, as a slot read
+//! does. Other captures are immutable copies. Slots are mutable, so slot
+//! reads are never narrowed.
 //!
 //! - **Transfer.** Literals have singleton types (integers have point
 //!   ranges), `make` has its exact class, a proved cast meets its operand

@@ -91,7 +91,6 @@
 "sem.slot-assignment-read-only" = "slot `{ $slot }` on `{ $class }` is read-only ({ $reason })"
 "sem.local-assignment-type-mismatch" = "local `{ $local }` holds { $expected } but is assigned { $actual }; a `let` without a type takes its initializer's"
 "sem.assignment-target-not-assignable" = "`{ $name }` is a { $kind } and cannot be assigned; only `let` locals can"
-"sem.assigned-local-captured" = "this closure captures `{ $local }`, which is assigned; a capture copies the value when the closure is made, so assigned locals cannot be captured yet"
 "sem.unexpected-keyword-argument" = "`{ $callee }` takes no `{ $keyword }:` argument"
 "sem.duplicate-keyword-argument" = "`{ $keyword }:` is given more than once"
 "sem.collection-default-unsupported" = "`{ $function }` with `default:` needs a collection known to be one of { $expected }, not { $actual }, until methods can take keyword parameters"

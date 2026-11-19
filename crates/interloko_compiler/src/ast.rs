@@ -898,41 +898,101 @@ pub enum Expr {
 }
 
 impl Block {
+    /// Visits the expressions this body evaluates directly, in order: each
+    /// statement's, then the result.
+    pub fn for_each_expr<'e>(&'e self, mut visit: impl FnMut(&'e Expr)) {
+        for statement in &self.statements {
+            match statement {
+                Statement::Let(binding) => visit(&binding.value),
+                Statement::Expr(expr) => visit(expr),
+            }
+        }
+        visit(&self.result);
+    }
+
     /// Whether a `:=` in this body, outside any closure in it, assigns a
     /// local called `name`; see [`Expr::assigns`].
     #[must_use]
     pub fn assigns(&self, name: &str) -> bool {
-        self.statements.iter().any(|statement| match statement {
-            Statement::Let(binding) => binding.value.assigns(name),
-            Statement::Expr(expr) => expr.assigns(name),
-        }) || self.result.assigns(name)
+        let mut found = false;
+        self.for_each_expr(|expr| found |= expr.assigns(name));
+        found
     }
 }
 
-impl Expr {
-    /// Whether a `:=` in this expression, outside any closure in it,
-    /// assigns a local called `name`.
-    ///
-    /// This goes by name, so it also sees assignments of other locals
-    /// that shadow it. A closure cannot assign the locals it captures, so
-    /// its body is not searched.
-    #[must_use]
-    pub fn assigns(&self, name: &str) -> bool {
-        match self {
-            Self::Assign {
-                name: assigned,
-                value,
-                ..
-            } => assigned == name || value.assigns(name),
-            Self::Loop { test, body, .. } => test.assigns(name) || body.assigns(name),
-            Self::Vector {
-                elements: exprs, ..
-            } => exprs.iter().any(|expr| expr.assigns(name)),
-            Self::Call { args, keywords, .. } => {
-                args.iter().any(|expr| expr.assigns(name))
-                    || keywords.iter().any(|keyword| keyword.value.assigns(name))
+/// The names of the locals in a definition's `body` that must live in
+/// shared cells: those `:=` assigns, anywhere, and a closure (or a
+/// handler's restart guard, which runs as one) refers to.
+///
+/// This goes by name, so a local shadowing one of these names lives in a
+/// cell too; a cell holds the same values, only more slowly.
+#[must_use]
+pub fn shared_local_names(body: &Block) -> Vec<String> {
+    let mut assigned = Vec::new();
+    let mut captured = Vec::new();
+    body.for_each_expr(|expr| collect_names(expr, false, &mut assigned, &mut captured));
+    assigned.retain(|name| captured.contains(name));
+    assigned
+}
+
+/// [`shared_local_names`] for a definition whose body is one expression,
+/// such as a constant's or a slot's initial value.
+#[must_use]
+pub fn shared_local_names_in(value: &Expr) -> Vec<String> {
+    let mut assigned = Vec::new();
+    let mut captured = Vec::new();
+    collect_names(value, false, &mut assigned, &mut captured);
+    assigned.retain(|name| captured.contains(name));
+    assigned
+}
+
+fn collect_names(
+    expr: &Expr,
+    in_closure: bool,
+    assigned: &mut Vec<String>,
+    captured: &mut Vec<String>,
+) {
+    let note = |names: &mut Vec<String>, name: &str| {
+        if !names.iter().any(|known| known == name) {
+            names.push(name.into());
+        }
+    };
+    match expr {
+        Expr::Assign { name, .. } => {
+            note(assigned, name);
+            if in_closure {
+                note(captured, name);
             }
-            Self::InstanceOf { value: inner, .. }
+        }
+        // A call names its callee, which may be a local callable.
+        Expr::Name { name, .. } | Expr::Call { callee: name, .. } if in_closure => {
+            note(captured, name);
+        }
+        Expr::Function { body, .. } => {
+            body.for_each_expr(|expr| collect_names(expr, true, assigned, captured));
+            return;
+        }
+        Expr::Handle { body, restart, .. } => {
+            collect_names(body, in_closure, assigned, captured);
+            if let Some(guard) = &restart.guard {
+                collect_names(guard, true, assigned, captured);
+            }
+            collect_names(&restart.body, in_closure, assigned, captured);
+            return;
+        }
+        _ => {}
+    }
+    expr.for_each_child(|child| collect_names(child, in_closure, assigned, captured));
+}
+
+impl Expr {
+    /// Visits this expression's direct subexpressions in evaluation order,
+    /// including those of the bodies it contains. A function expression's
+    /// body is code of its own and is not visited.
+    pub fn for_each_child<'e>(&'e self, mut visit: impl FnMut(&'e Self)) {
+        match self {
+            Self::Assign { value: inner, .. }
+            | Self::InstanceOf { value: inner, .. }
             | Self::Cast { value: inner, .. }
             | Self::Signal {
                 condition: inner, ..
@@ -940,9 +1000,19 @@ impl Expr {
             | Self::SlotRead {
                 receiver: inner, ..
             }
-            | Self::UnaryMinus { expr: inner, .. } => inner.assigns(name),
+            | Self::UnaryMinus { expr: inner, .. } => visit(inner),
+            Self::Loop { test, body, .. } => {
+                visit(test);
+                body.for_each_expr(visit);
+            }
+            Self::Vector { elements, .. } => elements.iter().for_each(visit),
+            Self::Call { args, keywords, .. } => {
+                args.iter().for_each(&mut visit);
+                keywords.iter().for_each(|keyword| visit(&keyword.value));
+            }
             Self::MakeObject { class, fields, .. } => {
-                class.assigns(name) || fields.iter().any(|field| field.value.assigns(name))
+                visit(class);
+                fields.iter().for_each(|field| visit(&field.value));
             }
             Self::SlotAssign {
                 receiver: lhs,
@@ -951,7 +1021,10 @@ impl Expr {
             }
             | Self::Binary { lhs, rhs, .. }
             | Self::Compare { lhs, rhs, .. }
-            | Self::Identical { lhs, rhs, .. } => lhs.assigns(name) || rhs.assigns(name),
+            | Self::Identical { lhs, rhs, .. } => {
+                visit(lhs);
+                visit(rhs);
+            }
             Self::If {
                 arms,
                 else_body: default,
@@ -962,13 +1035,20 @@ impl Expr {
                 otherwise: default,
                 ..
             } => {
-                arms.iter()
-                    .any(|arm| arm.test.assigns(name) || arm.body.assigns(name))
-                    || default.as_ref().is_some_and(|body| body.assigns(name))
+                for arm in arms {
+                    visit(&arm.test);
+                    arm.body.for_each_expr(&mut visit);
+                }
+                if let Some(body) = default {
+                    body.for_each_expr(&mut visit);
+                }
             }
             Self::Unless {
                 condition, body, ..
-            } => condition.assigns(name) || body.assigns(name),
+            } => {
+                visit(condition);
+                body.for_each_expr(visit);
+            }
             Self::Select {
                 target,
                 test,
@@ -976,26 +1056,30 @@ impl Expr {
                 otherwise,
                 ..
             } => {
-                target.assigns(name)
-                    || test.as_ref().is_some_and(|test| test.assigns(name))
-                    || arms.iter().any(|arm| {
-                        arm.keys.iter().any(|key| key.assigns(name)) || arm.body.assigns(name)
-                    })
-                    || otherwise.as_ref().is_some_and(|body| body.assigns(name))
+                visit(target);
+                if let Some(test) = test {
+                    visit(test);
+                }
+                for arm in arms {
+                    arm.keys.iter().for_each(&mut visit);
+                    arm.body.for_each_expr(&mut visit);
+                }
+                if let Some(body) = otherwise {
+                    body.for_each_expr(&mut visit);
+                }
             }
             Self::Handle { body, restart, .. } => {
-                body.assigns(name)
-                    || restart
-                        .guard
-                        .as_ref()
-                        .is_some_and(|guard| guard.assigns(name))
-                    || restart.body.assigns(name)
+                visit(body);
+                if let Some(guard) = &restart.guard {
+                    visit(guard);
+                }
+                visit(&restart.body);
             }
             Self::Block { body, cleanup, .. } => {
-                body.assigns(name)
-                    || cleanup
-                        .as_ref()
-                        .is_some_and(|cleanup| cleanup.assigns(name))
+                body.for_each_expr(&mut visit);
+                if let Some(cleanup) = cleanup {
+                    cleanup.for_each_expr(&mut visit);
+                }
             }
             Self::Number { .. }
             | Self::Float { .. }
@@ -1007,8 +1091,26 @@ impl Expr {
             | Self::Name { .. }
             | Self::ClassName { .. }
             | Self::TypeLiteral { .. }
-            | Self::Error { .. } => false,
+            | Self::Error { .. } => {}
         }
+    }
+
+    /// Whether a `:=` in this expression, outside any closure in it,
+    /// assigns a local called `name`.
+    ///
+    /// This goes by name, so it also sees assignments of other locals
+    /// that shadow it. A closure's body is not searched: an assignment
+    /// there runs when the closure is called.
+    #[must_use]
+    pub fn assigns(&self, name: &str) -> bool {
+        if let Self::Assign { name: assigned, .. } = self
+            && assigned == name
+        {
+            return true;
+        }
+        let mut found = false;
+        self.for_each_child(|child| found |= child.assigns(name));
+        found
     }
 
     /// Returns this expression's stable-ish AST node id.

@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::ast;
-use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode, DiagnosticLabel};
+use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
 use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
 use crate::syntax::{self, Span};
@@ -1288,7 +1288,8 @@ impl Module {
             | Expr::HostCall { result_kind, .. }
             | Expr::AccessorCall { result_kind, .. }
             | Expr::SlotWrite { result_kind, .. }
-            | Expr::AssignLocal { result_kind, .. } => *result_kind,
+            | Expr::AssignLocal { result_kind, .. }
+            | Expr::AssignCapture { result_kind, .. } => *result_kind,
             Expr::Loop { .. } => scalar_result_kind(&[]),
             Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
                 ValueKind::ClassObject(*class)
@@ -1817,7 +1818,7 @@ impl<'a> SiteNumbering<'a> {
                     self.block(cleanup);
                 }
             }
-            Expr::AssignLocal { value, .. } => self.expr(value),
+            Expr::AssignLocal { value, .. } | Expr::AssignCapture { value, .. } => self.expr(value),
             Expr::Loop { test, body, .. } => {
                 self.expr(test);
                 self.block(body);
@@ -2850,6 +2851,10 @@ pub struct Capture {
     pub callable_signature: Option<CallableSignature>,
     /// The captured local's declared range; see [`Local::range`].
     pub range: Option<IntRange>,
+    /// Whether the captured local is [shared](Local::shared): the capture
+    /// holds its cell, which the closure reads and may assign, rather than
+    /// a copy of its value.
+    pub shared: bool,
     /// Source span of the captured binding.
     pub span: Span,
 }
@@ -2899,9 +2904,14 @@ pub struct Local {
     /// entry checks what it is passed.
     pub range: Option<IntRange>,
     /// Whether some `:=` assigns this local after its binding. An assigned
-    /// local holds different values over its lifetime: only a `let` local
-    /// may be assigned, and no closure captures one.
+    /// local holds different values over its lifetime; only a `let` local
+    /// may be assigned.
     pub assigned: bool,
+    /// Whether this `let` local lives in a shared cell: one that is
+    /// assigned and that a closure refers to, so the frame and every
+    /// closure capturing it read and write the one cell. Decided by name
+    /// for the whole definition ([`ast::shared_local_names`]).
+    pub shared: bool,
     /// Source span of the binding name.
     pub span: Span,
 }
@@ -3979,6 +3989,23 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Assignment of a shared enclosing local through a closure's capture,
+    /// `name := value`, whose value is the local's new value.
+    ///
+    /// The capture holds the local's cell; see [`Local::shared`]. The value
+    /// is already checked as for [`Self::AssignLocal`].
+    AssignCapture {
+        /// Assigned capture, which is [shared](Capture::shared).
+        capture: CaptureId,
+        /// The local's declared category, which is the result's.
+        result_kind: ValueKind,
+        /// The local's typed callable signature, when it has one.
+        callable_signature: Option<CallableSignature>,
+        /// Assigned value.
+        value: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Conditional loop: evaluates `test` and, while it asks for another
     /// iteration, the body. Produces no values.
     Loop {
@@ -4077,6 +4104,7 @@ impl Expr {
                 receiver: inner, ..
             }
             | Self::AssignLocal { value: inner, .. }
+            | Self::AssignCapture { value: inner, .. }
             | Self::Discard { value: inner, .. } => visit(inner),
             Self::MakeObject { class, fields, .. } => {
                 visit(class);
@@ -4215,6 +4243,7 @@ impl Expr {
             | Self::ValueEqual { span, .. }
             | Self::Identical { span, .. }
             | Self::AssignLocal { span, .. }
+            | Self::AssignCapture { span, .. }
             | Self::Loop { span, .. }
             | Self::If { span, .. }
             | Self::Discard { span, .. }
@@ -4600,10 +4629,11 @@ struct FunctionContext {
     exit_definitions: Vec<DefinitionId>,
     /// The `let` locals, which `:=` may assign.
     assignable: Vec<LocalId>,
-    /// Locals closures created here capture, with the span of the closure.
-    captured: Vec<(LocalId, Span)>,
-    /// Locals `:=` assigns, with the span of their first assignment.
-    assignments: Vec<(LocalId, Span)>,
+    /// Names of the definition's `let` locals that live in shared cells
+    /// ([`ast::shared_local_names`]); closures inherit them.
+    shared_names: Vec<String>,
+    /// Shared enclosing locals a closure body assigns through its captures.
+    assigned_captures: Vec<LocalId>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -4638,8 +4668,8 @@ impl FunctionContext {
             active_restarts: Vec::new(),
             exit_definitions: Vec::new(),
             assignable: Vec::new(),
-            captured: Vec::new(),
-            assignments: Vec::new(),
+            shared_names: Vec::new(),
+            assigned_captures: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -4653,8 +4683,8 @@ impl FunctionContext {
             active_restarts: Vec::new(),
             exit_definitions,
             assignable: Vec::new(),
-            captured: Vec::new(),
-            assignments: Vec::new(),
+            shared_names: Vec::new(),
+            assigned_captures: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -4697,6 +4727,7 @@ impl FunctionContext {
             callable_signature,
             range: None,
             assigned: false,
+            shared: false,
             span,
         });
         self.visible_locals.push(true);
@@ -4711,54 +4742,23 @@ impl FunctionContext {
         }
     }
 
-    /// Lets `:=` assign `local`, a `let` local.
+    /// Lets `:=` assign `local`, a `let` local, which lives in a shared
+    /// cell when its name is one of [`Self::shared_names`].
     fn allow_assignment(&mut self, local: LocalId) {
         self.assignable.push(local);
-    }
-
-    /// Records that `:=` assigns `local` at `span`. Captures copy a value
-    /// when their closure is made, so a closure capturing an assigned local
-    /// would read a stale copy; that is reported instead.
-    fn note_assignment(&mut self, local: LocalId, span: Span) {
-        let Some(binding) = self.locals.get_mut(local.0 as usize) else {
-            return;
-        };
-        binding.assigned = true;
-        let name = binding.name.clone();
-        // Captures before the first assignment are reported once, here;
-        // later ones when they are made.
-        if self
-            .assignments
-            .iter()
-            .any(|(assigned, _)| *assigned == local)
-        {
-            return;
-        }
-        self.assignments.push((local, span));
-        let closures = self
-            .captured
-            .iter()
-            .filter(|(captured, _)| *captured == local)
-            .map(|(_, closure)| *closure)
-            .collect::<Vec<_>>();
-        for closure in closures {
-            self.diagnostics
-                .push(assigned_capture_diagnostic(&name, closure, span));
+        let shared = self
+            .locals
+            .get(local.0 as usize)
+            .is_some_and(|binding| self.shared_names.contains(&binding.name));
+        if let Some(binding) = self.locals.get_mut(local.0 as usize) {
+            binding.shared = shared;
         }
     }
 
-    /// Records that a closure at `span` captures `local`; see
-    /// [`Self::note_assignment`].
-    fn note_capture(&mut self, local: LocalId, span: Span) {
-        self.captured.push((local, span));
-        if let Some((_, assignment)) = self
-            .assignments
-            .iter()
-            .find(|(assigned, _)| *assigned == local)
-            && let Some(binding) = self.locals.get(local.0 as usize)
-        {
-            let diagnostic = assigned_capture_diagnostic(&binding.name, span, *assignment);
-            self.diagnostics.push(diagnostic);
+    /// Records that `:=` assigns `local`.
+    fn note_assignment(&mut self, local: LocalId) {
+        if let Some(binding) = self.locals.get_mut(local.0 as usize) {
+            binding.assigned = true;
         }
     }
 
@@ -4824,6 +4824,7 @@ impl FunctionContext {
             kind: source.kind,
             callable_signature: source.callable_signature,
             range: source.range,
+            shared: source.shared,
             span: source.span,
         });
         Some(id)
@@ -4886,14 +4887,6 @@ impl FunctionContext {
             .find(|restart| module.is_same_or_subclass(class, restart.specializer))
             .cloned()
     }
-}
-
-/// Reports a closure at `closure` capturing the local `name`, which `:=`
-/// assigns at `assignment`.
-fn assigned_capture_diagnostic(name: &str, closure: Span, assignment: Span) -> Diagnostic {
-    Diagnostic::error(closure, DiagnosticCode::AssignedLocalCaptured)
-        .with_arg(DiagnosticArg::text("local", name))
-        .with_label(DiagnosticLabel::secondary(assignment, "assigned here"))
 }
 
 struct Lowering {
@@ -5461,6 +5454,7 @@ impl Lowering {
                     .map_or((ValueKind::Error, None, None), |slot| {
                         (slot.kind, slot.callable_signature.clone(), slot.range)
                     });
+                ctx.shared_names = ast::shared_local_names_in(init_value);
                 let value = adapt_literal(
                     self.lower_expr(&mut ctx, init_value),
                     Some(core::slice::from_ref(&slot_kind)),
@@ -6489,6 +6483,7 @@ impl Lowering {
                 .constant_symbols
                 .get(index)
                 .and_then(|symbol| symbol.callable_signature.clone());
+            ctx.shared_names = ast::shared_local_names_in(&constant.value);
             let value = self.lower_expr_expected(&mut ctx, &constant.value, expected_kind);
             self.diagnostics.extend(ctx.diagnostics);
             let actual_kind = self.expr_kind(&value);
@@ -6775,6 +6770,7 @@ impl Lowering {
 
     fn lower_method(&mut self, id: MethodId, method: &ast::Method) -> Method {
         let mut ctx = FunctionContext::new();
+        ctx.shared_names = ast::shared_local_names(&method.body);
         // A method may be the first to name a built-in collection generic.
         let _ = self.collection_generic_named(&method.name);
         let generic_symbol = self.resolve_generic(&method.name).cloned();
@@ -7011,6 +7007,7 @@ impl Lowering {
 
     fn lower_function(&mut self, id: FunctionId, function: &ast::Function) -> Function {
         let mut ctx = FunctionContext::new();
+        ctx.shared_names = ast::shared_local_names(&function.body);
         let mut params = Vec::new();
         let symbol = self.functions.get(id.0 as usize).cloned();
 
@@ -8204,6 +8201,7 @@ impl Lowering {
 
         let mut closure_ctx =
             FunctionContext::for_closure(ctx.visible_local_sources(), ctx.exit_definitions.clone());
+        closure_ctx.shared_names.clone_from(&ctx.shared_names);
         let mut param_ids = Vec::new();
         let mut param_kinds = Vec::new();
         let mut param_callable_sigs = Vec::new();
@@ -8302,8 +8300,9 @@ impl Lowering {
         );
         let captures = closure_ctx.captures.clone();
         self.diagnostics.extend(closure_ctx.diagnostics);
-        for capture in &captures {
-            ctx.note_capture(capture.source, span);
+        // An assignment through a capture assigns the enclosing local.
+        for local in &closure_ctx.assigned_captures {
+            ctx.note_assignment(*local);
         }
         if let Some(slot) = self.closures.get_mut(id.0 as usize) {
             *slot = Closure {
@@ -9812,9 +9811,11 @@ impl Lowering {
         let refinement = self
             .true_branch_refinement(&condition)
             .filter(|refinement| {
+                // A shared local may change in any call that runs a closure,
+                // so no test describes it for a whole arm.
                 ctx.locals
                     .get(refinement.local.0 as usize)
-                    .is_none_or(|local| !arm.body.assigns(&local.name))
+                    .is_none_or(|local| !local.shared && !arm.body.assigns(&local.name))
             });
         let previous_kind =
             refinement.and_then(|refinement| ctx.refine_local(refinement.local, refinement.kind));
@@ -9898,9 +9899,12 @@ impl Lowering {
         let scope_start = ctx.scope_start();
         let mut lets = Vec::new();
         // Reading a literal again cannot be observed, nor a local that the
-        // test and keys, which run between the reads, do not assign.
+        // test and keys, which run between the reads, do not assign. A
+        // shared local may change in any call that runs a closure.
+        let shared = ctx.shared_names.clone();
         let reassigned = |name: &str| {
-            test.is_some_and(|test| test.assigns(name))
+            shared.iter().any(|shared| shared == name)
+                || test.is_some_and(|test| test.assigns(name))
                 || arms
                     .iter()
                     .any(|arm| arm.keys.iter().any(|key| key.assigns(name)))
@@ -9945,7 +9949,7 @@ impl Lowering {
                     return Expr::Error { span };
                 }
                 match test {
-                    ast::Expr::Name { name, .. } => Some(name.clone()),
+                    ast::Expr::Name { name, .. } if !reassigned(name) => Some(name.clone()),
                     test => {
                         let name = format!("{SELECT_TEST_LOCAL}@{}", span.start);
                         lets.push(self.bind_hidden_local(ctx, id, &name, value, test.span()));
@@ -11248,10 +11252,11 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let Some(local) = ctx.find_local(name) else {
+            if let Some(capture) = ctx.find_capture_or_add(name) {
+                return self.lower_capture_assign(ctx, capture, name, name_span, value, span);
+            }
             let _ = self.lower_expr(ctx, value);
-            let kind = if ctx.binds(name) {
-                "captured local"
-            } else if self.resolve_constant(name).is_some() {
+            let kind = if self.resolve_constant(name).is_some() {
                 "constant"
             } else if self.resolve_function(name).is_some() || self.resolve_generic(name).is_some()
             {
@@ -11294,6 +11299,81 @@ impl Lowering {
             .locals
             .get(local.0 as usize)
             .and_then(|local| local.range);
+        let value = self.lower_assigned_value(ctx, name, kind, signature.as_ref(), range, value);
+        ctx.note_assignment(local);
+        Expr::AssignLocal {
+            local,
+            result_kind: kind,
+            callable_signature: signature,
+            value: Box::new(value),
+            span,
+        }
+    }
+
+    /// Lowers `name := value` inside a closure, where `name` is the
+    /// capture `capture` of an enclosing local. Only a shared local, which
+    /// lives in a cell the closure holds, can be assigned this way: a `let`
+    /// local is shared whenever a closure assigns it.
+    fn lower_capture_assign(
+        &mut self,
+        ctx: &mut FunctionContext,
+        capture: CaptureId,
+        name: &str,
+        name_span: Span,
+        value: &ast::Expr,
+        span: Span,
+    ) -> Expr {
+        let Some(captured) = ctx.captures.get(capture.0 as usize).cloned() else {
+            return Expr::Error { span };
+        };
+        if !captured.shared {
+            let _ = self.lower_expr(ctx, value);
+            let exit = ctx.capture_sources.iter().any(|source| {
+                source.id == captured.source && ctx.exit_definitions.contains(&source.definition)
+            });
+            let kind = if exit {
+                "block exit procedure"
+            } else {
+                "parameter"
+            };
+            ctx.diagnostics.push(
+                Diagnostic::error(name_span, DiagnosticCode::AssignmentTargetNotAssignable)
+                    .with_arg(DiagnosticArg::text("name", name))
+                    .with_arg(DiagnosticArg::text("kind", kind)),
+            );
+            return Expr::Error { span };
+        }
+        let value = self.lower_assigned_value(
+            ctx,
+            name,
+            captured.kind,
+            captured.callable_signature.as_ref(),
+            captured.range,
+            value,
+        );
+        if !ctx.assigned_captures.contains(&captured.source) {
+            ctx.assigned_captures.push(captured.source);
+        }
+        Expr::AssignCapture {
+            capture,
+            result_kind: captured.kind,
+            callable_signature: captured.callable_signature,
+            value: Box::new(value),
+            span,
+        }
+    }
+
+    /// Lowers the value `:=` stores in the local `name` declared `kind`,
+    /// checked against its callable `signature` and limited `range`.
+    fn lower_assigned_value(
+        &mut self,
+        ctx: &mut FunctionContext,
+        name: &str,
+        kind: ValueKind,
+        signature: Option<&CallableSignature>,
+        range: Option<IntRange>,
+        value: &ast::Expr,
+    ) -> Expr {
         let value_expr =
             self.lower_expr_expected_results(ctx, value, Some(core::slice::from_ref(&kind)));
         let actual_kinds = self.expr_kinds(&value_expr);
@@ -11312,7 +11392,7 @@ impl Lowering {
         } else if !self.kinds_match(kind, actual_kind) {
             ctx.diagnostics
                 .push(mismatch(self.kind_name(kind), self.kind_name(actual_kind)));
-        } else if let Some(expected) = signature.as_ref() {
+        } else if let Some(expected) = signature {
             let actual = self.expr_callable_signature(&value_expr);
             if !self.callable_signatures_match(Some(expected), actual.as_ref()) {
                 let diagnostic = self
@@ -11329,14 +11409,7 @@ impl Lowering {
                 ctx.diagnostics.push(diagnostic);
             }
         }
-        ctx.note_assignment(local, span);
-        Expr::AssignLocal {
-            local,
-            result_kind: kind,
-            callable_signature: signature,
-            value: Box::new(self.limit_value(value_expr, kind, range)),
-            span,
-        }
+        self.limit_value(value_expr, kind, range)
     }
 
     /// Lowers `while (test) body end` or `until (test) body end`. The body's
@@ -11620,9 +11693,9 @@ impl Lowering {
             Expr::IntrinsicCall { result_kind, .. } => *result_kind,
             Expr::HostCall { result_kind, .. } => *result_kind,
             Expr::AccessorCall { result_kind, .. } => *result_kind,
-            Expr::SlotWrite { result_kind, .. } | Expr::AssignLocal { result_kind, .. } => {
-                *result_kind
-            }
+            Expr::SlotWrite { result_kind, .. }
+            | Expr::AssignLocal { result_kind, .. }
+            | Expr::AssignCapture { result_kind, .. } => *result_kind,
             Expr::Loop { .. } => scalar_result_kind(&[]),
             Expr::ConstBool { .. }
             | Expr::Compare { .. }
@@ -11716,6 +11789,9 @@ impl Lowering {
                 callable_signature, ..
             }
             | Expr::AssignLocal {
+                callable_signature, ..
+            }
+            | Expr::AssignCapture {
                 callable_signature, ..
             } => callable_signature.clone(),
             Expr::Closure {
@@ -14501,6 +14577,7 @@ mod tests {
              p := 1;\n  \
              let k = 1;\n  \
              let f = function () => <integer> k end;\n  \
+             let g = function () => <integer> p := 2 end;\n  \
              k := 2;\n  \
              while (k) k := 3 end;\n  \
              n\nend;",
@@ -14510,15 +14587,28 @@ mod tests {
             .iter()
             .map(|diagnostic| diagnostic.code)
             .collect::<Vec<_>>();
+        // The closure's diagnostic is reported as its body is lowered.
         assert_eq!(
             codes,
             [
+                DiagnosticCode::AssignmentTargetNotAssignable,
                 DiagnosticCode::LocalAssignmentTypeMismatch,
                 DiagnosticCode::AssignmentTargetNotAssignable,
-                DiagnosticCode::AssignedLocalCaptured,
                 DiagnosticCode::IfConditionTypeMismatch,
             ]
         );
+        // `k` is assigned and captured, so it lives in a cell the closure
+        // shares; `n` is assigned but never captured.
+        let main = &module.functions[0];
+        let local = |name: &str| {
+            main.locals
+                .iter()
+                .find(|local| local.name == name)
+                .expect("local")
+        };
+        assert!(local("k").shared);
+        assert!(!local("n").shared);
+        assert!(module.closures[0].captures[0].shared);
     }
 
     #[test]

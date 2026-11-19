@@ -236,8 +236,6 @@ pub enum DiagnosticCode {
     LocalAssignmentTypeMismatch,
     /// `:=` names something other than a `let` local.
     AssignmentTargetNotAssignable,
-    /// A closure captures a local that `:=` assigns.
-    AssignedLocalCaptured,
     /// A call passes a keyword argument its callee does not take.
     UnexpectedKeywordArgument,
     /// A call passes the same keyword argument twice.
@@ -448,7 +446,6 @@ impl DiagnosticCode {
         Self::SlotAssignmentReadOnly,
         Self::LocalAssignmentTypeMismatch,
         Self::AssignmentTargetNotAssignable,
-        Self::AssignedLocalCaptured,
         Self::UnexpectedKeywordArgument,
         Self::DuplicateKeywordArgument,
         Self::CollectionDefaultUnsupported,
@@ -598,7 +595,6 @@ impl DiagnosticCode {
             Self::SlotAssignmentReadOnly => "sem.slot-assignment-read-only",
             Self::LocalAssignmentTypeMismatch => "sem.local-assignment-type-mismatch",
             Self::AssignmentTargetNotAssignable => "sem.assignment-target-not-assignable",
-            Self::AssignedLocalCaptured => "sem.assigned-local-captured",
             Self::UnexpectedKeywordArgument => "sem.unexpected-keyword-argument",
             Self::DuplicateKeywordArgument => "sem.duplicate-keyword-argument",
             Self::CollectionDefaultUnsupported => "sem.collection-default-unsupported",
@@ -749,7 +745,6 @@ impl DiagnosticCode {
             "sem.slot-assignment-read-only" => Self::SlotAssignmentReadOnly,
             "sem.local-assignment-type-mismatch" => Self::LocalAssignmentTypeMismatch,
             "sem.assignment-target-not-assignable" => Self::AssignmentTargetNotAssignable,
-            "sem.assigned-local-captured" => Self::AssignedLocalCaptured,
             "sem.unexpected-keyword-argument" => Self::UnexpectedKeywordArgument,
             "sem.duplicate-keyword-argument" => Self::DuplicateKeywordArgument,
             "sem.collection-default-unsupported" => Self::CollectionDefaultUnsupported,

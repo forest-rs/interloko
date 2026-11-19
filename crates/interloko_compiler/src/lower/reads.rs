@@ -69,7 +69,9 @@ fn visit(expr: &sem::Expr, hazards: &[sem::LocalId], out: &mut Vec<*const sem::E
             }
             visit(&restart.body, hazards, out);
         }
-        sem::Expr::AssignLocal { value, .. } => visit(value, hazards, out),
+        sem::Expr::AssignLocal { value, .. } | sem::Expr::AssignCapture { value, .. } => {
+            visit(value, hazards, out);
+        }
         _ => {
             let mut operands = Vec::new();
             expr.for_each_child(|child| operands.push(child));

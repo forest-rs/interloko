@@ -116,9 +116,16 @@ The current slices include:
 - assignable `let` locals: `x := v` is an expression whose value is the new
   value. A local keeps the type it declares, or its initializer's when it
   declares none, so `let n = 0; n := "s"` is an error, and a limited local
-  checks each value assigned to it. A closure captures a copy of a local's
-  value, so capturing a local that is assigned is an error for now;
-  parameters, block exits and constants are not assignable;
+  checks each value assigned to it. Parameters, block exits and constants
+  are not assignable;
+- closures that share assigned locals: a `let` local that is assigned and
+  that a closure refers to lives in a heap cell its frame and every
+  capturing closure use, so counters, accumulators and callbacks that
+  update state work, and the cell lives as long as a closure keeps it,
+  within the run. Only such locals pay for the cell (a host call per read
+  or write); every other local stays in a register and every other capture
+  is a copy. Since any call may run a closure that stores in the cell,
+  typing reads a shared local at its declared type;
 - `while (test) body end` and `until (test) body end` loops on a
   `<boolean>` test, which produce no values and run in one frame as tape
   jumps, so a loop of a million iterations needs no call depth. Soft typing

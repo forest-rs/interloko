@@ -1,0 +1,23 @@
+// expect: runtime code type-error.cast
+// expect: diagnostics 0
+// expect: dump typing contains cast checked rule=cast-narrowing
+// expect: dump typing contains actual=<object>
+
+// A shared local may change in any call that runs a closure capturing
+// it, so typing reads it at its declared type: the test before `reset()`
+// says nothing about it after, and the cast stays a runtime check, which
+// fails here because `reset` stored a string.
+
+define function main() => <integer>
+  let x :: <object> = 1;
+  let reset = function () => <integer>
+    x := "text";
+    0
+  end;
+  if (instance?(x, <integer>))
+    reset();
+    as(<integer>, x) + 1
+  else
+    0
+  end
+end;

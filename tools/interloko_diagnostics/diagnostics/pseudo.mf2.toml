@@ -91,7 +91,6 @@
 "sem.slot-assignment-read-only" = "[ps] slot { $slot } on { $class } is read-only ({ $reason })"
 "sem.local-assignment-type-mismatch" = "[ps] local { $local } holds { $expected }, assigned { $actual }"
 "sem.assignment-target-not-assignable" = "[ps] { $kind } { $name } is not assignable"
-"sem.assigned-local-captured" = "[ps] closure captures assigned local { $local }"
 "sem.unexpected-keyword-argument" = "[ps] { $callee } takes no { $keyword }: argument"
 "sem.duplicate-keyword-argument" = "[ps] keyword { $keyword }: repeated"
 "sem.collection-default-unsupported" = "[ps] { $function } default: needs { $expected }, got { $actual }"
