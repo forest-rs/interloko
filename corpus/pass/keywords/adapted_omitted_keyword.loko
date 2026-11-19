@@ -1,0 +1,19 @@
+// expect: run 4
+// expect: diagnostics 0
+// An adapted callable that takes no keywords is called fine when the call
+// passes none of those its signature claims: only a keyword actually
+// passed can be unknown.
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function use(f :: callable(<integer>, #key by :: <integer>) => <integer>) => <integer>
+  f(3)
+end;
+
+define function main() => <integer>
+  let u :: <callable> = use;
+  let r :: <integer> = u(inc);
+  r
+end;
