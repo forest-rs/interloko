@@ -2246,6 +2246,27 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm
                     .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
             }
+            lower::Instr::IntegerPower {
+                dst,
+                overflow,
+                base,
+                exponent,
+                span,
+            } => {
+                // Declared at its first use, as only a power calls it.
+                let sig = self.builder.host_sig_for(
+                    interloko_runtime::INTEGER_POWER,
+                    interloko_runtime::integer_power_signature(),
+                );
+                self.set_span(*span);
+                self.asm.host_call(
+                    Reg::EFFECT,
+                    sig,
+                    Reg::EFFECT,
+                    &[*base, *exponent],
+                    &[*dst, *overflow],
+                );
+            }
             lower::Instr::TextCall {
                 dst,
                 function,

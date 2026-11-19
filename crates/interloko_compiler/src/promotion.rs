@@ -24,6 +24,10 @@
 //!   promise to stay in it. Unsuffixed literals adapt to their partner's
 //!   type first (see `sem::adapt_literal`), so `x + 1` with an `<i32>` `x`
 //!   stays `<i32>`.
+//! - `^` is exact on integers of every kind, computing as `<integer>`
+//!   (overflow-checked, like `*`); a negative integer exponent signals
+//!   `type-error.range`. With a float operand it computes `pow` in the
+//!   widest float present, contagious as the other operators are.
 //! - The wrapping operators `+%`, `-%` and `*%` compute modulo 2^32 and
 //!   are defined only on two operands of one fixed-width type; they never
 //!   promote, so wrapping is always an explicit choice.
@@ -81,7 +85,7 @@ pub enum ComparisonRule {
 /// concrete numeric classes. The generics are sealed over `<real>`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum NumericOperator {
-    /// `+`, `-`, `*` or `/`.
+    /// `+`, `-`, `*`, `/` or `^`.
     Arithmetic(BinaryOp),
     /// `=`, `<`, `<=`, `>` or `>=`.
     Compare(CompareOp),
@@ -103,6 +107,7 @@ impl NumericOperator {
             Self::Arithmetic(BinaryOp::WrappingAdd) => "+%",
             Self::Arithmetic(BinaryOp::WrappingSub) => "-%",
             Self::Arithmetic(BinaryOp::WrappingMul) => "*%",
+            Self::Arithmetic(BinaryOp::Pow) => "^",
             Self::Arithmetic(BinaryOp::LogAnd) => "logand",
             Self::Arithmetic(BinaryOp::LogIor) => "logior",
             Self::Arithmetic(BinaryOp::LogXor) => "logxor",
@@ -200,6 +205,13 @@ pub const fn arithmetic(op: BinaryOp, lhs: NumericKind, rhs: NumericKind) -> Ari
         };
     }
     let kind = promote(lhs, rhs);
+    if matches!(op, BinaryOp::Pow) && kind.is_integer() {
+        // A power of a fixed-width integer leaves its range quickly; only
+        // `<integer>` promises to hold it.
+        return ArithmeticRule::Promote {
+            kind: NumericKind::Integer,
+        };
+    }
     if matches!(op, BinaryOp::Div) && kind.is_integer() {
         ArithmeticRule::Undefined
     } else {

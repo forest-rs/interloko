@@ -142,6 +142,14 @@ pub enum TokenKind {
     Ampersand = 65,
     /// `|`, short-circuit disjunction.
     Bar = 66,
+    /// `^`, exponentiation.
+    Caret = 67,
+    /// `~`, logical negation.
+    Tilde = 68,
+    /// `~=`, numeric or `=` inequality.
+    TildeEqual = 69,
+    /// `~==`, non-identity.
+    TildeEqualEqual = 70,
     /// `+%`, wrapping addition.
     PlusPercent = 51,
     /// `-%`, wrapping subtraction.
@@ -208,6 +216,9 @@ impl TokenKind {
             | Self::Slash
             | Self::Ampersand
             | Self::Bar
+            | Self::Caret
+            | Self::TildeEqual
+            | Self::TildeEqualEqual
             | Self::PlusPercent
             | Self::MinusPercent
             | Self::StarPercent
@@ -257,6 +268,7 @@ impl TokenKind {
             | Self::LBracket
             | Self::RBracket
             | Self::Comma
+            | Self::Tilde
             | Self::Arrow
             | Self::Colon
             | Self::Assign
@@ -844,6 +856,22 @@ pub fn lex(source: &str) -> Vec<Token> {
             b'|' => {
                 pos += 1;
                 TokenKind::Bar
+            }
+            b'^' => {
+                pos += 1;
+                TokenKind::Caret
+            }
+            b'~' if bytes.get(pos + 1) == Some(&b'=') && bytes.get(pos + 2) == Some(&b'=') => {
+                pos += 3;
+                TokenKind::TildeEqualEqual
+            }
+            b'~' if bytes.get(pos + 1) == Some(&b'=') => {
+                pos += 2;
+                TokenKind::TildeEqual
+            }
+            b'~' => {
+                pos += 1;
+                TokenKind::Tilde
             }
             b'=' if bytes.get(pos + 1) == Some(&b'>') => {
                 pos += 2;

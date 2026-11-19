@@ -1,5 +1,6 @@
-//! Integer division served by the runtime host: the quotient and remainder
-//! of Dylan's `truncate/`, `floor/`, `ceiling/` and `round/`.
+//! Integer arithmetic served by the runtime host: the quotient and
+//! remainder of Dylan's `truncate/`, `floor/`, `ceiling/` and `round/`, and
+//! the power `^` computes.
 //!
 //! Each is a host call named [`IntegerDivision::symbol`] taking two `i64`s
 //! and returning one. Compiled code calls them only with a divisor that is
@@ -165,9 +166,66 @@ impl IntegerDivision {
     }
 }
 
+/// Host-call symbol of integer exponentiation, `base ^ exponent`.
+///
+/// It takes two `i64`s, the exponent never negative, and returns the power
+/// and whether it overflowed `i64`. Compiled code signals
+/// `type-error.range` for a negative exponent before calling, and
+/// `type-error.overflow` when the second result is true, as `*` does.
+pub const INTEGER_POWER: &str = "interloko.integer.power";
+
+/// Returns the host-call signature of [`INTEGER_POWER`]: two `i64`s in;
+/// the power and whether it overflowed out.
+#[must_use]
+pub fn integer_power_signature() -> HostSig {
+    HostSig {
+        args: vec![ValueType::I64, ValueType::I64],
+        rets: vec![ValueType::I64, ValueType::Bool],
+    }
+}
+
+/// Computes `base ^ exponent` exactly, or `None` when the power leaves
+/// `i64` or the exponent is negative.
+///
+/// Squaring stops once the exponent has no bits left, so a square the
+/// power never uses cannot overflow on its own: `(-2) ^ 63` is `i64::MIN`.
+#[must_use]
+pub fn integer_power(base: i64, exponent: i64) -> Option<i64> {
+    let mut exponent = u64::try_from(exponent).ok()?;
+    let mut square = base;
+    let mut power: i64 = 1;
+    loop {
+        if exponent & 1 == 1 {
+            power = power.checked_mul(square)?;
+        }
+        exponent >>= 1;
+        if exponent == 0 {
+            return Some(power);
+        }
+        square = square.checked_mul(square)?;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{IntegerDivision, Rounding};
+    use super::{IntegerDivision, Rounding, integer_power};
+
+    #[test]
+    fn integer_power_is_exact_or_none() {
+        assert_eq!(integer_power(2, 10), Some(1024));
+        assert_eq!(integer_power(-3, 3), Some(-27));
+        assert_eq!(integer_power(0, 0), Some(1));
+        assert_eq!(integer_power(0, 5), Some(0));
+        assert_eq!(integer_power(-1, i64::MAX), Some(-1));
+        assert_eq!(integer_power(1, i64::MAX), Some(1));
+        assert_eq!(integer_power(2, 62), Some(1 << 62));
+        assert_eq!(integer_power(2, 63), None);
+        assert_eq!(integer_power(-2, 63), Some(i64::MIN));
+        assert_eq!(integer_power(-2, 64), None);
+        assert_eq!(integer_power(3, 39), Some(4_052_555_153_018_976_267));
+        assert_eq!(integer_power(3, 40), None);
+        assert_eq!(integer_power(2, -1), None);
+    }
 
     #[test]
     fn each_rounding_divides_as_dylan_does() {

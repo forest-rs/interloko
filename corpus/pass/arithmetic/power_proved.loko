@@ -1,0 +1,15 @@
+// expect: run 1000
+// expect: diagnostics 0
+// expect: dump lowered contains integer.power
+// expect: dump lowered lacks type-error.range
+
+// Typing bounds a power whose base and exponent are bounded and whose
+// exponent cannot be negative, so neither check is emitted here.
+
+define function cube(x :: limited(<integer>, min: 0, max: 10)) => <integer>
+  x ^ 3
+end;
+
+define function main() => <integer>
+  cube(10)
+end;

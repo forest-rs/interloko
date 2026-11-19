@@ -274,6 +274,34 @@ impl Interval {
         }
     }
 
+    /// The powers `x ^ n` of `x` in `self` by an `n` in `exponent`; unbounded
+    /// unless both are bounded and `n` cannot be negative, so a bounded
+    /// power also proves the exponent's range check.
+    fn pow(self, exponent: Self) -> Self {
+        let (Some(a), Some(b), Some(c), Some(d)) = (self.lo, self.hi, exponent.lo, exponent.hi)
+        else {
+            return Self::UNBOUNDED;
+        };
+        let Ok(d) = u32::try_from(d) else {
+            return Self::UNBOUNDED;
+        };
+        if c < 0 {
+            return Self::UNBOUNDED;
+        }
+        // |x ^ n| <= max(1, M ^ d) for |x| <= M and 0 <= n <= d, and a
+        // power of a base that cannot be negative cannot be either.
+        let Some(magnitude) = a.unsigned_abs().max(b.unsigned_abs()).checked_pow(d) else {
+            return Self::UNBOUNDED;
+        };
+        let Ok(hi) = i128::try_from(magnitude.max(1)) else {
+            return Self::UNBOUNDED;
+        };
+        Self {
+            lo: Some(if a >= 0 { 0 } else { -hi }),
+            hi: Some(hi),
+        }
+    }
+
     fn negate(self) -> Self {
         Self {
             lo: self.hi.map(|hi| -hi),
@@ -2625,6 +2653,7 @@ impl<'a> Analysis<'a> {
             BinaryOp::Add | BinaryOp::WrappingAdd => left.add(right),
             BinaryOp::Sub | BinaryOp::WrappingSub => left.sub(right),
             BinaryOp::Mul | BinaryOp::WrappingMul => left.mul(right),
+            BinaryOp::Pow => left.pow(right),
             _ => Interval::UNBOUNDED,
         };
         if op.is_wrapping() {

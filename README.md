@@ -355,6 +355,20 @@ The current slices include:
   precedence below the comparisons and associate left, the right operand
   runs only when it decides the answer, and it sees what the left one
   established, as an `if` arm does (`instance?(x, <box>) & x.n > 3`);
+- Dylan's negations: `~test` is `if (test) #f else #t end` on a
+  `<boolean>`, binding tighter than any binary operator as unary `-`
+  does, and `a ~= b` and `a ~== b` are `~(a = b)` and `~(a == b)`, at the
+  comparisons' precedence;
+- `base ^ exponent`, Dylan's exponentiation, right-associative and binding
+  tighter than `*` but looser than a unary operator, so `-2 ^ 2` is `4` and
+  `2 ^ 3 ^ 2` is `512`. An integer power is exact and computes as
+  `<integer>`, overflow-checked as `*` is (`type-error.overflow`); a
+  negative integer exponent signals `type-error.range` expecting
+  `limited(<integer>, min: 0)`, and `use-value` supplies the power either
+  way. With a float operand it computes `pow` in the widest float present.
+  Typed operands compute inline, and typing proves both checks for a
+  bounded base and a bounded exponent that cannot be negative; other
+  operands send the sealed built-in `^` generic, as `+` does;
 - characters: `<character>` is a concrete class of Unicode scalar values,
   written `'a'`, `'\n'`, `'\t'`, `'\r'`, `'\0'`, `'\\'`, `'\''` or
   `'\u{1F600}'` (string literals take the same escapes). A character is an
