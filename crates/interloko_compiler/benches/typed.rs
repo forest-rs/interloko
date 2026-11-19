@@ -95,8 +95,9 @@
 //! `<string>` by position: `s[p]`, a `<character>` compare and
 //! `next-position`, which decode the string's UTF-8 in tape code.
 //! `scan + digit?` tests each character with `digit?` instead, a runtime
-//! host call. `string for` is the scan written `for (c in s)`, which goes
-//! through the `<string>` iteration protocol's callables.
+//! host call. `string for` is the scan written `for (c in s)` over the same
+//! known `<string>`, which steps positions itself with one decode per
+//! character.
 //!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 

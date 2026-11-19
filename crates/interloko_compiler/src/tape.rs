@@ -2759,6 +2759,33 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm.trap(trap.code());
             }
+            lower::Instr::StringStep {
+                dst,
+                position,
+                string,
+                span,
+            } => {
+                // One decode reads the character and the position after it:
+                //
+                //         at = i64.to_u64_wrap position
+                //         dst, moved, missing = obj.utf8_next string, at
+                //         br missing, broken, found
+                // broken: trap string-step-missing
+                // found:  position = u64.to_i64_wrap moved
+                self.set_span(*span);
+                let at = self.shared_temp(SharedTemp::TextPosition, ValueType::U64);
+                let moved = self.shared_temp(SharedTemp::TextMoved, ValueType::U64);
+                let missing = self.shared_temp(SharedTemp::TextMissing, ValueType::Bool);
+                let (broken, found) = (self.asm.label(), self.asm.label());
+                self.asm
+                    .i64_to_u64_wrap(at, *position)
+                    .obj_utf8_next(*dst, moved, missing, *string, at)
+                    .br(missing, broken, found);
+                self.asm.place(broken).map_err(build_error)?;
+                self.asm.trap(lower::LokoTrap::StringStepMissing.code());
+                self.asm.place(found).map_err(build_error)?;
+                self.asm.u64_to_i64_wrap(*position, moved);
+            }
             lower::Instr::PushHandler {
                 dst,
                 descriptor,

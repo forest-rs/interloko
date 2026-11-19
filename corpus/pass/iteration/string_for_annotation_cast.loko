@@ -1,0 +1,18 @@
+// expect: runtime code type-error.cast
+// expect: run reports type-error.cast: 'a' is not of type <integer> at typing:def
+// expect: diagnostics 1
+// expect: diagnostic code typing.cast-always-fails
+
+// A string's variable annotated with a type a character may not have is
+// cast with `as`, as the iteration protocol's `<object>` element would be,
+// so the first character signals; typing sees that the cast always fails.
+
+define function count(s :: <string>) => <integer>
+  let n = 0;
+  for (c :: <integer> in s) n := n + c end;
+  n
+end;
+
+define function main() => <integer>
+  count("ab")
+end;

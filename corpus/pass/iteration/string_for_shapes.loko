@@ -1,0 +1,49 @@
+// expect: run 1025
+// expect: diagnostics 0
+
+// A string loop's variable may be boxed by its annotation, captured by a
+// closure (each iteration's own), left by an exit, and nested over the same
+// string.
+
+define function boxed(s :: <string>) => <integer>
+  let n = 0;
+  for (c :: <object> in s)
+    if (as(<character>, c) = 'b') n := n + 1 end
+  end;
+  n
+end;
+
+define function first-space(s :: <string>) => <integer>
+  block (return)
+    let i = 0;
+    for (c in s)
+      if (c = ' ') return(i) end;
+      i := i + 1
+    end;
+    -1
+  end
+end;
+
+define function pairs(s :: <string>) => <integer>
+  let n = 0;
+  for (a in s)
+    for (b in s)
+      if (a = b) n := n + 1 end
+    end
+  end;
+  n
+end;
+
+define function last-captured(s :: <string>) => <character>
+  let read = function () => <character> '?' end;
+  for (c in s)
+    read := function () => <character> c end
+  end;
+  read()
+end;
+
+define function main() => <integer>
+  // One 'b'; a space at 2; "aba" has 5 equal pairs; the last closure reads 'z'.
+  boxed("a\u{e9}b") * 1000 + first-space("ab c") * 10 + pairs("aba")
+    + (if (last-captured("xyz") = 'z') 0 else 100000 end)
+end;
