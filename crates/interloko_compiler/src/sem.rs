@@ -3490,11 +3490,12 @@ pub struct Local {
     pub range: Option<IntRange>,
     /// Whether some `:=` assigns this local after its binding. An assigned
     /// local holds different values over its lifetime; only a `let` local
-    /// may be assigned.
+    /// or a parameter may be assigned.
     pub assigned: bool,
-    /// Whether this `let` local lives in a shared cell: one that is
-    /// assigned and that a closure refers to, so the frame and every
-    /// closure capturing it read and write the one cell. Decided by name
+    /// Whether this `let` local or parameter lives in a shared cell: one
+    /// that is assigned and that a closure refers to, so the frame and
+    /// every closure capturing it read and write the one cell. A parameter
+    /// moves into its cell on entry. Decided by name
     /// for the whole definition ([`ast::shared_local_names`]).
     pub shared: bool,
     /// Source span of the binding name.
@@ -5654,10 +5655,10 @@ struct FunctionContext {
     /// Definitions of the block exit procedures bound in this body or, for
     /// a closure, an enclosing one.
     exit_definitions: Vec<DefinitionId>,
-    /// The `let` locals, which `:=` may assign.
+    /// The `let` locals and parameters, which `:=` may assign.
     assignable: Vec<LocalId>,
-    /// Names of the definition's `let` locals that live in shared cells
-    /// ([`ast::shared_local_names`]); closures inherit them.
+    /// Names of the definition's `let` locals and parameters that live in
+    /// shared cells ([`ast::shared_local_names`]); closures inherit them.
     shared_names: Vec<String>,
     /// Shared enclosing locals a closure body assigns through its captures.
     assigned_captures: Vec<LocalId>,
@@ -5777,9 +5778,9 @@ impl FunctionContext {
         }
     }
 
-    /// Lets `:=` assign `local`, a `let` local, unless it is a `for` loop
-    /// variable, which lives in a shared cell when its name is one of
-    /// [`Self::shared_names`].
+    /// Lets `:=` assign `local`, a `let` local or a parameter, unless it is
+    /// a `for` loop variable. It lives in a shared cell when its name is
+    /// one of [`Self::shared_names`].
     fn allow_assignment(&mut self, local: LocalId) {
         let loop_variable = self
             .locals
@@ -8144,6 +8145,7 @@ impl Lowering {
             if kind == ValueKind::I64 {
                 ctx.limit_local(local, generic_range);
             }
+            ctx.allow_assignment(local);
             params.push(local);
             specializers.push(specializer);
         }
@@ -8353,6 +8355,7 @@ impl Lowering {
                     .as_ref()
                     .and_then(|symbol| symbol.param_ranges.get(index).copied().flatten()),
             );
+            ctx.allow_assignment(local);
             params.push(local);
         }
 
@@ -9789,6 +9792,7 @@ impl Lowering {
         let mut closure_ctx =
             FunctionContext::for_closure(ctx.visible_local_sources(), ctx.exit_definitions.clone());
         closure_ctx.shared_names.clone_from(&ctx.shared_names);
+        closure_ctx.loop_variables.clone_from(&ctx.loop_variables);
         let mut param_ids = Vec::new();
         let mut param_kinds = Vec::new();
         let mut param_callable_sigs = Vec::new();
@@ -9825,6 +9829,7 @@ impl Lowering {
                 param.span,
             );
             closure_ctx.limit_local(local, resolved.range);
+            closure_ctx.allow_assignment(local);
             param_ids.push(local);
         }
 
@@ -14947,7 +14952,7 @@ impl Lowering {
             } else if exit {
                 "block exit procedure"
             } else {
-                "parameter"
+                "restart's condition"
             };
             ctx.diagnostics.push(
                 Diagnostic::error(name_span, DiagnosticCode::AssignmentTargetNotAssignable)
@@ -14991,13 +14996,19 @@ impl Lowering {
         };
         if !captured.shared {
             let _ = self.lower_expr(ctx, value);
-            let exit = ctx.capture_sources.iter().any(|source| {
-                source.id == captured.source && ctx.exit_definitions.contains(&source.definition)
-            });
+            let source = ctx
+                .capture_sources
+                .iter()
+                .find(|source| source.id == captured.source)
+                .map(|source| source.definition);
+            let exit = source.is_some_and(|source| ctx.exit_definitions.contains(&source));
+            let loop_variable = source.is_some_and(|source| ctx.loop_variables.contains(&source));
             let kind = if exit {
                 "block exit procedure"
+            } else if loop_variable {
+                "`for` loop variable"
             } else {
-                "parameter"
+                "restart's condition"
             };
             ctx.diagnostics.push(
                 Diagnostic::error(name_span, DiagnosticCode::AssignmentTargetNotAssignable)
@@ -19096,6 +19107,8 @@ mod tests {
              let g = method () => <integer> p := 2 end;\n  \
              k := 2;\n  \
              while (k) k := 3 end;\n  \
+             block (out) out := 4; 0 end;\n  \
+             block (exit) let h = method () => () exit := 5 end; 0 end;\n  \
              n\nend;",
         );
         let codes = module
@@ -19103,18 +19116,19 @@ mod tests {
             .iter()
             .map(|diagnostic| diagnostic.code)
             .collect::<Vec<_>>();
-        // The closure's diagnostic is reported as its body is lowered.
+        // A parameter is assignable, a block exit is not; the closure's
+        // diagnostic is reported first, as its body is lowered.
         assert_eq!(
             codes,
             [
                 DiagnosticCode::AssignmentTargetNotAssignable,
                 DiagnosticCode::LocalAssignmentTypeMismatch,
-                DiagnosticCode::AssignmentTargetNotAssignable,
                 DiagnosticCode::IfConditionTypeMismatch,
+                DiagnosticCode::AssignmentTargetNotAssignable,
             ]
         );
-        // `k` is assigned and captured, so it lives in a cell the closure
-        // shares; `n` is assigned but never captured.
+        // `k` and the parameter `p` are assigned and captured, so each lives
+        // in a cell the closures share; `n` is assigned but never captured.
         let main = &module.functions[0];
         let local = |name: &str| {
             main.locals
@@ -19123,8 +19137,10 @@ mod tests {
                 .expect("local")
         };
         assert!(local("k").shared);
+        assert!(local("p").shared);
         assert!(!local("n").shared);
         assert!(module.closures[0].captures[0].shared);
+        assert!(module.closures[1].captures[0].shared);
     }
 
     #[test]
