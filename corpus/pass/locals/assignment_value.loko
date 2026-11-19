@@ -1,0 +1,22 @@
+// expect: run 122279
+// expect: diagnostics 0
+// expect: dump ast contains assign x
+// expect: dump sem contains assign l0
+
+// `x := v` is an expression whose value is the new value. An operand read
+// before an assignment keeps the value it read, and a local bound to
+// another keeps its value when the other is assigned.
+
+define function digits(a :: <integer>, b :: <integer>, c :: <integer>) => <integer>
+  a * 100 + b * 10 + c
+end;
+
+define function main() => <integer>
+  let x = 1;
+  let r = digits(x, x := 2, x);
+  let y = x;
+  x := 7;
+  let z = block () x end;
+  x := 9;
+  r * 1000 + y * 100 + z * 10 + x
+end;

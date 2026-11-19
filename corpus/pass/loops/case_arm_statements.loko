@@ -1,0 +1,20 @@
+// expect: run 1064
+// expect: diagnostics 0
+
+// A `case` arm is a body, so it may hold statements; the `;` before the
+// next arm's test, or before `otherwise`, separates the arms instead.
+
+define function main() => <integer>
+  let ones = 0;
+  let tens = 0;
+  let i = 0;
+  while (i < 7)
+    case
+      i < 4 => ones := ones + 1; tens := tens + 10;
+      i < 6 => tens := tens + 10; ones := ones;
+      otherwise => ones := ones + 0; tens := tens + 1000;
+    end;
+    i := i + 1
+  end;
+  ones + tens
+end;

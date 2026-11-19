@@ -1,0 +1,13 @@
+// expect: run 1
+// expect: diagnostics 0
+// expect: dump typing contains range proved
+
+// Typing proves the block's value is the 1 its body read, so the limited
+// binding's range check is dropped; the cleanup's assignment must not
+// change that value afterwards.
+
+define function main() => <integer>
+  let x = 1;
+  let r :: limited(<integer>, min: 0, max: 5) = block () x cleanup x := 99 end;
+  r
+end;

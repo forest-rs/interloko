@@ -1,0 +1,14 @@
+// expect: runtime code type-error.range
+// expect: diagnostics 1
+// expect: diagnostic code typing.range-always-outside
+// expect: dump typing contains range refuted
+
+// A limited local checks each value assigned to it, as its binding does:
+// typing sees that 300 never fits, and the run signals the check's
+// `<type-error>`.
+
+define function main() => <integer>
+  let byte :: limited(<integer>, min: 0, max: 255) = 0;
+  byte := 300;
+  byte
+end;

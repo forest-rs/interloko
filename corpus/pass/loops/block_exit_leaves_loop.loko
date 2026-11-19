@@ -1,0 +1,16 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// A `block`'s exit procedure leaves a loop that never ends by itself,
+// from inside its body.
+
+define function main() => <integer>
+  let i = 0;
+  block (done)
+    while (#t)
+      if (i = 7) done(i * 6) end;
+      i := i + 1
+    end;
+    0
+  end
+end;

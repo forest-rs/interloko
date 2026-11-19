@@ -1,0 +1,19 @@
+// expect: run 2025
+// expect: diagnostics 0
+
+// Each iteration of the outer loop binds a fresh `j`, which the inner
+// loop counts up; the inner loop's locals are scoped to one iteration.
+
+define function main() => <integer>
+  let total = 0;
+  let i = 0;
+  while (i < 10)
+    let j = 0;
+    until (j = 10)
+      total := total + i * j;
+      j := j + 1
+    end;
+    i := i + 1
+  end;
+  total
+end;

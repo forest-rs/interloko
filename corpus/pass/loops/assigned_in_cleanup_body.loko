@@ -1,0 +1,20 @@
+// expect: run 1203
+// expect: diagnostics 0
+
+// A loop body's assignments are visible after a `block` exit leaves it,
+// and in the block's cleanup, which runs wherever the body stopped.
+
+define function main() => <integer>
+  let seen = 0;
+  let steps = 0;
+  let left = block (out)
+    while (steps < 100)
+      steps := steps + 1;
+      if (steps = 3) out(steps) end
+    end;
+    0
+  cleanup
+    seen := steps * 100
+  end;
+  seen * 4 + left
+end;

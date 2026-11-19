@@ -81,6 +81,10 @@ pub enum TokenKind {
     Block,
     /// `cleanup`.
     Cleanup,
+    /// `while`.
+    While,
+    /// `until`.
+    Until,
     /// `end`.
     End,
     /// User identifier.
@@ -207,6 +211,8 @@ impl TokenKind {
             | Self::When
             | Self::Block
             | Self::Cleanup
+            | Self::While
+            | Self::Until
             | Self::End
             | Self::Ident
             | Self::Number
@@ -280,6 +286,8 @@ impl Token {
             | TokenKind::When
             | TokenKind::Block
             | TokenKind::Cleanup
+            | TokenKind::While
+            | TokenKind::Until
             | TokenKind::End => Some(self.span),
             TokenKind::Symbol => Some(Span::new(start + 1, end)),
             TokenKind::Keyword => Some(Span::new(start + 2, end)),
@@ -322,6 +330,8 @@ pub enum CstKind {
     Body,
     /// Local binding statement.
     LetStmt,
+    /// Expression evaluated for effect in a body: `expression ;`.
+    ExprStmt,
     /// Function, method, or generic parameter name.
     ParameterName,
     /// Local binding name.
@@ -340,7 +350,7 @@ pub enum CstKind {
     SlotExpr,
     /// Member name used after `.` in a slot read.
     MemberName,
-    /// Object slot assignment expression.
+    /// Assignment expression: `object.slot := value` or `local := value`.
     SlotAssignExpr,
     /// Call argument list.
     ArgList,
@@ -386,6 +396,10 @@ pub enum CstKind {
     BlockExpr,
     /// `cleanup` clause of a `block` expression.
     CleanupClause,
+    /// `while (test) body end` loop.
+    WhileExpr,
+    /// `until (test) body end` loop.
+    UntilExpr,
     /// Exit procedure name bound by a `block` expression.
     BlockExitName,
     /// `when … =>` guard of a restart clause.
@@ -714,6 +728,9 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::CaseExpr => 54,
         CstKind::CaseClause => 55,
         CstKind::OtherwiseClause => 56,
+        CstKind::ExprStmt => 57,
+        CstKind::WhileExpr => 58,
+        CstKind::UntilExpr => 59,
     }
 }
 
@@ -776,6 +793,8 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Unless => 55,
         TokenKind::Case => 56,
         TokenKind::Otherwise => 57,
+        TokenKind::While => 60,
+        TokenKind::Until => 59,
     }
 }
 
@@ -992,6 +1011,8 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "when" => TokenKind::When,
                     "block" => TokenKind::Block,
                     "cleanup" => TokenKind::Cleanup,
+                    "while" => TokenKind::While,
+                    "until" => TokenKind::Until,
                     "end" => TokenKind::End,
                     _ => TokenKind::Ident,
                 }

@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.assignment-target-not-assignable
+// expect: diagnostic contains `$limit` is a constant and cannot be assigned
+
+define constant $limit :: <integer> = 10;
+
+define function main() => <integer>
+  $limit := 11;
+  $limit
+end;

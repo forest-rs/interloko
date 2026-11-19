@@ -1,6 +1,6 @@
 // expect: diagnostics 1
 // expect: diagnostic code ast.invalid-slot-assignment
-// expect: diagnostic contains slot assignment target must be `object.slot`
+// expect: diagnostic contains assignment target must be a local name or `object.slot`
 
 define function target() => <integer>
   1

@@ -1,0 +1,16 @@
+// expect: runtime code type-error.range
+// expect: diagnostics 0
+// expect: dump typing contains range checked
+
+// The check on a limited local's assignment runs on every iteration: the
+// first ten values fit, and the eleventh signals a `<type-error>`.
+
+define function main() => <integer>
+  let n :: limited(<integer>, min: 0, max: 10) = 0;
+  let i = 0;
+  while (i < 20)
+    n := i;
+    i := i + 1
+  end;
+  n
+end;

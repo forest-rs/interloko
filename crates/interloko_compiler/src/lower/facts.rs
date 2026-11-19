@@ -274,8 +274,11 @@ fn claim_block(
     owner: Option<DefinitionId>,
     block: &sem::Block,
 ) {
-    for binding in &block.lets {
-        claim_expr(module, owners, owner, &binding.value);
+    for statement in &block.statements {
+        match statement {
+            sem::Statement::Let(binding) => claim_expr(module, owners, owner, &binding.value),
+            sem::Statement::Expr(expr) => claim_expr(module, owners, owner, expr),
+        }
     }
     claim_expr(module, owners, owner, &block.result);
 }
@@ -403,6 +406,11 @@ fn visit_exprs(expr: &sem::Expr, visit: &mut impl FnMut(&sem::Expr)) {
             visit_exprs(receiver, visit);
             visit_exprs(value, visit);
         }
+        E::AssignLocal { value, .. } => visit_exprs(value, visit),
+        E::Loop { test, body, .. } => {
+            visit_exprs(test, visit);
+            visit_block(body, visit);
+        }
         E::Binary { lhs, rhs, .. }
         | E::Compare { lhs, rhs, .. }
         | E::MixedCompare { lhs, rhs, .. }
@@ -455,8 +463,11 @@ fn visit_exprs(expr: &sem::Expr, visit: &mut impl FnMut(&sem::Expr)) {
 }
 
 fn visit_block(block: &sem::Block, visit: &mut impl FnMut(&sem::Expr)) {
-    for binding in &block.lets {
-        visit_exprs(&binding.value, visit);
+    for statement in &block.statements {
+        match statement {
+            sem::Statement::Let(binding) => visit_exprs(&binding.value, visit),
+            sem::Statement::Expr(expr) => visit_exprs(expr, visit),
+        }
     }
     visit_exprs(&block.result, visit);
 }

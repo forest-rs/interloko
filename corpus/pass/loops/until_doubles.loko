@@ -1,0 +1,17 @@
+// expect: run 128
+// expect: diagnostics 0
+// expect: dump sem contains loop until
+
+// `until` runs its body until the test is true; the test runs before
+// every iteration, so a test already true runs the body no times.
+
+define function main() => <integer>
+  let n = 1;
+  until (n > 100)
+    n := n * 2
+  end;
+  until (#t)
+    n := 0
+  end;
+  n
+end;

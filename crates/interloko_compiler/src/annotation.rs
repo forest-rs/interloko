@@ -502,7 +502,14 @@ fn push_result(
 }
 
 fn collect_block(block: &ast::Block, binders: &mut Vec<Binder>) {
-    for binding in &block.lets {
+    for statement in &block.statements {
+        let binding = match statement {
+            ast::Statement::Let(binding) => binding,
+            ast::Statement::Expr(expr) => {
+                collect_expr(expr, binders);
+                continue;
+            }
+        };
         match &binding.pattern {
             ast::LetPattern::Name(name) => binders.push(Binder::from_let(name)),
             ast::LetPattern::Tuple { bindings, .. } => {
@@ -557,6 +564,11 @@ fn collect_expr(expr: &ast::Expr, binders: &mut Vec<Binder>) {
         } => {
             collect_expr(receiver, binders);
             collect_expr(value, binders);
+        }
+        Expr::Assign { value, .. } => collect_expr(value, binders),
+        Expr::Loop { test, body, .. } => {
+            collect_expr(test, binders);
+            collect_block(body, binders);
         }
         Expr::Binary { lhs, rhs, .. }
         | Expr::Compare { lhs, rhs, .. }

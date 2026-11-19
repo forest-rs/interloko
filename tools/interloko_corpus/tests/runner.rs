@@ -169,7 +169,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/control_flow/case.loko"));
     assert!(out.contains("ok fail/syntax/old_if_then.loko"));
     assert!(out.contains("ok pass/generics/sends_in_handlers.loko"));
-    assert!(out.contains("corpus: 508 passed, 0 failed, 508 total"));
+    assert!(out.contains("corpus: 534 passed, 0 failed, 534 total"));
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn strictness_measures_the_corpus_under_strict_typing() {
     ]);
     assert!(out.contains("pass sealed_dispatch.loko"), "{out}");
     assert!(
-        out.contains("strictness: 6/6 typed cases pass, 22/22 definitions; 0 untyped; errors "),
+        out.contains("strictness: 7/7 typed cases pass, 24/24 definitions; 0 untyped; errors "),
         "{out}"
     );
 

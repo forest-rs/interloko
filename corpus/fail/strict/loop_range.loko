@@ -1,0 +1,23 @@
+// expect: run blocked
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-range
+// expect: dump typing contains actual=limited(<integer>, min: 0, max: 199) severity=error origin=implicit strict=unproved because=narrowed(then)
+
+// A loop's decisions hold on every iteration. `i` runs up to 199 here, so
+// storing it in `last` may fail its range on a later iteration, and the
+// strict definition cannot prove the check that the first iteration alone
+// would pass.
+
+define strict function last-below() => <integer>
+  let last :: limited(<integer>, min: 0, max: 100) = 0;
+  let i = 0;
+  while (i < 200)
+    last := i;
+    i := i + 1
+  end;
+  last
+end;
+
+define function main() => <integer>
+  last-below()
+end;
