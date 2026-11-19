@@ -285,6 +285,10 @@ pub const TABLE_POSITION_KEY: &str = "interloko.collection.table_position_key";
 /// [`TABLE_POSITION_KEY`] reads its key. It takes
 /// [`table_position_signature`].
 pub const TABLE_POSITION_VALUE: &str = "interloko.collection.table_position_value";
+/// Host-call symbol for `$unsupplied`, the value of a keyword argument a
+/// call does not pass when the keyword has no default: one object, made
+/// with the host, that nothing else is `==`.
+pub const UNSUPPLIED: &str = "interloko.unsupplied";
 /// Host-call symbol for rendering a float as its shortest round-trip literal.
 pub const FLOAT_TO_STRING: &str = "interloko.float_to_string";
 /// Host-call symbol for rendering an integer in decimal.
@@ -1801,6 +1805,9 @@ enum RuntimeObjectStorage {
     SubclassType {
         bound: ClassId,
     },
+    /// `$unsupplied`: the one object of its kind, a direct `<object>`
+    /// instance, which no other value is `==`.
+    Unsupplied,
     HostBacked {
         adapter: alloc::boxed::Box<dyn HostObjectAdapter>,
     },
@@ -1868,6 +1875,10 @@ pub struct InterlokoHost {
     /// Where the open turn's nursery handle serials start.
     nursery_serials: NurserySerials,
     symbols: Vec<InternedObject>,
+    /// `$unsupplied`, made in the image the first time anything asks for
+    /// it, so testing for it is one handle compare. Like an interned
+    /// symbol, it stays however the turn that made it ends.
+    unsupplied: Option<Obj>,
     /// Values registered as image roots; released roots leave `None`.
     roots: Vec<Option<Value>>,
     turn: Option<OpenTurn>,
@@ -1891,6 +1902,7 @@ impl InterlokoHost {
             nursery: Region::default(),
             nursery_serials: NurserySerials::default(),
             symbols: Vec::new(),
+            unsupplied: None,
             roots: Vec::new(),
             turn: None,
             evacuation_budget: u64::MAX,
@@ -2035,7 +2047,8 @@ impl InterlokoHost {
             | RuntimeObjectStorage::MethodMeta { .. }
             | RuntimeObjectStorage::SlotDescriptor { .. }
             | RuntimeObjectStorage::LimitedIntegerType { .. }
-            | RuntimeObjectStorage::SubclassType { .. } => Err(RuntimeError::InvalidSlot {
+            | RuntimeObjectStorage::SubclassType { .. }
+            | RuntimeObjectStorage::Unsupplied => Err(RuntimeError::InvalidSlot {
                 class: object_class,
                 slot,
             }),
@@ -2462,6 +2475,14 @@ impl Host for InterlokoHost {
                         text: StringText::new(String::from(*value)).ok_or(HostError::Failed)?,
                     },
                 });
+                Ok(0)
+            }
+            UNSUPPLIED => {
+                let [] = args else {
+                    return Err(HostError::Failed);
+                };
+                let unsupplied = self.unsupplied();
+                rets[0] = self.push_boxed_value(Value::Obj(unsupplied));
                 Ok(0)
             }
             SYMBOL_LITERAL => {
@@ -3246,6 +3267,24 @@ impl InterlokoHost {
         self.layout.class_id(kind.name()).ok_or(HostError::Failed)
     }
 
+    /// `$unsupplied`, made in the image on first use.
+    fn unsupplied(&mut self) -> Obj {
+        if let Some(unsupplied) = self.unsupplied {
+            return unsupplied;
+        }
+        let Value::Obj(unsupplied) = self.push_object_in(
+            Space::Image,
+            RuntimeObject {
+                class: OBJECT_CLASS_ID,
+                storage: RuntimeObjectStorage::Unsupplied,
+            },
+        ) else {
+            unreachable!("pushing an object yields an object");
+        };
+        self.unsupplied = Some(unsupplied);
+        unsupplied
+    }
+
     fn intern_symbol(&mut self, name: String) -> Result<Value, HostError> {
         if let Some(entry) = self.symbols.iter().find(|entry| entry.name == name) {
             return Ok(Value::Obj(entry.object));
@@ -3765,6 +3804,15 @@ pub fn string_literal_signature() -> HostSig {
     HostSig {
         args: vec![ValueType::Str],
         rets: vec![object_type()],
+    }
+}
+
+/// Host signature for [`UNSUPPLIED`], which returns `$unsupplied` boxed.
+#[must_use]
+pub fn unsupplied_signature() -> HostSig {
+    HostSig {
+        args: vec![],
+        rets: vec![any_type()],
     }
 }
 
@@ -4560,6 +4608,30 @@ mod tests {
                 bytes: before.bytes + stats.interned.bytes,
             }
         );
+    }
+
+    #[test]
+    fn unsupplied_is_one_object_that_outlives_the_turn_that_made_it() {
+        let (mut host, ..) = abort_fixture();
+        let before = host.image_stats();
+        host.begin_turn().expect("turn opens");
+        let unsupplied = host.unsupplied();
+        let symbol = host.intern_symbol("unsupplied".into()).expect("symbol");
+        host.abort_turn().expect("turn aborts");
+        // Made once, it stays however its turn ends, and nothing else,
+        // not even the symbol of its name, denotes it.
+        assert_eq!(host.unsupplied(), unsupplied);
+        assert_eq!(host.image_stats().objects, before.objects + 2);
+        let Value::Obj(symbol) = symbol else {
+            panic!("a symbol is an object");
+        };
+        assert_ne!(symbol, unsupplied);
+        let storage = |obj| &host.object(obj).expect("object resolves").storage;
+        assert!(!storage(unsupplied).denotes_same(storage(symbol)));
+        host.begin_turn().expect("turn opens");
+        assert_eq!(host.unsupplied(), unsupplied);
+        let stats = host.abort_turn().expect("turn aborts");
+        assert_eq!(stats.interned, HeapStats::default());
     }
 
     #[test]

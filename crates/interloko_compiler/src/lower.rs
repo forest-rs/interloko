@@ -547,6 +547,8 @@ pub enum RuntimeOp {
     TablePositionKey,
     /// Returns whether a vector is constant.
     VectorConstant,
+    /// Returns `$unsupplied`.
+    Unsupplied,
     /// Renders a float as literal text.
     FloatToString,
     /// Renders a `<single-float>` as suffixed literal text.
@@ -11144,6 +11146,7 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> Option<RuntimeOp> {
         sem::Intrinsic::TablePositionValue => RuntimeOp::TablePositionValue,
         sem::Intrinsic::TablePositionKey => RuntimeOp::TablePositionKey,
         sem::Intrinsic::VectorConstant => RuntimeOp::VectorConstant,
+        sem::Intrinsic::Unsupplied => RuntimeOp::Unsupplied,
         sem::Intrinsic::FloatToString => RuntimeOp::FloatToString,
         sem::Intrinsic::IntegerToString => RuntimeOp::IntegerToString,
         sem::Intrinsic::Concatenate => RuntimeOp::Concatenate,
@@ -11197,6 +11200,7 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         | RuntimeOp::TableRemoveKey => index == 1,
         RuntimeOp::TableElementOr => index != 0,
         RuntimeOp::TableElementSetter => index != 1,
+        RuntimeOp::Unsupplied => false,
         RuntimeOp::InstanceOfType => true,
         RuntimeOp::LimitedIntegerType => false,
         RuntimeOp::ClassMetaObject
@@ -12043,6 +12047,7 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::TablePositionValue => "table-position-value",
         RuntimeOp::TablePositionKey => "table-position-key",
         RuntimeOp::VectorConstant => "vector-constant?",
+        RuntimeOp::Unsupplied => "unsupplied",
         RuntimeOp::FloatToString | RuntimeOp::SingleFloatToString => "float-to-string",
         RuntimeOp::IntegerToString => "integer-to-string",
         RuntimeOp::Concatenate => "concatenate",

@@ -65,9 +65,6 @@ use super::CollectionFunction;
 /// takes when a call does not pass it.
 pub const UNSUPPLIED: &str = "$unsupplied";
 
-/// The symbol [`UNSUPPLIED`] is: `#unsupplied`.
-pub const UNSUPPLIED_SYMBOL: &str = "unsupplied";
-
 /// How a call that does not pass a keyword gets its value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KeywordDefault {

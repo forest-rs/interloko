@@ -2402,8 +2402,26 @@ impl<'a> Analysis<'a> {
         };
         // A covered send selects one method when every class its arguments
         // may have, once sealed cones are split, selects the same one.
+        // Dispatch looks only at the required parameters: every method
+        // takes any keyword argument, so a keyword's type does not keep a
+        // send from selecting one method.
+        let dispatched = module
+            .generics
+            .get(generic.0 as usize)
+            .map_or(&[][..], |generic| generic.dispatch_params.as_slice());
+        let selection_actual = actual
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                if dispatched.contains(&index) {
+                    ty.clone()
+                } else {
+                    Type::of(Atom::Exact(sem::OBJECT_CLASS_ID), module)
+                }
+            })
+            .collect::<Vec<_>>();
         let selected_method = (decided == (TypingVerdict::Proved, TypingRule::DispatchCovered))
-            .then(|| super::exact_class_tuples(module, &actual))
+            .then(|| super::exact_class_tuples(module, &selection_actual))
             .flatten()
             .and_then(|(tuples, split)| {
                 let mut chosen = None;

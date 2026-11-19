@@ -1,0 +1,21 @@
+// expect: run 222
+// expect: diagnostics 0
+// `$unsupplied` is one kernel object that nothing else is `==`, not the
+// symbol `#unsupplied`: a call that passes `#unsupplied` passes a value,
+// typed or dispatched, and `element` returns it as the default it is.
+
+define function probe(#key x) => <integer>
+  if (x == $unsupplied) 1 else 2 end
+end;
+
+define function lookup(c :: <object>) => <object>
+  element(c, 5, default: #unsupplied)
+end;
+
+define function main() => <integer>
+  let passed = probe(x: #unsupplied);
+  let typed = if (element(#[1], 5, default: #unsupplied) == #unsupplied) 2 else 0 end;
+  let dispatched = if (lookup(#[1]) == #unsupplied) 2 else 0 end;
+  let distinct = if (#unsupplied == $unsupplied) 0 else 1 end;
+  passed * 100 + typed * 10 + dispatched * distinct
+end;
