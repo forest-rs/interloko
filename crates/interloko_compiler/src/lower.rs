@@ -7607,6 +7607,7 @@ impl<'module> BodyLowering<'module> {
                 class,
                 site,
                 span,
+                ..
             } => {
                 let value = self.lower_expr(value)?;
                 if let Some(outcome) = self.decided_test(*site) {
@@ -15461,9 +15462,10 @@ mod tests {
         assert!(!proved.contains("guarded-send"), "{proved}");
         // Only the retry region calls indirectly.
         assert_eq!(proved.matches("call.indirect").count(), 1, "{proved}");
-        assert!(proved.contains("unbox"), "{proved}");
         assert!(proved.contains("i64.add_ovf"), "{proved}");
-        assert!(proved.contains("box.any"), "{proved}");
+        // The literal's box is unboxed straight back, so neither is left.
+        assert!(!proved.contains("box.any"), "{proved}");
+        assert!(!proved.contains("unbox"), "{proved}");
         assert!(
             proved_module
                 .check_codegen
@@ -15515,10 +15517,11 @@ mod tests {
         let proved = function_dump(&lower_with_policy(source, CodegenPolicy::Proved), "main");
         assert!(!proved.contains("select-method"), "{proved}");
         assert_eq!(proved.matches("i64.add_ovf").count(), 2, "{proved}");
-        // Only `as(<object>, 20)` boxes, and only it unboxes; the sums pass
-        // from one send to the next, and to the cast, as `i64`s.
-        assert_eq!(proved.matches("box.any").count(), 1, "{proved}");
-        assert_eq!(proved.matches("unbox").count(), 1, "{proved}");
+        // The sums pass from one send to the next, and to the `as`, as
+        // `i64`s. `as(<object>, 20)` and the `as`'s hidden local box, but
+        // each box is unboxed straight after, so neither is left.
+        assert_eq!(proved.matches("box.any").count(), 0, "{proved}");
+        assert_eq!(proved.matches("unbox").count(), 0, "{proved}");
     }
 
     fn const_i64(function: &Function, reg: Reg) -> Option<i64> {

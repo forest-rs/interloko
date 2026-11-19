@@ -1,0 +1,12 @@
+// expect: runtime code type-error.range
+// expect: diagnostics 0
+
+// A boxed integer converts to `<i32>` only within its range.
+
+define function to-i32(x :: <object>) => <i32>
+  as(<i32>, x)
+end;
+
+define function main() => <integer>
+  to-i32(5000000000)
+end;

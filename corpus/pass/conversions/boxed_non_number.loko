@@ -1,0 +1,14 @@
+// expect: runtime code type-error.cast
+// expect: run reports "seven" is not of type <double-float>
+// expect: diagnostics 0
+
+// A value no number conversion starts from is cast, as `as` casts any
+// other value, and fails unless it already has the class.
+
+define function to-double(x :: <object>) => <double-float>
+  as(<double-float>, x)
+end;
+
+define function main() => <integer>
+  as(<integer>, to-double("seven"))
+end;

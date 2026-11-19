@@ -1,0 +1,18 @@
+// expect: runtime code type-error.cast
+// expect: run reports 3 is not of type <double-float>
+// expect: diagnostics 0
+
+// Only an explicit `as` converts: where a boxed `<integer>` meets a
+// `<double-float>` declaration, the check the compiler inserts is a cast,
+// as in Dylan, and fails.
+
+define function read(t :: <table>) => <double-float>
+  let d :: <double-float> = t["n"];
+  d
+end;
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["n"] := 3;
+  as(<integer>, read(t))
+end;

@@ -18,6 +18,12 @@
 //!   nothing else writes, is made once before the loop instead. A loop is a
 //!   backward jump to a label whose only entry from outside is the jump just
 //!   before it.
+//! - **Unbox forwarding.** `b = box v` followed, in the same straight run
+//!   of instructions with `v` and `b` unchanged, by `u = unbox b` of `v`'s
+//!   own kind is `u = mov v`: the check cannot fail. A box nothing reads
+//!   any more, into a register no source local names, goes too. An `as` of a
+//!   boxed number, which binds the value to a hidden local and unboxes it
+//!   where typing decided its class, leaves such pairs.
 //! - **Decode sharing.** `s[p]` (or `element(s, p, default:)`) followed by
 //!   `next-position(s, p)` decodes `p` once ([`super::DecodeShare`]), when
 //!   nothing between them writes `s` or `p` and nothing outside them can
@@ -38,6 +44,7 @@ use crate::sem;
 
 /// Runs every peephole step over `function`.
 pub(super) fn optimize(function: &mut Function) {
+    forward_unboxes(function);
     thread_jumps(&mut function.instructions);
     coalesce_moves(function);
     hoist_loop_constants(function);
@@ -532,6 +539,60 @@ fn register_counts(function: &Function) -> (BTreeMap<Reg, usize>, BTreeMap<Reg, 
         for_each_write(instr, |reg| *writes.entry(reg).or_insert(0) += 1);
     }
     (reads, writes)
+}
+
+/// Rewrites `u = unbox b` as `u = mov v` where `b = box v` comes before it
+/// in the same straight run of instructions, with `v`'s kind, and nothing
+/// between them writes `v` or `b` or transfers control; then drops each box
+/// nothing reads that no source local's register is. A local the compiler
+/// hides, whose name has a space, is no source local.
+fn forward_unboxes(function: &mut Function) {
+    let mut index = 0;
+    while index < function.instructions.len() {
+        let Instr::BoxValue { dst, src, from, .. } = function.instructions[index] else {
+            index += 1;
+            continue;
+        };
+        for later in index + 1..function.instructions.len() {
+            let instr = &function.instructions[later];
+            if let Instr::UnboxValue {
+                dst: unboxed,
+                value,
+                kind,
+                span,
+                ..
+            } = *instr
+                && value == dst
+                && kind == from
+            {
+                function.instructions[later] = Instr::Move {
+                    dst: unboxed,
+                    src,
+                    span,
+                };
+                continue;
+            }
+            let mut stop = matches!(instr, Instr::Label { .. } | Instr::CatchTarget { .. });
+            for_each_label_ref(instr, |_| stop = true);
+            for_each_write(instr, |reg| stop |= reg == src || reg == dst);
+            if stop {
+                break;
+            }
+        }
+        index += 1;
+    }
+    let (reads, _) = register_counts(function);
+    let named: BTreeSet<Reg> = function
+        .locals
+        .iter()
+        .filter(|local| !local.name.contains(' '))
+        .map(|local| local.reg)
+        .chain(function.params.iter().map(|param| param.reg))
+        .collect();
+    function.instructions.retain(|instr| {
+        !matches!(instr, Instr::BoxValue { dst, .. }
+            if !reads.contains_key(dst) && !named.contains(dst))
+    });
 }
 
 /// Rewrites `t = op(...); d = mov t` as `d = op(...)` where that is the

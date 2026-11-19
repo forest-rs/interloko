@@ -523,12 +523,17 @@ pub(crate) fn build(
                 }),
             }
         }
-        let listed = detail == ClaimDetail::Full || decision.verdict != TypingVerdict::Proved;
+        // A conversion test typing decided either way resolved its `as`:
+        // it picks the conversion's code and checks nothing at run time.
+        let unresolved = match decision.origin {
+            CheckOrigin::Conversion => decision.verdict == TypingVerdict::Checked,
+            _ => decision.verdict != TypingVerdict::Proved,
+        };
+        let listed = detail == ClaimDetail::Full || unresolved;
         let (Some(typed), true) = (typed, listed) else {
             continue;
         };
-        let residual =
-            (decision.verdict != TypingVerdict::Proved).then(|| residual(inputs, typed, decision));
+        let residual = unresolved.then(|| residual(inputs, typed, decision));
         let full = detail == ClaimDetail::Full;
         sites.push(ClaimSite {
             id: typing::decision_id(decision),
@@ -702,9 +707,9 @@ fn strict_guarantee(
         "every check the compiler inserts is proved (send dispatch, implicit casts, range checks)"
     };
     let kept = if policy.overflow {
-        "explicit as(...) casts, instance? tests and indirect-entry guards stay runtime checks"
+        "explicit as(...) casts and conversions, instance? tests and indirect-entry guards stay runtime checks"
     } else {
-        "explicit as(...) casts, instance? tests, indirect-entry guards and integer overflow (strict.overflow=runtime) stay runtime checks"
+        "explicit as(...) casts and conversions, instance? tests, indirect-entry guards and integer overflow (strict.overflow=runtime) stay runtime checks"
     };
     match source {
         Some(source) => format!("strict ({}): {required}; {kept}", source.describe(module)),
@@ -746,6 +751,12 @@ fn residual(
             return explain(
                 ResidualCause::Requested(decision.origin),
                 "an instance? test answers its question at run time".into(),
+            );
+        }
+        CheckOrigin::Conversion => {
+            return explain(
+                ResidualCause::Requested(decision.origin),
+                "as(...) converts a boxed number by its class, tested at run time".into(),
             );
         }
         CheckOrigin::Entry => {

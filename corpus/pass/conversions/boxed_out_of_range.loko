@@ -1,0 +1,13 @@
+// expect: runtime code type-error.range
+// expect: run reports 12 is not of type limited(<integer>, min: 0, max: 9)
+// expect: diagnostics 0
+
+// A boxed integer converts to a limited type only within its range.
+
+define function to-digit(x :: <object>) => limited(<integer>, min: 0, max: 9)
+  as(limited(<integer>, min: 0, max: 9), x)
+end;
+
+define function main() => <integer>
+  to-digit(12)
+end;

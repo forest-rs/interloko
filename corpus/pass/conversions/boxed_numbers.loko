@@ -1,0 +1,45 @@
+// expect: run 111111111
+// expect: diagnostics 0
+// expect: dump typing contains origin=conversion
+
+// `as` converts a number by its class, as Dylan's `as` does, also when
+// the number is held as an `<object>`: it tests the value's class at run
+// time and converts it from there by the rules it applies when the class
+// is known. Each digit of the result is one pair that converted exactly.
+
+define function to-double(x :: <object>) => <double-float>
+  as(<double-float>, x)
+end;
+
+define function to-single(x :: <object>) => <single-float>
+  as(<single-float>, x)
+end;
+
+define function to-integer(x :: <object>) => <integer>
+  as(<integer>, x)
+end;
+
+define function to-i32(x :: <object>) => <i32>
+  as(<i32>, x)
+end;
+
+define function to-digit(x :: <object>) => limited(<integer>, min: 0, max: 9)
+  as(limited(<integer>, min: 0, max: 9), x)
+end;
+
+define function digit(ok :: <boolean>) => <integer>
+  if (ok) 1 else 0 end
+end;
+
+define function main() => <integer>
+  let half :: <single-float> = as(<single-float>, 0.5);
+  digit(to-double(3) = 3.0) * 100000000
+    + digit(to-double(half) = 0.5) * 10000000
+    + digit(to-double(2.5) = 2.5) * 1000000
+    + digit(to-single(3) = as(<single-float>, 3.0)) * 100000
+    + digit(to-single(0.5) = half) * 10000
+    + digit(to-integer(6.0) + to-integer(as(<single-float>, 2.0)) + to-integer(4) = 12) * 1000
+    + digit(to-i32(5) + to-i32(2.0) = as(<i32>, 7)) * 100
+    + digit(to-digit(7) + to-digit(1.0) = 8) * 10
+    + digit(to-double(-7) = -7.0)
+end;

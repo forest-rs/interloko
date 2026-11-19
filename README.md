@@ -391,7 +391,10 @@ The current slices include:
   methods come from the same rules; these generics show up in EOP and soft
   typing like any other and are sealed over `<real>`; explicit
   `as(<double-float>, n)` and exact
-  `as(<integer>, x)` conversions, and a float library (`abs`, `min`, `max`,
+  `as(<integer>, x)` conversions, which convert a number held as an
+  `<object>` by its class at run time, as Dylan's `as` does (between
+  numbers only: a boxed `<character>` is cast, and the checks the compiler
+  inserts at declarations only cast), and a float library (`abs`, `min`, `max`,
   `remainder`, `nan?`, `finite?`, `floor`, `ceiling`, `round`, `truncate`,
   `sqrt`, `cbrt`, `exp`, `log`, `log2`, `log10`, trigonometric and
   hyperbolic functions, `atan2`, `pow`, `hypot`) whose names user

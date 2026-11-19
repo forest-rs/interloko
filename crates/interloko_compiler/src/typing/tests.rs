@@ -336,16 +336,28 @@ fn float_casts_are_proved_checked_or_refuted() {
          define function on-object(x :: <object>)\n  size-of(x)\nend;\n\
          define function main()\n  0\nend;"
     ));
+    // A boxed value converts by its class: each conversion's cast is
+    // proved by the class test before it, and only the cast of a value
+    // that is no number is left to run time.
     assert_eq!(
-        verdicts_of(&module, &artifact, "to-float"),
+        checks_of(&module, &artifact, "to-float", TypingCheck::Cast)
+            .iter()
+            .map(|cast| cast.verdict)
+            .filter(|verdict| *verdict != TypingVerdict::Proved)
+            .collect::<Vec<_>>(),
         [TypingVerdict::Checked]
     );
     assert_eq!(
         verdicts_of(&module, &artifact, "up"),
         [TypingVerdict::Proved]
     );
+    // Text is no number, so no conversion is reached and the cast fails.
     assert_eq!(
-        verdicts_of(&module, &artifact, "never"),
+        checks_of(&module, &artifact, "never", TypingCheck::Cast)
+            .iter()
+            .filter(|cast| cast.rule != TypingRule::Unreachable)
+            .map(|cast| cast.verdict)
+            .collect::<Vec<_>>(),
         [TypingVerdict::Proved, TypingVerdict::Refuted]
     );
     assert_eq!(
@@ -708,16 +720,17 @@ fn a_proved_numeric_send_has_its_method_result() {
     let [cast] = checks_of(&module, &artifact, "main", TypingCheck::Cast)
         .into_iter()
         .filter(|cast| {
-            cast.expected
-                == TypingExpectation::Class(
-                    module
-                        .builtin_value_class(sem::BuiltinValueClass::Integer)
-                        .expect("integer"),
-                )
+            cast.rule != TypingRule::Unreachable
+                && cast.expected
+                    == TypingExpectation::Class(
+                        module
+                            .builtin_value_class(sem::BuiltinValueClass::Integer)
+                            .expect("integer"),
+                    )
         })
         .collect::<Vec<_>>()
         .try_into()
-        .expect("one cast to <integer>");
+        .expect("one reachable cast to <integer>");
     let TypingExpectation::Dispatch { generic, .. } = &inner.expected else {
         panic!("a dispatch expectation");
     };

@@ -1,0 +1,32 @@
+// expect: run 1111
+// expect: diagnostics 0
+
+// A boxed number converts exactly as the same number of a known class
+// does, at the edges too: `-0.0` to an `<integer>`, an integer past 2^53 to
+// a `<double-float>`, a large integer to a `<single-float>`, and a
+// `<u32>` held as an `<object>`.
+
+define function to-integer(x :: <object>) => <integer>
+  as(<integer>, x)
+end;
+
+define function to-double(x :: <object>) => <double-float>
+  as(<double-float>, x)
+end;
+
+define function to-single(x :: <object>) => <single-float>
+  as(<single-float>, x)
+end;
+
+define function digit(ok :: <boolean>) => <integer>
+  if (ok) 1 else 0 end
+end;
+
+define function main() => <integer>
+  let big = 9007199254740993;
+  let wide :: <u32> = as(<u32>, 4000000000);
+  digit(to-integer(-0.0) = 0) * 1000
+    + digit(to-double(big) = as(<double-float>, big)) * 100
+    + digit(to-single(16777217) = as(<single-float>, 16777217)) * 10
+    + digit(to-integer(wide) = 4000000000)
+end;
