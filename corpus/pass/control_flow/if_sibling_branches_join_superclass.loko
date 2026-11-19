@@ -1,0 +1,32 @@
+// expect: run 1112
+// expect: diagnostics 0
+
+// Branches of sibling classes join at their least common superclass, as
+// the type lattice bounds their union: a `<call>` and a `<var>` are both
+// `<node>`s. Branches with no closer common class join at `<object>`.
+
+define class <node> (<object>)
+  slot weight :: <integer>, init-value: 1;
+end;
+
+define class <call> (<node>)
+end;
+
+define class <var> (<node>)
+  slot name :: <string>, init-value: "x";
+end;
+
+define function parse(call? :: <boolean>) => <node>
+  if (call?) make(<call>) else make(<var>) end
+end;
+
+define function describe(text? :: <boolean>) => <integer>
+  let x = if (text?) "text" else make(<var>) end;
+  if (instance?(x, <string>)) 1000 else 100 end
+end;
+
+define function main() => <integer>
+  let c :: <boolean> = #f;
+  let node = if (c) make(<call>) else make(<var>) end;
+  describe(#t) + describe(#f) + parse(#t).weight * 10 + node.weight + 1
+end;

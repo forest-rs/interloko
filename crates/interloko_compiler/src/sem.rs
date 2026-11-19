@@ -1439,7 +1439,8 @@ impl Module {
                 then_branch,
                 else_branch,
                 ..
-            } => join_arm_kind(
+            } => join_kind(
+                &self.classes,
                 self.expr_kind(then_branch),
                 self.expr_kind(else_branch),
                 |expected, actual| self.kind_holds(expected, actual),
@@ -1458,7 +1459,7 @@ impl Module {
     #[must_use]
     pub fn expr_kinds(&self, expr: &Expr) -> Vec<ValueKind> {
         let join = |lhs: &[ValueKind], rhs: &[ValueKind]| {
-            join_arm_kinds(lhs, rhs, |expected, actual| {
+            join_arm_kinds(&self.classes, lhs, rhs, |expected, actual| {
                 self.kind_holds(expected, actual)
             })
             .unwrap_or_else(|| vec![ValueKind::Error])
@@ -1507,9 +1508,14 @@ impl Module {
     }
 }
 
-impl ClassHierarchy for Module {
+/// The class structure of a class table, for the type lattice: a module's,
+/// or the one sem is still building.
+#[derive(Copy, Clone)]
+struct ClassTable<'a>(&'a [Class]);
+
+impl ClassHierarchy for ClassTable<'_> {
     fn superclass(&self, class: ClassId) -> Option<ClassId> {
-        self.classes.get(class.0 as usize)?.superclass
+        self.0.get(class.0 as usize)?.superclass
     }
 
     /// Source classes cannot inherit from built-in value classes or
@@ -1524,42 +1530,69 @@ impl ClassHierarchy for Module {
     /// A source class is closed when it is sealed, not abstract, and has no
     /// subclasses: its cone is exactly its own instances.
     fn is_closed(&self, class: ClassId) -> bool {
-        let closed_origin =
-            self.classes
-                .get(class.0 as usize)
-                .is_some_and(|class| match class.origin {
-                    ClassOrigin::BuiltinValue { .. } | ClassOrigin::HostBacked { .. } => true,
-                    ClassOrigin::Native => class.sealing.is_sealed() && !class.is_abstract,
-                    ClassOrigin::ObjectRoot | ClassOrigin::Condition { .. } => false,
-                });
-        closed_origin
-            && !self
-                .classes
-                .iter()
-                .any(|other| other.superclass == Some(class))
+        let closed_origin = self
+            .0
+            .get(class.0 as usize)
+            .is_some_and(|class| match class.origin {
+                ClassOrigin::BuiltinValue { .. } | ClassOrigin::HostBacked { .. } => true,
+                ClassOrigin::Native => class.sealing.is_sealed() && !class.is_abstract,
+                ClassOrigin::ObjectRoot | ClassOrigin::Condition { .. } => false,
+            });
+        closed_origin && !self.0.iter().any(|other| other.superclass == Some(class))
     }
 
-    fn builtin_class(&self, class: BuiltinValueClass) -> Option<ClassId> {
-        self.builtin_value_class(class)
+    fn builtin_class(&self, kind: BuiltinValueClass) -> Option<ClassId> {
+        self.0
+            .iter()
+            .find(|class| class.origin == ClassOrigin::BuiltinValue { kind })
+            .map(|class| class.id)
     }
 
     /// A sealed source class's direct subclasses, in class id order.
     fn sealed_subclasses(&self, class: ClassId) -> Option<Vec<ClassId>> {
-        self.classes
-            .get(class.0 as usize)?
-            .sealing
-            .is_sealed()
-            .then(|| self.direct_subclasses(class))
+        self.0.get(class.0 as usize)?.sealing.is_sealed().then(|| {
+            self.0
+                .iter()
+                .filter(|other| other.superclass == Some(class))
+                .map(|other| other.id)
+                .collect()
+        })
     }
 
     fn is_abstract(&self, class: ClassId) -> bool {
-        self.classes
+        self.0
             .get(class.0 as usize)
             .is_some_and(|class| class.is_abstract)
     }
 
     fn is_same_or_subclass(&self, class: ClassId, ancestor: ClassId) -> bool {
-        is_same_or_subclass_in_classes(&self.classes, class, ancestor)
+        is_same_or_subclass_in_classes(self.0, class, ancestor)
+    }
+}
+
+impl ClassHierarchy for Module {
+    fn superclass(&self, class: ClassId) -> Option<ClassId> {
+        ClassTable(&self.classes).superclass(class)
+    }
+
+    fn is_closed(&self, class: ClassId) -> bool {
+        ClassTable(&self.classes).is_closed(class)
+    }
+
+    fn builtin_class(&self, class: BuiltinValueClass) -> Option<ClassId> {
+        ClassTable(&self.classes).builtin_class(class)
+    }
+
+    fn sealed_subclasses(&self, class: ClassId) -> Option<Vec<ClassId>> {
+        ClassTable(&self.classes).sealed_subclasses(class)
+    }
+
+    fn is_abstract(&self, class: ClassId) -> bool {
+        ClassTable(&self.classes).is_abstract(class)
+    }
+
+    fn is_same_or_subclass(&self, class: ClassId, ancestor: ClassId) -> bool {
+        ClassTable(&self.classes).is_same_or_subclass(class, ancestor)
     }
 }
 
@@ -2120,9 +2153,11 @@ fn join_arm_kind(
     }
 }
 
-/// Joins two result lists position by position with [`join_arm_kind`].
-/// Lists of different lengths do not join.
+/// Joins two result lists position by position with [`join_arm_kind`],
+/// and runtime objects neither holds with [`join_object_kinds`]. Lists of
+/// different lengths do not join.
 fn join_arm_kinds(
+    classes: &[Class],
     lhs: &[ValueKind],
     rhs: &[ValueKind],
     holds: impl Fn(ValueKind, ValueKind) -> bool,
@@ -2132,8 +2167,54 @@ fn join_arm_kinds(
     }
     lhs.iter()
         .zip(rhs)
-        .map(|(lhs, rhs)| join_arm_kind(*lhs, *rhs, &holds))
+        .map(|(lhs, rhs)| join_kind(classes, *lhs, *rhs, &holds))
         .collect()
+}
+
+/// Joins two kinds as conditional arms join: the one that holds the other's
+/// values ([`join_arm_kind`]), else for two runtime objects their least
+/// common superclass ([`join_object_kinds`]).
+fn join_kind(
+    classes: &[Class],
+    lhs: ValueKind,
+    rhs: ValueKind,
+    holds: impl Fn(ValueKind, ValueKind) -> bool,
+) -> Option<ValueKind> {
+    join_arm_kind(lhs, rhs, holds).or_else(|| join_object_kinds(classes, lhs, rhs))
+}
+
+/// Joins two kinds of runtime objects, such as two sibling classes, at the
+/// class the type lattice bounds their union by: their least common
+/// superclass, `<object>` at the least. The joined value is still a
+/// runtime object handle, so neither arm changes representation.
+fn join_object_kinds(classes: &[Class], lhs: ValueKind, rhs: ValueKind) -> Option<ValueKind> {
+    let class_of = |kind| match kind {
+        ValueKind::Object(class)
+        | ValueKind::String(class)
+        | ValueKind::Symbol(class)
+        | ValueKind::Vector(class) => Some(class),
+        _ => None,
+    };
+    let table = ClassTable(classes);
+    let cone = |class| Type::of(Atom::Cone(class), &table);
+    let class = cone(class_of(lhs)?)
+        .join(&cone(class_of(rhs)?), &table)
+        .class_bound(&table)?;
+    // A built-in string, symbol or vector class keeps its own kind.
+    Some(
+        match classes.get(class.0 as usize).map(|class| class.origin) {
+            Some(ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::String,
+            }) => ValueKind::String(class),
+            Some(ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Symbol,
+            }) => ValueKind::Symbol(class),
+            Some(ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Vector,
+            }) => ValueKind::Vector(class),
+            _ => ValueKind::Object(class),
+        },
+    )
 }
 
 /// Why a callable's signature cannot stand in for an expected one.
@@ -7325,7 +7406,7 @@ impl Lowering {
         if next == ValueKind::Error {
             return Some(current);
         }
-        if let Some(joined) = join_arm_kind(current, next, |expected, actual| {
+        if let Some(joined) = join_kind(&self.classes, current, next, |expected, actual| {
             self.kinds_match(expected, actual)
         }) {
             return Some(joined);
@@ -13502,7 +13583,8 @@ impl Lowering {
                 then_branch,
                 else_branch,
                 ..
-            } => join_arm_kind(
+            } => join_kind(
+                &self.classes,
                 self.expr_kind(then_branch),
                 self.expr_kind(else_branch),
                 |expected, actual| self.kinds_match(expected, actual),
@@ -14193,7 +14275,7 @@ impl Lowering {
 
     /// Joins the result kinds of two control-flow arms; see [`join_arm_kinds`].
     fn join_arm_kinds(&self, lhs: &[ValueKind], rhs: &[ValueKind]) -> Option<Vec<ValueKind>> {
-        join_arm_kinds(lhs, rhs, |expected, actual| {
+        join_arm_kinds(&self.classes, lhs, rhs, |expected, actual| {
             self.kinds_match(expected, actual)
         })
     }
