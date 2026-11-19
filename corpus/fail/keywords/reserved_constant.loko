@@ -1,0 +1,15 @@
+// expect: diagnostic code sem.reserved-name
+// expect: diagnostics 1
+// `$unsupplied` is the kernel's: a call that does not pass a keyword
+// without a default passes it, so a program cannot define its own and
+// make `== $unsupplied` test something else.
+
+define constant $unsupplied = 7;
+
+define function f(#key k) => <integer>
+  if (k == $unsupplied) 1 else 2 end
+end;
+
+define function main() => <integer>
+  f()
+end;
