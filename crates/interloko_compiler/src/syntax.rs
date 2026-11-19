@@ -39,140 +39,152 @@ impl Span {
 }
 
 /// Lexical token kind.
+///
+/// Each variant's discriminant is its stable tag, mixed into syntax node
+/// ids; `repr(u8)` fixes its type. Tags never change once
+/// given and are never reused, so a new variant takes one past the highest
+/// tag. Tag 28 (`then`) is retired. The compiler rejects two variants with the same tag.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum TokenKind {
     /// `define`.
-    Define,
+    Define = 1,
     /// `function`.
-    Function,
+    Function = 2,
     /// `class`.
-    Class,
+    Class = 3,
     /// `slot`.
-    Slot,
+    Slot = 4,
     /// `constant`.
-    Constant,
+    Constant = 38,
     /// `generic`.
-    Generic,
+    Generic = 5,
     /// `method`.
-    Method,
+    Method = 6,
     /// `let`.
-    Let,
+    Let = 7,
     /// `if`.
-    If,
+    If = 27,
     /// `elseif`.
-    Elseif,
+    Elseif = 54,
     /// `else`.
-    Else,
+    Else = 29,
     /// `unless`.
-    Unless,
+    Unless = 55,
     /// `case`.
-    Case,
+    Case = 56,
     /// `otherwise`.
-    Otherwise,
+    Otherwise = 57,
     /// `select`.
-    Select,
+    Select = 61,
     /// `handle`.
-    Handle,
+    Handle = 35,
     /// `with`.
-    With,
+    With = 36,
     /// `restart`.
-    Restart,
+    Restart = 37,
     /// `when`.
-    When,
+    When = 50,
     /// `block`.
-    Block,
+    Block = 48,
     /// `begin`.
-    Begin,
+    Begin = 62,
     /// `cleanup`.
-    Cleanup,
+    Cleanup = 49,
     /// `while`.
-    While,
+    While = 60,
     /// `until`.
-    Until,
+    Until = 59,
     /// `for`.
-    For,
+    For = 64,
     /// `end`.
-    End,
+    End = 8,
     /// User identifier.
-    Ident,
+    Ident = 9,
     /// Base-10 numeric literal: an integer such as `42`, or a float with a
     /// fraction and/or exponent such as `1.5`, `2e10`, or `6.02e-23`,
     /// optionally followed by a 32-bit type suffix: `7i32`, `7u32`,
     /// `1.5f32`.
-    Number,
+    Number = 10,
     /// Boolean literal, currently `#t` or `#f`.
-    Bool,
+    Bool = 30,
     /// String literal.
-    String,
+    String = 39,
     /// Character literal such as `'a'` or `'\n'`.
-    Character,
+    Character = 63,
     /// Symbol literal such as `#name`.
-    Symbol,
+    Symbol = 40,
     /// Legacy keyword-style symbol literal such as `#:name`.
-    Keyword,
+    Keyword = 41,
     /// Vector literal opener `#[`.
-    VectorStart,
+    VectorStart = 44,
     /// Nominal type/class name such as `<circle>`.
-    TypeName,
+    TypeName = 11,
     /// `(`.
-    LParen,
+    LParen = 12,
     /// `)`.
-    RParen,
+    RParen = 13,
     /// `[`.
-    LBracket,
+    LBracket = 42,
     /// `]`.
-    RBracket,
+    RBracket = 43,
     /// `,`.
-    Comma,
+    Comma = 14,
     /// `+`.
-    Plus,
+    Plus = 15,
     /// `-`.
-    Minus,
+    Minus = 16,
     /// `*`.
-    Star,
+    Star = 17,
     /// `/` (a lone slash; `//` starts a comment).
-    Slash,
+    Slash = 47,
     /// `+%`, wrapping addition.
-    PlusPercent,
+    PlusPercent = 51,
     /// `-%`, wrapping subtraction.
-    MinusPercent,
+    MinusPercent = 52,
     /// `*%`, wrapping multiplication.
-    StarPercent,
+    StarPercent = 53,
     /// `=`.
-    Equal,
+    Equal = 18,
     /// `==`, identity.
-    EqualEqual,
+    EqualEqual = 58,
     /// `=>`.
-    Arrow,
+    Arrow = 19,
     /// `<`.
-    Less,
+    Less = 31,
     /// `<=`.
-    LessEqual,
+    LessEqual = 32,
     /// `>`.
-    Greater,
+    Greater = 33,
     /// `>=`.
-    GreaterEqual,
+    GreaterEqual = 34,
     /// `:`.
-    Colon,
+    Colon = 20,
     /// `:=`.
-    Assign,
+    Assign = 45,
     /// `::`.
-    DoubleColon,
+    DoubleColon = 21,
     /// `.`.
-    Dot,
+    Dot = 22,
     /// `;`.
-    Semicolon,
+    Semicolon = 23,
     /// Whitespace trivia.
-    Whitespace,
+    Whitespace = 24,
     /// Line comment trivia.
-    Comment,
+    Comment = 25,
     /// Documentation line comment trivia, written with `///`.
-    DocComment,
+    DocComment = 46,
     /// Unknown byte or character.
-    Error,
+    Error = 26,
 }
 
 impl TokenKind {
+    /// Returns this kind's stable tag, its discriminant.
+    #[must_use]
+    pub(crate) const fn tag(self) -> u64 {
+        self as u64
+    }
+
     pub(crate) fn is_trivia(self) -> bool {
         matches!(self, Self::Whitespace | Self::Comment | Self::DocComment)
     }
@@ -313,147 +325,159 @@ impl Token {
 }
 
 /// CST node kind.
+///
+/// Each variant's discriminant is its stable tag, mixed into syntax node
+/// ids; `repr(u8)` fixes its type. Tags never change once
+/// given and are never reused, so a new variant takes one past the highest
+/// tag. The compiler rejects two variants with the same tag.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum CstKind {
     /// Root module node.
-    Root,
+    Root = 1,
     /// Function definition.
-    Function,
+    Function = 2,
     /// Constant definition.
-    Constant,
+    Constant = 30,
     /// Class definition.
-    Class,
+    Class = 3,
     /// Slot declaration.
-    SlotDecl,
+    SlotDecl = 4,
     /// Slot option such as `init-keyword: radius:`.
-    SlotOption,
+    SlotOption = 23,
     /// Class/type definition name, such as `<point>` in `define class`.
-    TypeDefinitionName,
+    TypeDefinitionName = 34,
     /// Value definition name, such as `area` in `define function area`.
-    ValueDefinitionName,
+    ValueDefinitionName = 35,
     /// Declared object slot name.
-    SlotName,
+    SlotName = 36,
     /// Keyword value used by a slot option, such as `radius:`.
-    SlotKeyword,
+    SlotKeyword = 32,
     /// Generic function declaration.
-    Generic,
+    Generic = 5,
     /// Method definition.
-    Method,
+    Method = 6,
     /// Function parameter list.
-    ParameterList,
+    ParameterList = 7,
     /// Function body.
-    Body,
+    Body = 8,
     /// Local binding statement.
-    LetStmt,
+    LetStmt = 9,
     /// Expression evaluated for effect in a body: `expression ;`.
-    ExprStmt,
+    ExprStmt = 57,
     /// Function, method, or generic parameter name.
-    ParameterName,
+    ParameterName = 37,
     /// Local binding name.
-    LetName,
+    LetName = 38,
     /// Restart condition binding name.
-    RestartName,
+    RestartName = 39,
     /// Binary expression.
-    BinaryExpr,
+    BinaryExpr = 10,
     /// Prefix unary expression.
-    UnaryExpr,
+    UnaryExpr = 28,
     /// Direct function call expression.
-    CallExpr,
+    CallExpr = 11,
     /// Direct call callee name.
-    CallName,
+    CallName = 40,
     /// Object slot read expression.
-    SlotExpr,
+    SlotExpr = 12,
     /// Member name used after `.` in a slot read.
-    MemberName,
+    MemberName = 41,
     /// Element access expression `collection[key]`, Dylan's sugar for
     /// `element(collection, key)`.
-    IndexExpr,
+    IndexExpr = 63,
     /// Assignment expression: `object.slot := value`, `collection[key] :=
     /// value` or `local := value`.
-    SlotAssignExpr,
+    SlotAssignExpr = 29,
     /// Call argument list.
-    ArgList,
+    ArgList = 13,
     /// Keyword argument.
-    KeywordArg,
+    KeywordArg = 14,
     /// Keyword introducer in an argument list, such as `radius:`.
-    ArgumentKeyword,
+    ArgumentKeyword = 33,
     /// Name reference expression.
-    NameExpr,
+    NameExpr = 15,
     /// Integer literal expression.
-    NumberExpr,
+    NumberExpr = 16,
     /// Boolean literal expression.
-    BoolExpr,
+    BoolExpr = 19,
     /// String literal expression.
-    StringExpr,
+    StringExpr = 24,
     /// Character literal expression.
-    CharacterExpr,
+    CharacterExpr = 65,
     /// Symbol literal expression.
-    SymbolExpr,
+    SymbolExpr = 25,
     /// Keyword symbol literal expression.
-    KeywordExpr,
+    KeywordExpr = 26,
     /// Vector literal expression.
-    VectorExpr,
+    VectorExpr = 27,
     /// `if (test) body … end` conditional expression.
-    IfExpr,
+    IfExpr = 20,
     /// `elseif (test) body` clause of an `if` expression.
-    ElseifClause,
+    ElseifClause = 51,
     /// `else body` clause of an `if` expression.
-    ElseClause,
+    ElseClause = 52,
     /// `unless (test) body end` conditional expression.
-    UnlessExpr,
+    UnlessExpr = 53,
     /// `case test => body; … end` conditional expression.
-    CaseExpr,
+    CaseExpr = 54,
     /// `test => body` clause of a `case` expression.
-    CaseClause,
+    CaseClause = 55,
     /// `otherwise => body` clause of a `case` or `select` expression.
-    OtherwiseClause,
+    OtherwiseClause = 56,
     /// `select (target by test) keys => body; … end` expression.
-    SelectExpr,
+    SelectExpr = 60,
     /// `by test` part of a `select` expression.
-    SelectTest,
+    SelectTest = 61,
     /// `key, key => body` clause of a `select` expression.
-    SelectClause,
+    SelectClause = 62,
     /// Recoverable condition handler expression.
-    HandleExpr,
+    HandleExpr = 21,
     /// Anonymous function expression.
-    FunctionExpr,
+    FunctionExpr = 31,
     /// Restart clause in a handler expression.
-    RestartClause,
+    RestartClause = 22,
     /// Dylan-style `block` expression.
-    BlockExpr,
+    BlockExpr = 47,
     /// `begin body end`: a body in its own scope, as an expression.
-    BeginExpr,
+    BeginExpr = 64,
     /// `cleanup` clause of a `block` expression.
-    CleanupClause,
+    CleanupClause = 48,
     /// `while (test) body end` loop.
-    WhileExpr,
+    WhileExpr = 58,
     /// `until (test) body end` loop.
-    UntilExpr,
+    UntilExpr = 59,
     /// `for (clause) body end` loop.
-    ForExpr,
+    ForExpr = 66,
     /// Numeric clause of a `for` loop: `i from a to b by s`.
-    NumericForClause,
+    NumericForClause = 67,
     /// Exit procedure name bound by a `block` expression.
-    BlockExitName,
+    BlockExitName = 49,
     /// `when … =>` guard of a restart clause.
-    RestartGuard,
+    RestartGuard = 50,
     /// Superclass type name in a class definition.
-    SuperclassType,
+    SuperclassType = 42,
     /// Nominal type name in an annotation.
-    AnnotationType,
+    AnnotationType = 43,
     /// Class-object type name in an annotation.
-    ClassObjectAnnotationType,
+    ClassObjectAnnotationType = 44,
     /// Bare condition type name in a restart clause.
-    RestartConditionType,
+    RestartConditionType = 45,
     /// Type/class name expression.
-    TypeExpr,
+    TypeExpr = 17,
     /// Type name used as an expression.
-    ExpressionTypeName,
+    ExpressionTypeName = 46,
     /// Malformed syntax placeholder.
-    Error,
+    Error = 18,
 }
 
 impl CstKind {
+    /// Returns this kind's stable tag, its discriminant.
+    #[must_use]
+    pub(crate) const fn tag(self) -> u64 {
+        self as u64
+    }
+
     /// Returns true when this kind is role metadata layered over syntax tokens.
     #[must_use]
     pub const fn is_role(self) -> bool {
@@ -565,7 +589,7 @@ fn syntax_node_id(
     tokens: &[Token],
     source: &str,
 ) -> SyntaxNodeId {
-    let mut builder = SyntaxNodeId::builder(source_file, cst_kind_tag(kind));
+    let mut builder = SyntaxNodeId::builder(source_file, kind.tag());
 
     match kind {
         CstKind::Class => {
@@ -627,7 +651,7 @@ fn syntax_node_id(
                         if token.kind.is_trivia() {
                             continue;
                         }
-                        builder.mix_u64(token_kind_tag(token.kind));
+                        builder.mix_u64(token.kind.tag());
                         builder.mix_str(token.text(source));
                     }
                 }
@@ -702,146 +726,6 @@ fn mix_first_named_token(
                 return;
             }
         }
-    }
-}
-
-const fn cst_kind_tag(kind: CstKind) -> u64 {
-    match kind {
-        CstKind::Root => 1,
-        CstKind::Function => 2,
-        CstKind::Class => 3,
-        CstKind::SlotDecl => 4,
-        CstKind::Generic => 5,
-        CstKind::Method => 6,
-        CstKind::ParameterList => 7,
-        CstKind::Body => 8,
-        CstKind::LetStmt => 9,
-        CstKind::BinaryExpr => 10,
-        CstKind::CallExpr => 11,
-        CstKind::SlotExpr => 12,
-        CstKind::SlotAssignExpr => 29,
-        CstKind::Constant => 30,
-        CstKind::ArgList => 13,
-        CstKind::KeywordArg => 14,
-        CstKind::NameExpr => 15,
-        CstKind::NumberExpr => 16,
-        CstKind::TypeExpr => 17,
-        CstKind::Error => 18,
-        CstKind::BoolExpr => 19,
-        CstKind::IfExpr => 20,
-        CstKind::HandleExpr => 21,
-        CstKind::RestartClause => 22,
-        CstKind::SlotOption => 23,
-        CstKind::StringExpr => 24,
-        CstKind::SymbolExpr => 25,
-        CstKind::KeywordExpr => 26,
-        CstKind::VectorExpr => 27,
-        CstKind::UnaryExpr => 28,
-        CstKind::FunctionExpr => 31,
-        CstKind::SlotKeyword => 32,
-        CstKind::ArgumentKeyword => 33,
-        CstKind::TypeDefinitionName => 34,
-        CstKind::ValueDefinitionName => 35,
-        CstKind::SlotName => 36,
-        CstKind::ParameterName => 37,
-        CstKind::LetName => 38,
-        CstKind::RestartName => 39,
-        CstKind::CallName => 40,
-        CstKind::MemberName => 41,
-        CstKind::SuperclassType => 42,
-        CstKind::AnnotationType => 43,
-        CstKind::ClassObjectAnnotationType => 44,
-        CstKind::RestartConditionType => 45,
-        CstKind::ExpressionTypeName => 46,
-        CstKind::BlockExpr => 47,
-        CstKind::BeginExpr => 64,
-        CstKind::CleanupClause => 48,
-        CstKind::BlockExitName => 49,
-        CstKind::RestartGuard => 50,
-        CstKind::ElseifClause => 51,
-        CstKind::ElseClause => 52,
-        CstKind::UnlessExpr => 53,
-        CstKind::CaseExpr => 54,
-        CstKind::CaseClause => 55,
-        CstKind::OtherwiseClause => 56,
-        CstKind::ExprStmt => 57,
-        CstKind::WhileExpr => 58,
-        CstKind::UntilExpr => 59,
-        CstKind::SelectExpr => 60,
-        CstKind::SelectTest => 61,
-        CstKind::SelectClause => 62,
-        CstKind::IndexExpr => 63,
-        CstKind::CharacterExpr => 65,
-        CstKind::ForExpr => 66,
-        CstKind::NumericForClause => 67,
-    }
-}
-
-const fn token_kind_tag(kind: TokenKind) -> u64 {
-    match kind {
-        TokenKind::Define => 1,
-        TokenKind::Function => 2,
-        TokenKind::Class => 3,
-        TokenKind::Slot => 4,
-        TokenKind::Generic => 5,
-        TokenKind::Method => 6,
-        TokenKind::Let => 7,
-        TokenKind::End => 8,
-        TokenKind::Ident => 9,
-        TokenKind::Number => 10,
-        TokenKind::TypeName => 11,
-        TokenKind::LParen => 12,
-        TokenKind::RParen => 13,
-        TokenKind::Comma => 14,
-        TokenKind::Plus => 15,
-        TokenKind::Minus => 16,
-        TokenKind::Star => 17,
-        TokenKind::Equal => 18,
-        TokenKind::EqualEqual => 58,
-        TokenKind::Select => 61,
-        TokenKind::Arrow => 19,
-        TokenKind::Colon => 20,
-        TokenKind::Assign => 45,
-        TokenKind::DoubleColon => 21,
-        TokenKind::Dot => 22,
-        TokenKind::Semicolon => 23,
-        TokenKind::Whitespace => 24,
-        TokenKind::Comment => 25,
-        TokenKind::DocComment => 46,
-        TokenKind::Slash => 47,
-        TokenKind::PlusPercent => 51,
-        TokenKind::MinusPercent => 52,
-        TokenKind::StarPercent => 53,
-        TokenKind::Error => 26,
-        TokenKind::If => 27,
-        TokenKind::Else => 29,
-        TokenKind::Bool => 30,
-        TokenKind::Less => 31,
-        TokenKind::LessEqual => 32,
-        TokenKind::Greater => 33,
-        TokenKind::GreaterEqual => 34,
-        TokenKind::Handle => 35,
-        TokenKind::With => 36,
-        TokenKind::Restart => 37,
-        TokenKind::Constant => 38,
-        TokenKind::String => 39,
-        TokenKind::Character => 63,
-        TokenKind::Symbol => 40,
-        TokenKind::Keyword => 41,
-        TokenKind::LBracket => 42,
-        TokenKind::RBracket => 43,
-        TokenKind::VectorStart => 44,
-        TokenKind::Block => 48,
-        TokenKind::Begin => 62,
-        TokenKind::Cleanup => 49,
-        TokenKind::When => 50,
-        TokenKind::Elseif => 54,
-        TokenKind::Unless => 55,
-        TokenKind::Case => 56,
-        TokenKind::Otherwise => 57,
-        TokenKind::While => 60,
-        TokenKind::Until => 59,
-        TokenKind::For => 64,
     }
 }
 

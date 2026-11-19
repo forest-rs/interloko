@@ -126,47 +126,41 @@ impl AstNodeId {
 }
 
 /// Kind of named definition that can receive a stable [`DefinitionId`].
+///
+/// Each variant's discriminant is its stable tag, mixed into the ids of
+/// its definitions. A new variant takes one past the highest tag, and a
+/// removed variant's tag is never reused; the compiler rejects two
+/// variants with the same tag.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[repr(u8)]
 pub enum DefinitionKind {
     /// Language environment definition.
-    LanguageEnvironment,
+    LanguageEnvironment = 7,
     /// Grammar definition.
-    Grammar,
+    Grammar = 8,
     /// Grammar rule definition.
-    GrammarRule,
+    GrammarRule = 9,
     /// Semantic action definition.
-    SemanticAction,
+    SemanticAction = 10,
     /// Class definition.
-    Class,
+    Class = 1,
     /// Slot definition within a class.
-    Slot,
+    Slot = 2,
     /// Generic function declaration.
-    Generic,
+    Generic = 3,
     /// Method definition.
-    Method,
+    Method = 4,
     /// Direct function definition.
-    Function,
+    Function = 5,
     /// Immutable top-level constant definition.
-    Constant,
+    Constant = 11,
     /// Local binding.
-    Local,
+    Local = 6,
 }
 
 impl DefinitionKind {
     const fn tag(self) -> u64 {
-        match self {
-            Self::Class => 1,
-            Self::Slot => 2,
-            Self::Generic => 3,
-            Self::Method => 4,
-            Self::Function => 5,
-            Self::Local => 6,
-            Self::LanguageEnvironment => 7,
-            Self::Grammar => 8,
-            Self::GrammarRule => 9,
-            Self::SemanticAction => 10,
-            Self::Constant => 11,
-        }
+        self as u64
     }
 }
 
@@ -205,56 +199,62 @@ impl DefinitionId {
 }
 
 /// Kind of compiler artifact tracked by incremental invalidation.
+///
+/// Each variant's discriminant is its stable tag, mixed into artifact keys,
+/// and the order kinds sort in. A new variant takes one past the highest
+/// tag, and a removed variant's tag is never reused; the compiler rejects
+/// two variants with the same tag.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[repr(u8)]
 pub enum ArtifactKind {
     /// Source text input.
-    Source,
+    Source = 1,
     /// Language environment resolution result.
-    EnvironmentResolution,
+    EnvironmentResolution = 13,
     /// Resolved grammar stack result.
-    GrammarStack,
+    GrammarStack = 14,
     /// Grammar frontend parse report.
-    GrammarParse,
+    GrammarParse = 15,
     /// Parse/CST result.
-    Parse,
+    Parse = 2,
     /// AST lowering result.
-    Ast,
+    Ast = 3,
     /// Binding and semantic symbol table result.
-    Bind,
+    Bind = 4,
     /// Aggregated compiler diagnostics.
-    Diagnostics,
+    Diagnostics = 5,
     /// Method lookup result.
-    MethodLookup,
+    MethodLookup = 6,
     /// Lowered method body.
-    MethodLowering,
+    MethodLowering = 7,
     /// Tape method body.
-    MethodTape,
+    MethodTape = 8,
     /// Generic dispatcher body.
-    GenericDispatcher,
+    GenericDispatcher = 9,
     /// Whole lowered executable IR module.
-    LoweredModule,
+    LoweredModule = 10,
     /// Whole tape program.
-    TapeProgram,
+    TapeProgram = 11,
     /// Runtime result for a requested `main` run.
-    RuntimeResult,
+    RuntimeResult = 12,
     /// Soft typing decisions for one function, method, or constant.
-    DefinitionTyping,
+    DefinitionTyping = 17,
     /// Soft typing result for the whole module.
-    Typing,
+    Typing = 16,
     /// Session-owned soft typing configuration input.
-    TypingConfig,
+    TypingConfig = 18,
     /// Semantic output of one function, method, generic, or constant.
-    DefinitionSem,
+    DefinitionSem = 19,
     /// Type contract of one definition: what code compiled against it trusts.
-    Contract,
+    Contract = 20,
     /// Method set and specializers of one generic.
-    MethodTable,
+    MethodTable = 21,
     /// Cone of one class: its subclasses and whether it is closed.
-    ClassCone,
+    ClassCone = 22,
     /// Session-owned codegen policy input.
-    CodegenPolicy,
+    CodegenPolicy = 23,
     /// Whether one definition is held to strict typing, and why.
-    Strictness,
+    Strictness = 24,
 }
 
 impl ArtifactKind {
@@ -290,32 +290,7 @@ impl ArtifactKind {
     }
 
     const fn tag(self) -> u64 {
-        match self {
-            Self::Source => 1,
-            Self::Parse => 2,
-            Self::Ast => 3,
-            Self::Bind => 4,
-            Self::Diagnostics => 5,
-            Self::MethodLookup => 6,
-            Self::MethodLowering => 7,
-            Self::MethodTape => 8,
-            Self::GenericDispatcher => 9,
-            Self::LoweredModule => 10,
-            Self::TapeProgram => 11,
-            Self::RuntimeResult => 12,
-            Self::EnvironmentResolution => 13,
-            Self::GrammarStack => 14,
-            Self::GrammarParse => 15,
-            Self::Typing => 16,
-            Self::DefinitionTyping => 17,
-            Self::TypingConfig => 18,
-            Self::DefinitionSem => 19,
-            Self::Contract => 20,
-            Self::MethodTable => 21,
-            Self::ClassCone => 22,
-            Self::CodegenPolicy => 23,
-            Self::Strictness => 24,
-        }
+        self as u64
     }
 }
 
