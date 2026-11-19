@@ -43,10 +43,11 @@
 //! A function or generic that takes keywords is a callable value like any
 //! other. Its value's signature lists its keywords after its parameters,
 //! and its typed entry takes each boxed: a call through a value of known
-//! signature passes every keyword in declaration order, `$unsupplied` for
-//! those it does not pass, and the entry calls the default function of
-//! each `$unsupplied` one, in declaration order, and checks the type of
-//! each other. A call through an untyped `<callable>` passes the keywords
+//! signature passes every keyword in declaration order, and for those it
+//! does not pass a marker of the kernel's that source cannot produce, not
+//! `$unsupplied`, so passing `$unsupplied` explicitly means what it means
+//! in a direct call; the entry calls the default function of each absent
+//! one, in declaration order, and checks the type of each other. A call through an untyped `<callable>` passes the keywords
 //! it names in its boxed entry's keyword tail: their names and values, in
 //! source order. Every boxed entry takes a tail; a value that takes
 //! keywords reads it by name, and any value signals

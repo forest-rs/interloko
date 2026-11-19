@@ -1,0 +1,19 @@
+// expect: diagnostic code sem.unexpected-keyword-argument
+// expect: diagnostic code sem.keyword-argument-type-mismatch
+// expect: diagnostic code sem.function-argument-type-mismatch
+// expect: diagnostic contains callable(<integer>, #key by :: <integer>) => <integer>
+// expect: diagnostics 3
+// A keyword-typed callable's calls are checked against its keywords, and
+// only a value with exactly those keywords has its type.
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function use(f :: callable(<integer>, #key by :: <integer>) => <integer>) => <integer>
+  f(3, times: 2) + f(3, by: "x")
+end;
+
+define function main() => <integer>
+  use(inc)
+end;

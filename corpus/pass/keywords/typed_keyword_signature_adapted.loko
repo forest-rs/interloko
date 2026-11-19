@@ -1,0 +1,19 @@
+// expect: run 59
+// expect: diagnostics 0
+// A callable entering a keyword-typed parameter from untyped code is
+// adapted to the signature: calls through it pass their keywords in its
+// boxed entry's tail.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2, plus :: <integer> = 1) => <integer>
+  x * by + plus
+end;
+
+define function use(f :: callable(<integer>, #key by :: <integer>, plus :: <integer>) => <integer>) => <integer>
+  f(3) + f(3, by: 10) + f(3, plus: 0, by: 7)
+end;
+
+define function main() => <integer>
+  let u :: <callable> = use;
+  let r :: <integer> = u(scale);
+  r
+end;

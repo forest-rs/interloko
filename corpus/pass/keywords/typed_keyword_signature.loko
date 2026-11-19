@@ -1,0 +1,18 @@
+// expect: run 59
+// expect: diagnostics 0
+// A typed callable type may declare keywords after its parameters, and a
+// call through such a value checks them statically and passes each in
+// declaration order to the value's typed entry.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2, plus :: <integer> = 1) => <integer>
+  x * by + plus
+end;
+
+define function use(f :: callable(<integer>, #key by :: <integer>, plus :: <integer>) => <integer>) => <integer>
+  // 7 + 31 + 21
+  f(3) + f(3, by: 10) + f(3, plus: 0, by: 7)
+end;
+
+define function main() => <integer>
+  use(scale)
+end;

@@ -13942,6 +13942,7 @@ fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
         sem::Intrinsic::TablePositionKey => "table-position-key",
         sem::Intrinsic::VectorConstant => "vector-constant?",
         sem::Intrinsic::Unsupplied => "$unsupplied",
+        sem::Intrinsic::KeywordAbsent => "keyword-absent",
         sem::Intrinsic::FloatToString => "float-to-string",
         sem::Intrinsic::IntegerToString => "integer-to-string",
         sem::Intrinsic::Concatenate => "concatenate",

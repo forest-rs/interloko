@@ -214,6 +214,7 @@ impl InterlokoHost {
             RuntimeObjectStorage::String { text } => string_literal(text.as_str()),
             RuntimeObjectStorage::StringBuilder { .. } => "{<string-builder>}".into(),
             RuntimeObjectStorage::Symbol { name } => format!("#{name}"),
+            RuntimeObjectStorage::Marker(marker) => marker.name().into(),
             RuntimeObjectStorage::Vector { elements, .. } => {
                 let elements = elements
                     .iter()

@@ -349,8 +349,9 @@ pub struct CallableSignature {
     /// Return value categories in order.
     pub rets: Vec<ValueKind>,
     /// The `#key` parameters the last `keywords.len()` arguments pass, in
-    /// declaration order, each `$unsupplied` when the call does not pass
-    /// it. The value's typed entry fills defaults and checks the types.
+    /// declaration order, each the keyword-absent marker
+    /// ([`RuntimeOp::KeywordAbsent`]) when the call does not pass it. The
+    /// value's typed entry fills defaults and checks the types.
     pub keywords: Vec<CallableKeyword>,
 }
 
@@ -588,8 +589,11 @@ pub enum RuntimeOp {
     VectorConstant,
     /// Returns `$unsupplied`.
     Unsupplied,
-    /// Returns whether a boxed value is `$unsupplied`.
-    IsUnsupplied,
+    /// Returns the marker a call through a callable value passes for a
+    /// keyword it does not pass, which only the value's entry sees.
+    KeywordAbsent,
+    /// Returns whether a boxed value is that marker.
+    IsKeywordAbsent,
     /// Interns the symbol a tape string names.
     InternSymbol,
     /// Renders a float as literal text.
@@ -2584,6 +2588,13 @@ impl<'module> Lowering<'module> {
         let mut boxed_params = |sig: CallableSigId| {
             if let Some(signature) = ids.call_sigs.get(sig.0 as usize) {
                 pending.extend(signature.params.iter().filter_map(typed_callable));
+                // A typed entry adapts each typed callable keyword too.
+                pending.extend(
+                    signature
+                        .keywords
+                        .iter()
+                        .filter_map(|keyword| typed_callable(&keyword.kind)),
+                );
             }
         };
         for (thunk, sig) in ids.function_closure_thunks.iter().zip(&ids.function_sigs) {
@@ -2958,8 +2969,8 @@ impl<'module> Lowering<'module> {
             .enumerate()
             .map(|(index, _)| body.push_param(&format!("value{index}"), BOXED_WIRE))
             .collect::<Vec<_>>();
-        let (keywords, _) = body.push_keyword_tail();
-        body.reject_keywords(keywords, span)?;
+        let (keywords, keyword_values) = body.push_keyword_tail();
+        body.reject_keywords(keywords, keyword_values, span)?;
         let token = body.alloc(ValueKind::U64);
         body.instructions.extend([
             Instr::CaptureGet {
@@ -3198,17 +3209,31 @@ impl<'module> Lowering<'module> {
             .keywords
             .iter()
             .enumerate()
-            .map(|(index, keyword)| KnownKeyword {
-                name: keyword.name.clone(),
-                kind: call_params[required + index],
-                range: function
-                    .param_ranges
+            .map(|(index, keyword)| {
+                // A typed callable keyword is taken at its signature, which
+                // its check adapts an untyped callable to.
+                let kind = match function
+                    .param_callable_sigs
                     .get(required + index)
-                    .copied()
-                    .flatten(),
-                default: keyword.default,
+                    .and_then(Option::as_ref)
+                {
+                    Some(signature) => {
+                        ValueKind::Closure(Some(sem_callable_signature_id(&self.ids, signature)?))
+                    }
+                    None => call_params[required + index],
+                };
+                Ok(KnownKeyword {
+                    name: keyword.name.clone(),
+                    kind,
+                    range: function
+                        .param_ranges
+                        .get(required + index)
+                        .copied()
+                        .flatten(),
+                    default: keyword.default,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, LowerError>>()?;
         for param in &mut call_params[required..] {
             *param = ValueKind::Any;
         }
@@ -3389,7 +3414,7 @@ impl<'module> Lowering<'module> {
         checks: &mut Vec<CheckCodegenRecord>,
     ) -> Result<Function, LowerError> {
         if !spec.keywords.is_empty() {
-            return self.lower_keyword_thunk(spec);
+            return self.lower_keyword_thunk(spec, checks);
         }
         let mut params = Vec::with_capacity(spec.call_params.len() + 1);
         params.push(Param {
@@ -3521,20 +3546,60 @@ impl<'module> Lowering<'module> {
     /// Lowers the typed entry of the callable values of a function or
     /// generic that takes keywords. It takes the required arguments at the
     /// target's kinds, checked as [`Self::lower_known_callable_thunk`]
-    /// checks them, and each keyword boxed: `$unsupplied` takes the
-    /// keyword's default, from its default function called with the
-    /// required arguments and the keywords before it, in declaration order,
-    /// and any other value is checked and unboxed to the keyword's kind.
+    /// checks them, and each keyword boxed: the keyword-absent marker
+    /// ([`RuntimeOp::KeywordAbsent`]) takes the keyword's default, from its
+    /// default function called with the required arguments and the
+    /// keywords before it, in declaration order, or `$unsupplied` for a
+    /// keyword without one, and any other value, `$unsupplied` included,
+    /// is checked and unboxed to the keyword's kind.
     /// Then it calls, or sends to, the target with every argument.
-    fn lower_keyword_thunk(&self, spec: &KnownCallableThunk) -> Result<Function, LowerError> {
+    fn lower_keyword_thunk(
+        &self,
+        spec: &KnownCallableThunk,
+        checks: &mut Vec<CheckCodegenRecord>,
+    ) -> Result<Function, LowerError> {
         let span = spec.span;
         let mut body = BodyLowering::new(self.module, &self.ids, &[]);
         let _env = body.push_param("$env", ValueKind::Aggregate);
         let required = spec.call_params.len().saturating_sub(spec.keywords.len());
+        // Every parameter first, so they are the function's first registers.
+        let params = spec.call_params[..required]
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| body.push_param(&format!("arg{index}"), *kind))
+            .collect::<Vec<_>>();
+        let boxed = spec
+            .keywords
+            .iter()
+            .enumerate()
+            .map(|(index, keyword)| {
+                body.push_param(&format!("{}#{index}", keyword.name), ValueKind::Any)
+            })
+            .collect::<Vec<_>>();
+        // A check typing proved is dropped, as the plain typed entry drops
+        // it; the others are named by their typing sites.
+        let site_of = |index: usize| -> (Option<(DefinitionId, sem::SiteId)>, String) {
+            match &spec.entry_sites {
+                Some((owner, sites)) => {
+                    let site = sites.get(index).copied().flatten();
+                    (
+                        site.map(|site| (*owner, site)),
+                        check_site_name(Some(*owner), site, span),
+                    )
+                }
+                None => (None, entry_site_name(&spec.name, index)),
+            }
+        };
+        let proved = |site: Option<(DefinitionId, sem::SiteId)>| {
+            site.is_some_and(|(owner, site)| {
+                self.facts
+                    .decision(Some(owner), site)
+                    .is_some_and(|decision| decision.verdict == typing::TypingVerdict::Proved)
+            })
+        };
         let mut args = Vec::with_capacity(spec.call_params.len());
         let sends = matches!(spec.callable, sem::KnownCallable::GenericFunction(_));
-        for (index, kind) in spec.call_params[..required].iter().enumerate() {
-            let param = body.push_param(&format!("arg{index}"), *kind);
+        for (index, (param, kind)) in params.into_iter().zip(&spec.call_params).enumerate() {
             let target = match spec.param_ranges.get(index).copied().flatten() {
                 Some(range) if *kind == ValueKind::I64 => Some(sem::EntryTarget::Range(range)),
                 _ if sends => None,
@@ -3544,44 +3609,47 @@ impl<'module> Lowering<'module> {
                 args.push(param);
                 continue;
             };
-            let site = entry_site_name(&spec.name, index);
-            let checked = entry_check(&mut body.code(), target, param.reg, *kind, site, span);
+            let (site, name) = site_of(index);
+            if proved(site) {
+                if let Some((owner, site)) = site {
+                    checks.push(CheckCodegenRecord {
+                        owner,
+                        site,
+                        codegen: CheckCodegen::Elided,
+                    });
+                }
+                args.push(param);
+                continue;
+            }
+            let checked = entry_check(&mut body.code(), target, param.reg, *kind, name, span);
             body.next_reg = register_at(body.register_kinds.len());
             args.push(Value {
                 reg: checked,
                 ..param
             });
         }
-        let boxed = spec
-            .keywords
-            .iter()
-            .enumerate()
-            .map(|(index, keyword)| {
-                body.push_param(&format!("{}#{index}", keyword.name), ValueKind::Any)
-            })
-            .collect::<Vec<_>>();
         for (index, (keyword, value)) in spec.keywords.iter().zip(boxed).enumerate() {
             let result = body.alloc(keyword.kind);
-            let unsupplied = body.alloc(ValueKind::Bool);
+            let is_absent = body.alloc(ValueKind::Bool);
             let (absent, given, join) =
                 (body.alloc_label(), body.alloc_label(), body.alloc_label());
             body.instructions.extend([
                 Instr::RuntimeCall {
-                    dst: unsupplied.reg,
-                    op: RuntimeOp::IsUnsupplied,
+                    dst: is_absent.reg,
+                    op: RuntimeOp::IsKeywordAbsent,
                     args: vec![value.reg],
                     kind: ValueKind::Bool,
                     span,
                 },
                 Instr::Branch {
-                    cond: unsupplied.reg,
+                    cond: is_absent.reg,
                     then_label: absent,
                     else_label: given,
                     span,
                 },
                 Instr::Label { label: given },
             ]);
-            let site = entry_site_name(&spec.name, required + index);
+            let (_, site) = site_of(required + index);
             let checked = body.unwire(value, keyword.kind, keyword.range, &site, span)?;
             body.instructions.extend([
                 Instr::Move {
@@ -3619,11 +3687,28 @@ impl<'module> Lowering<'module> {
                         args: default_args,
                         span,
                     });
-                    body.coerce_value(default, keyword.kind, span)?
+                    match keyword.kind {
+                        // The default returns an untyped callable, which
+                        // enters the keyword's signature here.
+                        ValueKind::Closure(Some(sig)) if default.kind != keyword.kind => {
+                            body.adapt(default, sig, span)?
+                        }
+                        kind => body.coerce_value(default, kind, span)?,
+                    }
                 }
                 // A keyword without a default is an `<object>`, which takes
-                // `$unsupplied` itself.
-                None => body.coerce_value(value, keyword.kind, span)?,
+                // `$unsupplied`.
+                None => {
+                    let unsupplied = body.alloc(ValueKind::Any);
+                    body.instructions.push(Instr::RuntimeCall {
+                        dst: unsupplied.reg,
+                        op: RuntimeOp::Unsupplied,
+                        args: Vec::new(),
+                        kind: ValueKind::Any,
+                        span,
+                    });
+                    body.coerce_value(unsupplied, keyword.kind, span)?
+                }
             };
             body.instructions.extend([
                 Instr::Move {
@@ -3712,7 +3797,7 @@ impl<'module> Lowering<'module> {
             .collect::<Vec<_>>();
         let (keyword_names, keyword_values) = body.push_keyword_tail();
         if spec.keywords.is_empty() {
-            body.reject_keywords(keyword_names, spec.span)?;
+            body.reject_keywords(keyword_names, keyword_values, spec.span)?;
         }
         let generic = match spec.callable {
             sem::KnownCallable::GenericFunction(generic) => Some(
@@ -3892,8 +3977,8 @@ impl<'module> Lowering<'module> {
             .enumerate()
             .map(|(index, _)| body.push_param(&format!("arg{index}"), BOXED_WIRE))
             .collect::<Vec<_>>();
-        let (keywords, _) = body.push_keyword_tail();
-        body.reject_keywords(keywords, closure.span)?;
+        let (keywords, keyword_values) = body.push_keyword_tail();
+        body.reject_keywords(keywords, keyword_values, closure.span)?;
         let mut args = vec![env.reg];
         for (index, (wire, kind)) in wires.into_iter().zip(&sig.params).enumerate() {
             let site = closure
@@ -4796,7 +4881,8 @@ impl<'module> BodyLowering<'module> {
     }
 
     /// Signals `<unknown-keyword-error>` for the keyword the tape string
-    /// `name` names. A handler that returns ignores the keyword.
+    /// `name` names; a handler recovers at its own `handle`, so the call
+    /// does not go on.
     fn signal_unknown_keyword(&mut self, name: Reg, span: Span) -> Result<(), LowerError> {
         let class = self
             .module
@@ -4832,55 +4918,20 @@ impl<'module> BodyLowering<'module> {
         Ok(())
     }
 
-    /// Signals for the first keyword of a boxed call to a callable that
-    /// takes none, when it passed any.
-    fn reject_keywords(&mut self, names: Value, span: Span) -> Result<(), LowerError> {
-        let len = self.alloc(ValueKind::U64);
-        let zero = self.alloc(ValueKind::U64);
-        let none = self.alloc(ValueKind::Bool);
-        let (passed, done) = (self.alloc_label(), self.alloc_label());
-        self.instructions.extend([
-            Instr::ArrayLen {
-                dst: len.reg,
-                array: names.reg,
-                span,
-            },
-            Instr::ConstU64 {
-                dst: zero.reg,
-                value: 0,
-                span,
-            },
-            Instr::EqU64 {
-                dst: none.reg,
-                lhs: len.reg,
-                rhs: zero.reg,
-                span,
-            },
-            Instr::Branch {
-                cond: none.reg,
-                then_label: done,
-                else_label: passed,
-                span,
-            },
-            Instr::Label { label: passed },
-        ]);
-        let name = self.alloc(ValueKind::Str);
-        self.instructions.push(Instr::ArrayGet {
-            dst: name.reg,
-            array: names.reg,
-            index: zero.reg,
-            span,
-        });
-        self.signal_unknown_keyword(name.reg, span)?;
-        self.instructions.extend([
-            Instr::Jump { label: done, span },
-            Instr::Label { label: done },
-        ]);
-        Ok(())
+    /// Signals `<unknown-keyword-error>` for each keyword a boxed call
+    /// passes to a callable that takes none.
+    fn reject_keywords(
+        &mut self,
+        names: Value,
+        values: Value,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        self.parse_keywords(names, values, &[], span).map(|_| ())
     }
 
     /// Reads a boxed call's keyword tail into one boxed value per keyword
-    /// in `declared`, `$unsupplied` for each the call does not pass, and
+    /// in `declared`, the keyword-absent marker ([`RuntimeOp::KeywordAbsent`])
+    /// for each the call does not pass, and
     /// signals `<unknown-keyword-error>` for each it passes that is not
     /// declared. A keyword passed twice takes its last value; calls that
     /// name their keywords never pass one twice.
@@ -4891,26 +4942,30 @@ impl<'module> BodyLowering<'module> {
         declared: &[String],
         span: Span,
     ) -> Result<Vec<Value>, LowerError> {
-        let unsupplied = self.alloc(ValueKind::Any);
-        self.instructions.push(Instr::RuntimeCall {
-            dst: unsupplied.reg,
-            op: RuntimeOp::Unsupplied,
-            args: Vec::new(),
-            kind: ValueKind::Any,
-            span,
-        });
-        let slots = declared
-            .iter()
-            .map(|_| {
-                let slot = self.alloc(ValueKind::Any);
-                self.instructions.push(Instr::Move {
-                    dst: slot.reg,
-                    src: unsupplied.reg,
-                    span,
-                });
-                slot
-            })
-            .collect::<Vec<_>>();
+        let slots = if declared.is_empty() {
+            Vec::new()
+        } else {
+            let absent = self.alloc(ValueKind::Any);
+            self.instructions.push(Instr::RuntimeCall {
+                dst: absent.reg,
+                op: RuntimeOp::KeywordAbsent,
+                args: Vec::new(),
+                kind: ValueKind::Any,
+                span,
+            });
+            declared
+                .iter()
+                .map(|_| {
+                    let slot = self.alloc(ValueKind::Any);
+                    self.instructions.push(Instr::Move {
+                        dst: slot.reg,
+                        src: absent.reg,
+                        span,
+                    });
+                    slot
+                })
+                .collect()
+        };
         let constants = declared
             .iter()
             .map(|name| {
@@ -6295,17 +6350,34 @@ impl<'module> BodyLowering<'module> {
     /// parameter, a capture, a new callable value or a call's result, whose
     /// contract proves it, or a join of only such values. Any other, such
     /// as a slot's value, opens through [`FunctionKind::CallableParts`].
+    ///
+    /// The tape keeps what an instruction proves only within a straight
+    /// run of code, so a value an instruction made counts only until code
+    /// that may branch, such as a check ([`keeps_projections`]); a
+    /// parameter's contract holds throughout.
     fn callable_shape_known(&self, reg: Reg) -> bool {
         if let Some((_, known)) = self.callable_joins.iter().find(|(join, _)| *join == reg) {
             return *known;
         }
+        if self.params.iter().any(|param| param.reg == reg) {
+            return self.proven_callables.contains(&reg);
+        }
         // A send's callable results are joins of unknown shape, recorded
         // when the send is lowered, so only calls prove a result here.
-        self.proven_callables.contains(&reg)
-            || self.instructions.iter().any(|instr| match instr {
-                Instr::Call { dsts, .. } | Instr::CallIndirect { dsts, .. } => dsts.contains(&reg),
-                _ => false,
-            })
+        let defined = self.instructions.iter().rposition(|instr| match instr {
+            Instr::Call { dsts, .. } | Instr::CallIndirect { dsts, .. } => dsts.contains(&reg),
+            Instr::CallableNew { dst, .. } | Instr::Move { dst, .. } => *dst == reg,
+            _ => false,
+        });
+        let Some(defined) = defined else {
+            return self.proven_callables.contains(&reg);
+        };
+        let proven = self.proven_callables.contains(&reg)
+            || matches!(
+                self.instructions[defined],
+                Instr::Call { .. } | Instr::CallIndirect { .. }
+            );
+        proven && self.instructions[defined..].iter().all(keeps_projections)
     }
 
     /// Lowers a cleanup body for effect, returning whether control can
@@ -8605,15 +8677,22 @@ impl<'module> BodyLowering<'module> {
             values.push(self.coerce_value(value, expected, arg.span())?);
         }
         let kinds = self.value_kinds(result_kinds)?;
-        // Sem passes a typed callable every keyword of its signature, in
-        // declaration order; keywords in any other arrangement are an
-        // untyped call's, whatever the value is known to be here.
+        // Sem passes a typed callable its signature's kinds and every
+        // keyword of it, in declaration order; a call of any other shape is
+        // an untyped call's, whatever the value is known to be here.
+        let arg_kinds = values.iter().map(|value| value.kind).collect::<Vec<_>>();
         let typed_keywords = |sig: CallableSigId| {
             self.ids
                 .call_sigs
                 .get(sig.0 as usize)
                 .is_some_and(|signature| {
-                    signature.keywords.len() == keywords.len()
+                    signature.params.len() == arg_kinds.len()
+                        && signature
+                            .params
+                            .iter()
+                            .zip(&arg_kinds)
+                            .all(|(param, actual)| typed_arg_fits(*param, *actual))
+                        && signature.keywords.len() == keywords.len()
                         && signature
                             .keywords
                             .iter()
@@ -11959,6 +12038,7 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> Option<RuntimeOp> {
         sem::Intrinsic::TablePositionKey => RuntimeOp::TablePositionKey,
         sem::Intrinsic::VectorConstant => RuntimeOp::VectorConstant,
         sem::Intrinsic::Unsupplied => RuntimeOp::Unsupplied,
+        sem::Intrinsic::KeywordAbsent => RuntimeOp::KeywordAbsent,
         sem::Intrinsic::FloatToString => RuntimeOp::FloatToString,
         sem::Intrinsic::IntegerToString => RuntimeOp::IntegerToString,
         sem::Intrinsic::Concatenate => RuntimeOp::Concatenate,
@@ -12013,7 +12093,8 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         RuntimeOp::TableElementOr => index != 0,
         RuntimeOp::TableElementSetter => index != 1,
         RuntimeOp::Unsupplied | RuntimeOp::InternSymbol => false,
-        RuntimeOp::IsUnsupplied => true,
+        RuntimeOp::IsKeywordAbsent => true,
+        RuntimeOp::KeywordAbsent => false,
         RuntimeOp::InstanceOfType => true,
         RuntimeOp::LimitedIntegerType => false,
         RuntimeOp::ClassMetaObject
@@ -12704,6 +12785,56 @@ fn entry_check(
     }
 }
 
+/// Whether an argument of `actual` kind goes to a typed entry's parameter
+/// of `param` kind as it is: the same kind, any callable for an untyped
+/// one, or a runtime object for one, whose class the entry checks.
+fn typed_arg_fits(param: ValueKind, actual: ValueKind) -> bool {
+    param == actual
+        || matches!(
+            (param, actual),
+            (ValueKind::Closure(None), ValueKind::Closure(_))
+                | (ValueKind::Object(_), ValueKind::Object(_))
+                | (ValueKind::ClassObject(_), ValueKind::ClassObject(_))
+        )
+}
+
+/// Whether the tape code for `instr` runs straight through, so what the
+/// tape proved about registers before it still holds after it: no label,
+/// branch, or check that branches to signal a failure.
+fn keeps_projections(instr: &Instr) -> bool {
+    matches!(
+        instr,
+        Instr::ConstI64 { .. }
+            | Instr::ConstF64 { .. }
+            | Instr::Const32 { .. }
+            | Instr::ConstBool { .. }
+            | Instr::ConstU64 { .. }
+            | Instr::ConstStr { .. }
+            | Instr::ConstClass { .. }
+            | Instr::ConstFunction { .. }
+            | Instr::StringLiteral { .. }
+            | Instr::SymbolLiteral { .. }
+            | Instr::VectorLiteral { .. }
+            | Instr::ClosureNew { .. }
+            | Instr::CallableNew { .. }
+            | Instr::OpenCallable { .. }
+            | Instr::CaptureGet { .. }
+            | Instr::BoxValue { .. }
+            | Instr::Move { .. }
+            | Instr::ArrayNew { .. }
+            | Instr::ArrayLen { .. }
+            | Instr::ArrayGet { .. }
+            | Instr::StrEq { .. }
+            | Instr::AddU64 { .. }
+            | Instr::EqU64 { .. }
+            | Instr::Call { .. }
+            | Instr::CallIndirect { .. }
+            | Instr::RuntimeCall { .. }
+            | Instr::HostCall { .. }
+            | Instr::MakeObject { .. }
+    )
+}
+
 /// Names an entry check typing does not classify: source parameter `index`
 /// (counting from zero, without a closure's environment) of the lowered
 /// function `function`, as `entry:<function>:<index>`.
@@ -12879,7 +13010,8 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::TablePositionKey => "table-position-key",
         RuntimeOp::VectorConstant => "vector-constant?",
         RuntimeOp::Unsupplied => "unsupplied",
-        RuntimeOp::IsUnsupplied => "unsupplied?",
+        RuntimeOp::IsKeywordAbsent => "keyword-absent?",
+        RuntimeOp::KeywordAbsent => "keyword-absent",
         RuntimeOp::InternSymbol => "intern-symbol",
         RuntimeOp::FloatToString | RuntimeOp::SingleFloatToString => "float-to-string",
         RuntimeOp::IntegerToString => "integer-to-string",

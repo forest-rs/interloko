@@ -49,7 +49,8 @@ pub struct TurnStats {
     pub promoted: HeapStats,
     /// Work units evacuation charged against the host's budget.
     pub evacuation_work: u64,
-    /// Symbols the turn interned. They join the image directly rather than
+    /// Symbols the turn interned and kernel markers, such as `$unsupplied`,
+    /// it made. They join the image directly rather than
     /// by evacuation, and stay in it even when the turn aborts, so the image
     /// after a finished turn is the image before it plus `interned` plus
     /// `promoted`, and after an aborted turn, the image before it plus
@@ -91,7 +92,7 @@ pub(crate) fn object_bytes(object: &RuntimeObject) -> usize {
         | RuntimeObjectStorage::SlotDescriptor { .. }
         | RuntimeObjectStorage::LimitedIntegerType { .. }
         | RuntimeObjectStorage::SubclassType { .. }
-        | RuntimeObjectStorage::Unsupplied
+        | RuntimeObjectStorage::Marker(_)
         | RuntimeObjectStorage::HostBacked { .. } => 0,
     };
     size_of::<RuntimeObject>() + payload
