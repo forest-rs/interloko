@@ -81,20 +81,18 @@ define function match-symbol(text :: <string>, pos :: <string-position>) => <str
   let consider = method (name :: <string>) => ()
     if (size(name) > size(best) & starts-with?(text, name, at: pos)) best := name end
   end;
-  for (op :: <infix> in $infix) consider(op.name) end;
-  for (op :: <prefix> in $prefix) consider(op.name) end;
+  for (op in $infix) consider(op.name) end;
+  for (op in $prefix) consider(op.name) end;
   for (name :: <string> in #["(", ")", ",", "="]) consider(name) end;
   if (best = "") signal(make(<parse-error>, position: pos)) end;
   best
 end;
 
-define function kind-of(c :: <character>) => <symbol>
-  case
-    digit?(c) => #number;
-    alphabetic?(c) => #name;
-    whitespace?(c) => #space;
-    otherwise => #symbol;
-  end
+// The position after the run of characters from `pos` that pass `test?`.
+define function skip(text :: <string>, pos :: <string-position>,
+                     test? :: callable(<character>) => <boolean>) => <string-position>
+  while (pos < end-position(text) & test?(text[pos])) pos := next-position(text, pos) end;
+  pos
 end;
 
 define function tokenize(text :: <string>) => <stretchy-vector>
@@ -102,14 +100,15 @@ define function tokenize(text :: <string>) => <stretchy-vector>
   let pos = start-position(text);
   while (pos < end-position(text))
     let start = pos;
-    let kind = kind-of(text[pos]);
-    if (kind == #symbol)
-      pos := position-after(text, match-symbol(text, pos), pos)
-    else
-      while (pos < end-position(text) & kind-of(text[pos]) == kind)
-        pos := next-position(text, pos)
-      end
-    end;
+    let c = text[pos];
+    let kind = case
+                 digit?(c) => pos := skip(text, pos, digit?); #number;
+                 alphabetic?(c) => pos := skip(text, pos, alphabetic?); #name;
+                 whitespace?(c) => pos := skip(text, pos, whitespace?); #space;
+                 otherwise =>
+                   pos := position-after(text, match-symbol(text, pos), pos);
+                   #symbol;
+               end;
     unless (kind == #space)
       add!(tokens, make(<token>, kind: kind, position: start,
                         text: copy-sequence(text, start: start, end: pos)))
@@ -175,20 +174,17 @@ define method eval(node :: <variable>, env :: <table>) => <integer>
 end;
 
 define method eval(node :: <unary>, env :: <table>) => <integer>
-  let apply = node.operator.apply;
-  apply(eval(node.operand, env))
+  node.operator.apply(eval(node.operand, env))
 end;
 
 define method eval(node :: <binary>, env :: <table>) => <integer>
-  let combine = node.operator.combine;
-  combine(eval(node.left, env), eval(node.right, env))
+  node.operator.combine(eval(node.left, env), eval(node.right, env))
 end;
 
 define method eval(node :: <call>, env :: <table>) => <integer>
-  let f :: <function> = $builtins[node.callee];
   let values = make(<stretchy-vector>);
   for (argument :: <node> in node.arguments) add!(values, eval(argument, env)) end;
-  f(values)
+  $builtins[node.callee](values)
 end;
 
 define method eval(node :: <definition>, env :: <table>) => <integer>
@@ -224,8 +220,7 @@ end;
 // How tightly the next token binds to the expression on its left: an infix
 // operator's power, or 0 for anything that ends an expression.
 define function left-power(p :: <parser>) => <integer>
-  let op = element($infix, peek(p).text, default: #f);
-  if (instance?(op, <infix>)) op.power else 0 end
+  if (key-exists?($infix, peek(p).text)) $infix[peek(p).text].power else 0 end
 end;
 
 define function parse-expression(p :: <parser>, min-power :: <integer>) => <node>
