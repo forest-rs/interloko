@@ -1,0 +1,35 @@
+// expect: run 101133
+// expect: diagnostics 0
+
+// A generic parameter may be declared `<boolean>`, `<character>` or
+// `<string-position>`, as it may `<integer>`: its methods specialize on
+// that class or a superclass, and a call through a `<function>` checks the
+// argument at the entry.
+
+define generic flag(on? :: <boolean>) => <integer>;
+define method flag(on? :: <boolean>) => <integer>
+  if (on?) 1 else 2 end
+end;
+
+define generic code(c :: <character>) => <integer>;
+define method code(c :: <object>) => <integer>
+  20
+end;
+define method code(c :: <character>) => <integer>
+  if (c == 'a') 10 else 20 end
+end;
+
+define generic at(p :: <string-position>) => <integer>;
+define method at(p :: <string-position>) => <integer>
+  if (p == start-position("ab")) 100 else 200 end
+end;
+
+define function via(f :: <function>, x :: <object>) => <integer>
+  f(x)
+end;
+
+define function main() => <integer>
+  let boxed :: <object> = 'a';
+  flag(#t) + flag(#f) + code('a') + code('b') + at(start-position("ab"))
+    + via(flag, #t) * 1000 + via(code, boxed) * 10000
+end;

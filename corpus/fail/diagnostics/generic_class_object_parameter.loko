@@ -1,0 +1,16 @@
+// expect: diagnostics 1
+// expect: diagnostic code ast.annotation-not-class
+// expect: diagnostic contains generic parameter `c` is declared class <shape>, but it must name a class
+
+// Methods specialize a generic's parameters on classes, and a class object
+// type such as `class <shape>` is not one, so a generic parameter cannot be
+// declared it, as a method parameter cannot.
+
+define class <shape> (<object>)
+end;
+
+define generic describe(c :: class <shape>) => <integer>;
+
+define function main() => <integer>
+  0
+end;

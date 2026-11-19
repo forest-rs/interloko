@@ -68,8 +68,8 @@ pub enum DiagnosticCode {
     AstUnsupportedSlotOption,
     /// A method declaration has the wrong first-slice specializer shape.
     AstInvalidMethodSpecializer,
-    /// A method or restart parameter, which must name a class, is annotated
-    /// with a class object or callable type.
+    /// A method, generic or restart parameter, which must name a class, is
+    /// annotated with a class object or callable type.
     AstAnnotationNotClass,
     /// `instance?` has the wrong syntactic argument shape.
     AstInvalidInstanceOf,
