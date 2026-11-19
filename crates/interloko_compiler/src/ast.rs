@@ -3091,6 +3091,54 @@ impl<'tree> Lowering<'tree> {
             _ => None,
         });
 
+        // `a & b` is `if (a) b else #f end` and `a | b` is
+        // `if (a) #t else b end`: each evaluates its right operand only
+        // when it must, and an arm sees what its test established.
+        let constant = |this: &Self, value: bool| Block {
+            id: this.ast_id(node),
+            statements: Vec::new(),
+            result: Expr::Bool {
+                id: this.ast_id(node),
+                value,
+                span: node.span,
+            },
+            span: node.span,
+        };
+        let operand = |this: &Self, expr: Expr| Block {
+            id: this.ast_id(node),
+            statements: Vec::new(),
+            span: expr.span(),
+            result: expr,
+        };
+        match op {
+            Some(TokenKind::Ampersand) => {
+                let body = operand(self, rhs);
+                return Expr::If {
+                    id: self.ast_id(node),
+                    arms: vec![CondArm {
+                        span: node.span,
+                        test: lhs,
+                        body,
+                    }],
+                    else_body: Some(Box::new(constant(self, false))),
+                    span: node.span,
+                };
+            }
+            Some(TokenKind::Bar) => {
+                let else_body = operand(self, rhs);
+                return Expr::If {
+                    id: self.ast_id(node),
+                    arms: vec![CondArm {
+                        span: node.span,
+                        test: lhs,
+                        body: constant(self, true),
+                    }],
+                    else_body: Some(Box::new(else_body)),
+                    span: node.span,
+                };
+            }
+            _ => {}
+        }
         match op {
             Some(TokenKind::Plus) => Expr::Binary {
                 id: self.ast_id(node),

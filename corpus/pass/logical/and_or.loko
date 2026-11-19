@@ -1,0 +1,22 @@
+// expect: run 20
+// expect: diagnostics 0
+
+// `&` and `|` are Dylan's short-circuit operators, below the comparisons
+// in precedence and left-associative. The right operand of `&` sees what
+// the left one established, as the arm of an `if` does.
+
+define class <box> (<object>)
+  slot n :: <integer>;
+end;
+
+define function count(x :: <object>) => <integer>
+  if (instance?(x, <box>) & x.n > 3) 10 else 1 end
+end;
+
+define function main() => <integer>
+  let a = 1;
+  let b = 2;
+  let t = if (a = 1 | b = 9) 0 else 100 end;
+  let u = if (a = 2 & b = 2 | a = 1 & b = 2) 0 else 100 end;
+  t + u + count(make(<box>, n: 5)) + count(make(<box>, n: 1)) + count(7) + 8
+end;

@@ -138,6 +138,10 @@ pub enum TokenKind {
     Star = 17,
     /// `/` (a lone slash; `//` starts a comment).
     Slash = 47,
+    /// `&`, short-circuit conjunction.
+    Ampersand = 65,
+    /// `|`, short-circuit disjunction.
+    Bar = 66,
     /// `+%`, wrapping addition.
     PlusPercent = 51,
     /// `-%`, wrapping subtraction.
@@ -202,6 +206,8 @@ impl TokenKind {
             | Self::Minus
             | Self::Star
             | Self::Slash
+            | Self::Ampersand
+            | Self::Bar
             | Self::PlusPercent
             | Self::MinusPercent
             | Self::StarPercent
@@ -824,6 +830,14 @@ pub fn lex(source: &str) -> Vec<Token> {
             b'/' if bytes.get(pos + 1) != Some(&b'/') => {
                 pos += 1;
                 TokenKind::Slash
+            }
+            b'&' => {
+                pos += 1;
+                TokenKind::Ampersand
+            }
+            b'|' => {
+                pos += 1;
+                TokenKind::Bar
             }
             b'=' if bytes.get(pos + 1) == Some(&b'>') => {
                 pos += 2;
