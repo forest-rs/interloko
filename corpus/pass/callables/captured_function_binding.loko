@@ -1,0 +1,13 @@
+// expect: run 11
+// expect: diagnostics 0
+// A closure calls a captured binding by its name too.
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function main() => <integer>
+  let f = inc;
+  let g = function (x :: <integer>) => <integer> f(f(x)) end;
+  g(9)
+end;

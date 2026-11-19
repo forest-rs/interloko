@@ -4952,18 +4952,15 @@ impl FunctionContext {
     }
 
     /// Whether `name` would capture a visible enclosing `<callable>` local.
-    fn capture_source_is_callable(&self, name: &str) -> bool {
-        self.captures
-            .iter()
-            .find(|capture| capture.name == name)
-            .map(|capture| capture.kind)
-            .or_else(|| {
-                self.capture_sources
-                    .iter()
-                    .find(|source| source.name == name)
-                    .map(|source| source.kind)
-            })
-            == Some(ValueKind::Callable)
+    /// Whether `name` is a local of this body or one it may capture, which
+    /// shadows any module-level definition of the name.
+    fn binds_lexically(&self, name: &str) -> bool {
+        self.find_local(name).is_some()
+            || self.captures.iter().any(|capture| capture.name == name)
+            || self
+                .capture_sources
+                .iter()
+                .any(|source| source.name == name)
     }
 
     fn find_capture_or_add(&mut self, name: &str) -> Option<CaptureId> {
@@ -7868,10 +7865,10 @@ impl Lowering {
                 {
                     return self.lower_collection_call(ctx, *id, function, args, keywords, *span);
                 }
-                let callable_value = ctx
-                    .find_local(callee)
-                    .is_some_and(|local| ctx.local_kind(local) == ValueKind::Callable)
-                    || ctx.capture_source_is_callable(callee);
+                // A local or captured binding shadows a module-level
+                // definition of its name: the call is a call through its
+                // value.
+                let callable_value = ctx.binds_lexically(callee);
                 if !callable_value && let Some(signature) = self.keyword_signature(callee).cloned()
                 {
                     return self
@@ -7909,8 +7906,16 @@ impl Lowering {
                     };
                 }
                 if let Some(target) = self.local_callable_target(ctx, callee, *span) {
+                    // A binding that names a function or generic statically
+                    // calls it as a call of its name does.
+                    if let ValueKind::KnownCallable(callable) = self.expr_kind(&target)
+                        && let Some(call) =
+                            self.lower_known_binding_call(ctx, *id, callable, args, keywords, *span)
+                    {
+                        return call;
+                    }
                     let lowered_args = args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
-                    return self.lower_callable_value_call(
+                    return self.lower_local_value_call(
                         ctx,
                         *id,
                         callee,
@@ -8238,6 +8243,8 @@ impl Lowering {
     /// Lexical bindings shadow module definitions, so `exit(42)` calls a
     /// block's exit procedure and `f(x)` calls a local closure. Locals of any
     /// other kind leave the name to module resolution.
+    /// The local or captured binding named `name`, read, when there is
+    /// one: a call of `name` calls its value.
     fn local_callable_target(
         &self,
         ctx: &mut FunctionContext,
@@ -8245,14 +8252,14 @@ impl Lowering {
         span: Span,
     ) -> Option<Expr> {
         if let Some(local) = ctx.find_local(name) {
-            return (ctx.local_kind(local) == ValueKind::Callable).then(|| Expr::Local {
+            return Some(Expr::Local {
                 local,
-                result_kind: ValueKind::Callable,
+                result_kind: ctx.local_kind(local),
                 callable_signature: ctx.local_callable_signature(local),
                 span,
             });
         }
-        if !ctx.capture_source_is_callable(name) {
+        if !ctx.binds_lexically(name) {
             return None;
         }
         let capture = ctx.find_capture_or_add(name)?;
@@ -9048,10 +9055,7 @@ impl Lowering {
     /// other than a built-in collection generic. Such a definition shadows
     /// a built-in collection generic of the same name.
     fn defines_callable(&self, ctx: &FunctionContext, name: &str) -> bool {
-        ctx.find_local(name)
-            .is_some_and(|local| ctx.local_kind(local) == ValueKind::Callable)
-            || ctx.capture_source_is_callable(name)
-            || self.shadows_collection_generic(name)
+        ctx.binds_lexically(name) || self.shadows_collection_generic(name)
     }
 
     /// Whether a module-level definition of `name` (a function, a host
@@ -9822,6 +9826,109 @@ impl Lowering {
             result_kinds: symbol.return_kinds.clone(),
             result_callable_sigs: symbol.return_callable_sigs.clone(),
             span,
+        }
+    }
+
+    /// Lowers a call of a binding whose value is statically `callable`, a
+    /// function or generic, as a call of the definition itself: the same
+    /// direct call or send, keywords and defaults included, that a call of
+    /// its name makes. Reading a binding has no effect to keep, and a
+    /// binding of that type always holds that definition. Returns `None`
+    /// for a slot accessor, which is called through its value.
+    fn lower_known_binding_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        callable: KnownCallable,
+        args: &[ast::Expr],
+        keywords: &[ast::KeywordArg],
+        span: Span,
+    ) -> Option<Expr> {
+        let name = match callable {
+            KnownCallable::DirectFunction(function) => {
+                self.functions.get(function.0 as usize)?.name.clone()
+            }
+            KnownCallable::GenericFunction(generic) => {
+                self.generic_symbols.get(generic.0 as usize)?.name.clone()
+            }
+            KnownCallable::SlotAccessor { .. } => return None,
+        };
+        if let Some(function) = self
+            .collection_generics
+            .iter()
+            .find(|(_, id)| matches!(callable, KnownCallable::GenericFunction(generic) if generic == *id))
+            .map(|(function, _)| *function)
+        {
+            return Some(self.lower_collection_call(ctx, id, function, args, keywords, span));
+        }
+        if let Some(signature) = self.keyword_signature(&name).cloned() {
+            return Some(self.lower_keyword_call(ctx, id, &name, &signature, args, keywords, span));
+        }
+        for keyword in keywords {
+            ctx.diagnostics
+                .push(Self::unexpected_keyword(&name, keyword));
+        }
+        let lowered = args
+            .iter()
+            .map(|arg| self.lower_expr(ctx, arg))
+            .collect::<Vec<_>>();
+        Some(match callable {
+            KnownCallable::DirectFunction(function) => {
+                let symbol = self.functions.get(function.0 as usize)?.clone();
+                self.lower_function_call(ctx, &symbol, lowered, &name, span)
+            }
+            KnownCallable::GenericFunction(generic) => {
+                let symbol = self.generic_symbols.get(generic.0 as usize)?.clone();
+                self.lower_generic_send(ctx, &symbol, lowered, &name, span)
+            }
+            KnownCallable::SlotAccessor { .. } => return None,
+        })
+    }
+
+    /// Lowers a call of a local or captured binding, `target` read, as a
+    /// call through its value, whatever module-level definition of the name
+    /// it shadows: a callable value, a function or generic it names
+    /// statically, or a generic-function object. A binding of any other
+    /// type cannot be called.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_local_value_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        callee: &str,
+        target: Expr,
+        args: Vec<Expr>,
+        keywords: &[ast::KeywordArg],
+        expected_results: Option<&[ValueKind]>,
+        span: Span,
+    ) -> Expr {
+        match self.expr_kind(&target) {
+            ValueKind::Callable | ValueKind::KnownCallable(_) => self.lower_callable_value_call(
+                ctx,
+                id,
+                callee,
+                target,
+                args,
+                keywords,
+                expected_results,
+                span,
+            ),
+            ValueKind::GenericFunctionObject(generic) => {
+                for keyword in keywords {
+                    ctx.diagnostics
+                        .push(Self::unexpected_keyword(callee, keyword));
+                }
+                self.lower_applied_generic_callable_call(ctx, target, generic, args, span)
+            }
+            ValueKind::Error => Expr::Error { span },
+            actual => {
+                ctx.diagnostics.push(
+                    Diagnostic::error(span, DiagnosticCode::LocalNotCallable)
+                        .with_arg(DiagnosticArg::text("local", callee.to_string()))
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                );
+                Expr::Error { span }
+            }
         }
     }
 

@@ -1,0 +1,22 @@
+// expect: run 33
+// expect: diagnostics 0
+// A local bound to a function or generic is called by its name, as Dylan
+// calls any binding: the call is the definition's own direct call or send,
+// keywords and defaults included, since the binding always holds it.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2, plus :: <integer> = 1) => <integer>
+  x * by + plus
+end;
+
+define generic area (s) => <integer>;
+
+define method area (s :: <integer>) => <integer>
+  s * s
+end;
+
+define function main() => <integer>
+  let f = scale;
+  let g = area;
+  // 7 + 14 + 9 + 3
+  f(3) + f(3, plus: 2, by: 4) + g(3) + 3
+end;

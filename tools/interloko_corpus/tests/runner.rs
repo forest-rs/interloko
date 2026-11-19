@@ -173,7 +173,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/generics/sends_in_handlers.loko"));
     assert!(out.contains("ok pass/keywords/evaluation_order.loko"));
     assert!(out.contains("ok pass/keywords/keyword_function_as_value.loko"));
-    assert!(out.contains("corpus: 640 passed, 0 failed, 640 total"));
+    assert!(out.contains("corpus: 646 passed, 0 failed, 646 total"));
 }
 
 #[test]

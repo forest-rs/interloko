@@ -259,7 +259,13 @@ The current slices include:
   A callable is `==` itself boxed or not, and two values of the same
   function with nothing captured, such as two mentions of one function,
   are `==`. Like a callable in a slot, a boxed one holds its environment
-  only for the invocation that made it;
+  only for the invocation that made it. A local, parameter or captured
+  binding is called by its name, as in Dylan, and shadows any module-level
+  definition of that name: `let f = scale; f(3, by: 2)` calls `scale`
+  directly, keywords and defaults included, since the binding always
+  holds it, while a `<function>`, `<callable>` or typed callable binding
+  is called through its value, typed when its signature is known. Calling
+  a binding whose value is not callable is an error;
 - identity: `a == b` is Dylan's `==`, defined on any two objects, never
   dispatching and not user-definable; `=` stays the equality of numbers,
   strings, symbols and types. Heap objects are `==` when they are the same
