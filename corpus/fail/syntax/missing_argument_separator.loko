@@ -1,6 +1,6 @@
 // expect: diagnostics 1
 // expect: diagnostic code syntax.expected-token
-// expect: diagnostic contains expected `,` or `)`
+// expect: diagnostic contains expected `(` or `,` or `)`
 
 // A syntax error is reported where the source stopped matching, at the
 // `2` here, naming what could have come there, rather than as the

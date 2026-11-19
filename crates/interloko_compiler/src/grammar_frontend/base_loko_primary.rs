@@ -1279,6 +1279,26 @@ impl BaseLokoCstProjector<'_> {
                 );
                 continue;
             }
+            if access.is_rule("call-arguments") {
+                // `f(1)(2)` calls the value `f(1)` answers.
+                let start = folded.span.start;
+                let mut children = vec![CstElement::Node(folded)];
+                let arg_list = access
+                    .children
+                    .iter()
+                    .find(|child| child.is_rule("argument-list"))
+                    .map(|args| self.build_argument_list(args));
+                let excluded = arg_list
+                    .as_ref()
+                    .map_or_else(Vec::new, |args| vec![args.span]);
+                children.extend(self.direct_tokens(access.span, &excluded));
+                if let Some(arg_list) = arg_list {
+                    children.push(CstElement::Node(arg_list));
+                }
+                let span = Span::new(start, Span::from(access.span).end);
+                folded = self.node(CstKind::ValueCallExpr, self.sorted(children), span);
+                continue;
+            }
             if !access.is_rule("member-name") {
                 continue;
             }

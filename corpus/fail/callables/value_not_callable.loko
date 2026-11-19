@@ -1,0 +1,10 @@
+// expect: diagnostic code sem.value-not-callable
+// expect: diagnostic contains a value of type <integer> cannot be called
+// expect: diagnostics 1
+
+// A call's operand whose type can never be a function cannot be called.
+
+define function main() => <integer>
+  let n = 3;
+  (n + 1)(4)
+end;

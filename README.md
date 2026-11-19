@@ -422,7 +422,13 @@ The current slices include:
   `scale` directly, keywords and defaults included, since the binding
   always holds it, while a `<function>`, `<callable>` or typed callable
   binding is called through its value, typed when its signature is known.
-  Calling a binding whose value is not callable is an error;
+  Calling a binding whose value is not callable is an error. As in
+  Dylan, any operand can be called, not just a name: `f(1)(2)`,
+  `node.operator.apply(x)` and `table[k](x)` evaluate the operand, then
+  the arguments, and call its value, typed when its signature is known.
+  An `<object>` operand is checked to be a `<function>` as a declaration
+  would check it (`type-error.cast`) and called through its boxed entry,
+  and an operand whose type can never be a function is an error;
 - identity: `a == b` is Dylan's `==`, defined on any two objects, never
   dispatching and not user-definable; `=` stays the equality of numbers,
   characters, strings, symbols and types. Heap objects are `==` when they

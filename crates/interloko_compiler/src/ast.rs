@@ -811,6 +811,22 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Call of the value an operand evaluates to, as Dylan calls any
+    /// operand: `f(1)(2)`, `node.operator.apply(x)`, `table[k](x)`. A call
+    /// of a name is [`Self::Call`].
+    ValueCall {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// The operand whose value is called, evaluated before the
+        /// arguments.
+        callee: Box<Expr>,
+        /// Positional argument expressions.
+        args: Vec<Expr>,
+        /// Keyword arguments, such as `default: 0`, in source order.
+        keywords: Vec<KeywordArg>,
+        /// Source span.
+        span: Span,
+    },
     /// Recoverable condition signal.
     Signal {
         /// Stable-ish AST node identity.
@@ -1161,6 +1177,16 @@ impl Expr {
                 args.iter().for_each(&mut visit);
                 keywords.iter().for_each(|keyword| visit(&keyword.value));
             }
+            Self::ValueCall {
+                callee,
+                args,
+                keywords,
+                ..
+            } => {
+                visit(callee);
+                args.iter().for_each(&mut visit);
+                keywords.iter().for_each(|keyword| visit(&keyword.value));
+            }
             Self::MakeObject { class, fields, .. } => {
                 visit(class);
                 fields.iter().for_each(|field| visit(&field.value));
@@ -1284,6 +1310,7 @@ impl Expr {
             | Self::InstanceOf { id, .. }
             | Self::Cast { id, .. }
             | Self::Call { id, .. }
+            | Self::ValueCall { id, .. }
             | Self::Signal { id, .. }
             | Self::MakeObject { id, .. }
             | Self::SlotRead { id, .. }
@@ -1324,6 +1351,7 @@ impl Expr {
             | Self::InstanceOf { span, .. }
             | Self::Cast { span, .. }
             | Self::Call { span, .. }
+            | Self::ValueCall { span, .. }
             | Self::Signal { span, .. }
             | Self::MakeObject { span, .. }
             | Self::SlotRead { span, .. }
@@ -2281,6 +2309,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::CallExpr => self.lower_call(node),
             CstKind::SlotExpr => self.lower_slot_read(node),
             CstKind::IndexExpr => self.lower_index(node),
+            CstKind::ValueCallExpr => self.lower_value_call(node),
             CstKind::SlotAssignExpr => self.lower_slot_assign(node),
             CstKind::UnaryExpr => self.lower_unary(node),
             CstKind::BinaryExpr => self.lower_binary(node),
@@ -2749,6 +2778,42 @@ impl<'tree> Lowering<'tree> {
         if text == "limited" {
             return self.lower_type_literal(node);
         }
+        let (args, keywords) = self.lower_arguments(node);
+        Expr::Call {
+            id: self.ast_id(node),
+            callee: text.to_string(),
+            args,
+            keywords,
+            span: node.span.cover(name_span),
+        }
+    }
+
+    /// Lowers a call of an operand's value, `f(1)(2)`.
+    fn lower_value_call(&mut self, node: &CstNode) -> Expr {
+        let Some(callee) = node.children.iter().find_map(|child| match child {
+            CstElement::Node(expr) if expr.kind != CstKind::ArgList && !expr.kind.is_role() => {
+                Some(expr)
+            }
+            _ => None,
+        }) else {
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        let callee = self.lower_expr(callee);
+        let (args, keywords) = self.lower_arguments(node);
+        Expr::ValueCall {
+            id: self.ast_id(node),
+            callee: Box::new(callee),
+            args,
+            keywords,
+            span: node.span,
+        }
+    }
+
+    /// The positional and keyword arguments of the call `node`.
+    fn lower_arguments(&mut self, node: &CstNode) -> (Vec<Expr>, Vec<KeywordArg>) {
         let mut args = Vec::new();
         let mut keywords = Vec::new();
         for arg_list in node.child_nodes(CstKind::ArgList) {
@@ -2762,13 +2827,7 @@ impl<'tree> Lowering<'tree> {
                 }
             }
         }
-        Expr::Call {
-            id: self.ast_id(node),
-            callee: text.to_string(),
-            args,
-            keywords,
-            span: node.span.cover(name_span),
-        }
+        (args, keywords)
     }
 
     /// Lowers `collection[key]` to Dylan's `element(collection, key)`.

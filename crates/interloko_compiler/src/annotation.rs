@@ -555,6 +555,20 @@ fn collect_expr(expr: &ast::Expr, binders: &mut Vec<Binder>) {
                 collect_expr(&keyword.value, binders);
             }
         }
+        Expr::ValueCall {
+            callee,
+            args,
+            keywords,
+            ..
+        } => {
+            collect_expr(callee, binders);
+            for arg in args {
+                collect_expr(arg, binders);
+            }
+            for keyword in keywords {
+                collect_expr(&keyword.value, binders);
+            }
+        }
         Expr::Signal { condition, .. } => collect_expr(condition, binders),
         Expr::MakeObject { class, fields, .. } => {
             collect_expr(class, binders);

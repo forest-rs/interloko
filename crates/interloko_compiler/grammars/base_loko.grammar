@@ -109,9 +109,10 @@ rule power-expression = unary-expression (`^` power-expression)?
 rule unary-expression = negative-expression | not-expression | postfix-expression
 rule negative-expression = `-` unary-expression
 rule not-expression = `~` unary-expression
-rule postfix-expression = primary-expression (`.` member-name | index-access)*
+rule postfix-expression = primary-expression (`.` member-name | index-access | call-arguments)*
 rule member-name = name
 rule index-access = `[` expression `]`
+rule call-arguments = `(` argument-list? `)`
 // As in Dylan, a statement is an operand: `x + if (c) 1 else 2 end`.
 rule primary-expression = statement | method-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | name-expression
 rule statement = handle-expression | block-expression | begin-expression | while-expression | until-expression | for-expression | if-expression | unless-expression | case-expression | select-expression

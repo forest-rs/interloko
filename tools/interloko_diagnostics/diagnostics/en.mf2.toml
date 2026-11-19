@@ -98,6 +98,7 @@
 "sem.duplicate-keyword-argument" = "`{ $keyword }:` is given more than once"
 "sem.keyword-argument-type-mismatch" = "`{ $callee }` keyword `{ $keyword }:` expects { $expected } but got { $actual }"
 "sem.local-not-callable" = "`{ $local }` is a local of type { $actual }, which cannot be called; a local shadows any function of its name"
+"sem.value-not-callable" = "a value of type { $actual } cannot be called"
 "sem.reserved-name" = "`{ $name }` is reserved: it is the kernel constant a keyword declared without a default takes when a call does not pass it"
 "sem.keyword-parameter-needs-default" = "`#key { $keyword }` of type { $type } needs a default: only an `<object>` keyword can go without one, taking `$unsupplied` when a call does not pass it"
 "sem.method-keyword-not-in-generic" = "`#key { $keyword }` is not a keyword of `{ $generic }`: a method takes only keywords its generic declares"
