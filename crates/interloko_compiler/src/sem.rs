@@ -29,6 +29,12 @@ pub use interloko_model::{
 };
 pub use interloko_runtime::FloatFunction;
 
+/// The diagnostic for a definition of `name`, which the kernel reserves.
+fn reserved_name(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(span, DiagnosticCode::ReservedName)
+        .with_arg(DiagnosticArg::text("name", name.to_string()))
+}
+
 /// Durable direct function identifier within a semantic module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct FunctionId(
@@ -4306,11 +4312,16 @@ pub fn lower(module: &ast::Module) -> Module {
 /// Lowers an AST module with host-backed metaobject declarations.
 #[must_use]
 pub fn lower_with_host_registry(module: &ast::Module, registry: &HostMetaRegistry) -> Module {
+    let host_functions = registry
+        .functions
+        .iter()
+        .map(|function| function.name.as_str())
+        .collect::<Vec<_>>();
     let keywords::Desugared {
         module,
         functions,
         generics,
-    } = keywords::desugar(module);
+    } = keywords::desugar(module, &host_functions);
     let mut lowering = Lowering::new(&module, registry, functions, generics);
     lowering.lower_module(&module)
 }
@@ -4733,6 +4744,9 @@ impl FunctionContext {
         span: Span,
     ) -> LocalId {
         let id = LocalId(u32::try_from(self.locals.len()).unwrap_or(u32::MAX));
+        if name == keywords::UNSUPPLIED {
+            self.diagnostics.push(reserved_name(&name, span));
+        }
         self.locals.push(Local {
             id,
             definition,
@@ -6369,10 +6383,13 @@ impl Lowering {
 
     fn collect_functions(&mut self, module: &ast::Module) {
         for (index, function) in module.functions.iter().enumerate() {
-            if let Some(previous) = self
-                .functions
-                .iter()
-                .find(|symbol| symbol.name == function.name)
+            // A default function is duplicated with its owner, already
+            // reported.
+            if !keywords::is_default_function(&function.name)
+                && let Some(previous) = self
+                    .functions
+                    .iter()
+                    .find(|symbol| symbol.name == function.name)
             {
                 self.diagnostics.push(
                     Diagnostic::error(function.span, DiagnosticCode::DuplicateDefinition)
@@ -6432,6 +6449,10 @@ impl Lowering {
 
     fn collect_constant_symbols(&mut self, module: &ast::Module) {
         for (index, constant) in module.constants.iter().enumerate() {
+            if constant.name == keywords::UNSUPPLIED {
+                self.diagnostics
+                    .push(reserved_name(&constant.name, constant.span));
+            }
             if let Some(previous) = self.resolve_constant(&constant.name) {
                 self.diagnostics.push(
                     Diagnostic::error(constant.span, DiagnosticCode::DuplicateDefinition)
@@ -6640,6 +6661,16 @@ impl Lowering {
             diagnostics: self.diagnostics.clone(),
         };
         check_collection_method_overrides(&mut lowered);
+        // A keyword's default function restates its owner's parameter types,
+        // so a problem with one is found once per default: report it once.
+        let mut seen = Vec::with_capacity(lowered.diagnostics.len());
+        lowered.diagnostics.retain(|diagnostic| {
+            let first = !seen.contains(diagnostic);
+            if first {
+                seen.push(diagnostic.clone());
+            }
+            first
+        });
         // Numbered once the bodies are final, so the result-inference
         // fixpoint above cannot shift them.
         assign_check_sites(&mut lowered);
@@ -6844,16 +6875,16 @@ impl Lowering {
             let generic_range = generic_symbol
                 .as_ref()
                 .and_then(|symbol| symbol.param_ranges.get(index).copied().flatten());
-            let (mut specializer, kind) =
-                self.resolve_method_specializer(param, generic_kind, generic_range);
-            // A keyword parameter has its generic's type, which the keyword
-            // pass checked, and dispatch does not look at it.
+            // A keyword parameter has its generic's type, and dispatch does
+            // not look at it.
             let keyword = generic_symbol
                 .as_ref()
                 .is_some_and(|symbol| index >= self.keyword_start(&symbol.name, symbol.arity()));
-            if keyword {
-                specializer = Some(OBJECT_CLASS_ID);
-            }
+            let (specializer, kind) = if keyword {
+                self.method_keyword_kind(&mut ctx, method, param, generic_kind, generic_range)
+            } else {
+                self.resolve_method_specializer(param, generic_kind, generic_range)
+            };
             // A specializer that did not resolve has been reported already.
             if let Some(expected) = generic_kind
                 && !keyword
@@ -7594,6 +7625,10 @@ impl Lowering {
                 span,
                 ..
             } => self.lower_closure_expr(ctx, params, return_type.as_ref(), body, *span),
+            // `$unsupplied` is reserved, so it always means the kernel's.
+            ast::Expr::Name { name, span, .. } if name == keywords::UNSUPPLIED => {
+                self.unsupplied(*span)
+            }
             ast::Expr::Name { name, span, .. } => match ctx.find_local(name) {
                 Some(local) => Expr::Local {
                     local,
@@ -8062,9 +8097,6 @@ impl Lowering {
                 callable_signature: symbol.callable_signature.clone(),
                 span,
             };
-        }
-        if name == keywords::UNSUPPLIED {
-            return self.unsupplied(span);
         }
         // Calls through callable values pass no keywords yet.
         let kernel_keywords = self.resolve_generic(name).is_some_and(|symbol| {
@@ -8644,6 +8676,12 @@ impl Lowering {
         value: Expr,
         span: Span,
     ) -> Expr {
+        // A read has its value's span, so a check of the argument points
+        // at what the call passed.
+        let read_span = match &value {
+            Expr::DirectCall { .. } => span,
+            value => value.span(),
+        };
         let binding = self.bind_hidden_local(ctx, id, name, value, span);
         let local = binding.local;
         lets.push(binding);
@@ -8651,7 +8689,7 @@ impl Lowering {
             local,
             result_kind: ctx.local_kind(local),
             callable_signature: ctx.local_callable_signature(local),
-            span,
+            span: read_span,
         }
     }
 
@@ -12554,6 +12592,42 @@ impl Lowering {
     /// (or, for `limited(<integer>, ...)`, a wider range); it then
     /// specializes on `<integer>`. Unlike Dylan, methods do not dispatch on
     /// ranges.
+    /// Resolves the type of a method's keyword parameter `param`, reporting
+    /// one that is not its generic's, of kind `generic_kind` and range
+    /// `generic_range`. Its specializer is `<object>`: dispatch does not
+    /// look at keywords.
+    fn method_keyword_kind(
+        &mut self,
+        ctx: &mut FunctionContext,
+        method: &ast::Method,
+        param: &ast::MethodParam,
+        generic_kind: Option<ValueKind>,
+        generic_range: Option<IntRange>,
+    ) -> (MethodSpecializer, ValueKind) {
+        let Some(written) = &param.specializer else {
+            return (Some(OBJECT_CLASS_ID), ValueKind::Error);
+        };
+        let resolved = self.resolve_type_annotation_detail(written);
+        let expected = generic_kind.unwrap_or(ValueKind::Any);
+        if resolved.kind != ValueKind::Error
+            && generic_kind != Some(ValueKind::Error)
+            && (resolved.kind != expected || resolved.range != generic_range)
+        {
+            ctx.diagnostics.push(
+                Diagnostic::error(written.span(), DiagnosticCode::MethodKeywordTypeMismatch)
+                    .with_arg(DiagnosticArg::text("keyword", param.name.clone()))
+                    .with_arg(DiagnosticArg::text("generic", method.name.clone()))
+                    .with_arg(DiagnosticArg::text(
+                        "expected",
+                        generic_range.map_or_else(|| self.kind_name(expected), limited_type_name),
+                    ))
+                    .with_arg(DiagnosticArg::text("actual", written.to_string())),
+            );
+            return (Some(OBJECT_CLASS_ID), ValueKind::Error);
+        }
+        (Some(OBJECT_CLASS_ID), resolved.kind)
+    }
+
     fn resolve_method_specializer(
         &mut self,
         param: &ast::MethodParam,

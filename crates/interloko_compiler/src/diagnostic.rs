@@ -243,6 +243,8 @@ pub enum DiagnosticCode {
     UnexpectedKeywordArgument,
     /// A call passes the same keyword argument twice.
     DuplicateKeywordArgument,
+    /// A definition binds a name the kernel reserves, `$unsupplied`.
+    ReservedName,
     /// A keyword parameter of a type other than `<object>` declares no
     /// default, so a call that does not pass it has no value for it.
     KeywordParameterNeedsDefault,
@@ -466,6 +468,7 @@ impl DiagnosticCode {
         Self::AssignmentTargetNotAssignable,
         Self::UnexpectedKeywordArgument,
         Self::DuplicateKeywordArgument,
+        Self::ReservedName,
         Self::KeywordParameterNeedsDefault,
         Self::MethodKeywordNotInGeneric,
         Self::MethodKeywordDefault,
@@ -621,6 +624,7 @@ impl DiagnosticCode {
             Self::AssignmentTargetNotAssignable => "sem.assignment-target-not-assignable",
             Self::UnexpectedKeywordArgument => "sem.unexpected-keyword-argument",
             Self::DuplicateKeywordArgument => "sem.duplicate-keyword-argument",
+            Self::ReservedName => "sem.reserved-name",
             Self::KeywordParameterNeedsDefault => "sem.keyword-parameter-needs-default",
             Self::MethodKeywordNotInGeneric => "sem.method-keyword-not-in-generic",
             Self::MethodKeywordDefault => "sem.method-keyword-default",
@@ -777,6 +781,7 @@ impl DiagnosticCode {
             "sem.assignment-target-not-assignable" => Self::AssignmentTargetNotAssignable,
             "sem.unexpected-keyword-argument" => Self::UnexpectedKeywordArgument,
             "sem.duplicate-keyword-argument" => Self::DuplicateKeywordArgument,
+            "sem.reserved-name" => Self::ReservedName,
             "sem.keyword-parameter-needs-default" => Self::KeywordParameterNeedsDefault,
             "sem.method-keyword-not-in-generic" => Self::MethodKeywordNotInGeneric,
             "sem.method-keyword-default" => Self::MethodKeywordDefault,

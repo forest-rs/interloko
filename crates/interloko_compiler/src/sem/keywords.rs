@@ -122,8 +122,14 @@ pub struct Desugared<'a> {
 
 /// The keywords the kernel's built-in generic `name` takes, with their
 /// types, as a method of it declared in `module` at `span` sees them.
-fn kernel_keywords(module: &ast::Module, name: &str, span: Span) -> Vec<ast::KeywordParam> {
-    let shadowed = module.generics.iter().any(|generic| generic.name == name)
+fn kernel_keywords(
+    module: &ast::Module,
+    host_functions: &[&str],
+    name: &str,
+    span: Span,
+) -> Vec<ast::KeywordParam> {
+    let shadowed = host_functions.contains(&name)
+        || module.generics.iter().any(|generic| generic.name == name)
         || module
             .functions
             .iter()
@@ -197,16 +203,23 @@ fn default_function_name(owner: &str, keyword: &str) -> String {
     format!("{owner} #key {keyword}")
 }
 
+/// Whether `name` is a keyword's default function, which source cannot
+/// name: its owner reports what is wrong with it.
+#[must_use]
+pub fn is_default_function(name: &str) -> bool {
+    name.contains(" #key ")
+}
+
 /// The name a method gives a keyword of its generic that it does not bind.
 fn unbound_name(keyword: &str) -> String {
     format!("#key {keyword}")
 }
 
-/// Rewrites `module` into the keyword convention; see the module docs.
-/// Problems with keyword declarations are added to the module's
-/// diagnostics.
+/// Rewrites `module`, whose host defines `host_functions`, into the
+/// keyword convention; see the module docs. Problems with keyword
+/// declarations are added to the module's diagnostics.
 #[must_use]
-pub fn desugar(module: &ast::Module) -> Desugared<'_> {
+pub fn desugar<'a>(module: &'a ast::Module, host_functions: &[&str]) -> Desugared<'a> {
     let takes_keywords = module
         .functions
         .iter()
@@ -217,7 +230,7 @@ pub fn desugar(module: &ast::Module) -> Desugared<'_> {
             .any(|generic| !generic.keywords.is_empty())
         || module.methods.iter().any(|method| {
             !method.keywords.is_empty()
-                || !kernel_keywords(module, &method.name, method.span).is_empty()
+                || !kernel_keywords(module, host_functions, &method.name, method.span).is_empty()
         });
     if !takes_keywords {
         return Desugared {
@@ -238,13 +251,17 @@ pub fn desugar(module: &ast::Module) -> Desugared<'_> {
         let required = function.params.clone();
         let mut earlier = Vec::new();
         let mut slots = Vec::new();
+        let owner = Owner {
+            source_file: module.source_file,
+            name: &function.name,
+            strict: function.strict,
+        };
         for keyword in core::mem::take(&mut function.keywords) {
             let ty = keyword_type(&keyword);
             let default = keyword_default(
                 &mut out.diagnostics,
                 &mut defaults,
-                module.source_file,
-                &function.name,
+                &owner,
                 &keyword,
                 &ty,
                 required
@@ -298,13 +315,32 @@ pub fn desugar(module: &ast::Module) -> Desugared<'_> {
         let mut earlier = Vec::new();
         let mut slots = Vec::new();
         let keywords = core::mem::take(&mut generic.keywords);
-        for keyword in &keywords {
+        let owner = Owner {
+            source_file: module.source_file,
+            name: &generic.name,
+            strict: generic.strict,
+        };
+        for (index, keyword) in keywords.iter().enumerate() {
+            // A generic's parameters are not locals of a body, so nothing
+            // else reports a keyword named twice.
+            if generic
+                .params
+                .iter()
+                .any(|param| param.name == keyword.name)
+                || keywords[..index]
+                    .iter()
+                    .any(|earlier| earlier.name == keyword.name)
+            {
+                out.diagnostics.push(
+                    Diagnostic::error(keyword.span, DiagnosticCode::DuplicateLocal)
+                        .with_arg(DiagnosticArg::text("name", keyword.name.clone())),
+                );
+            }
             let ty = keyword_type(keyword);
             let default = keyword_default(
                 &mut out.diagnostics,
                 &mut defaults,
-                module.source_file,
-                &generic.name,
+                &owner,
                 keyword,
                 &ty,
                 required
@@ -347,19 +383,28 @@ pub fn desugar(module: &ast::Module) -> Desugared<'_> {
         {
             keywords.clone()
         } else {
-            kernel_keywords(module, &method.name, method.span)
+            kernel_keywords(module, host_functions, &method.name, method.span)
         };
         let bound = core::mem::take(&mut method.keywords);
-        for keyword in &bound {
-            let Some(generic_keyword) = declared.iter().find(|known| known.name == keyword.name)
-            else {
+        for (index, keyword) in bound.iter().enumerate() {
+            if bound[..index]
+                .iter()
+                .any(|earlier| earlier.name == keyword.name)
+            {
+                out.diagnostics.push(
+                    Diagnostic::error(keyword.span, DiagnosticCode::DuplicateLocal)
+                        .with_arg(DiagnosticArg::text("name", keyword.name.clone())),
+                );
+                continue;
+            }
+            if !declared.iter().any(|known| known.name == keyword.name) {
                 out.diagnostics.push(
                     Diagnostic::error(keyword.span, DiagnosticCode::MethodKeywordNotInGeneric)
                         .with_arg(DiagnosticArg::text("keyword", keyword.name.clone()))
                         .with_arg(DiagnosticArg::text("generic", method.name.clone())),
                 );
                 continue;
-            };
+            }
             if let Some(default) = &keyword.default {
                 out.diagnostics.push(
                     Diagnostic::error(default.span(), DiagnosticCode::MethodKeywordDefault)
@@ -367,27 +412,17 @@ pub fn desugar(module: &ast::Module) -> Desugared<'_> {
                         .with_arg(DiagnosticArg::text("generic", method.name.clone())),
                 );
             }
-            let expected = keyword_type(generic_keyword);
-            if let Some(written) = &keyword.type_annotation
-                && written.to_string() != expected.to_string()
-            {
-                out.diagnostics.push(
-                    Diagnostic::error(written.span(), DiagnosticCode::MethodKeywordTypeMismatch)
-                        .with_arg(DiagnosticArg::text("keyword", keyword.name.clone()))
-                        .with_arg(DiagnosticArg::text("generic", method.name.clone()))
-                        .with_arg(DiagnosticArg::text("expected", expected.to_string()))
-                        .with_arg(DiagnosticArg::text("actual", written.to_string())),
-                );
-            }
         }
         // A method takes every keyword of its generic, binding those it
-        // declares, under ids of its own.
+        // declares, under ids of its own. A bound keyword keeps the type it
+        // is written with, which semantic lowering checks is the generic's.
         for keyword in &declared {
-            let name = if bound.iter().any(|bound| bound.name == keyword.name) {
-                keyword.name.clone()
-            } else {
-                unbound_name(&keyword.name)
-            };
+            let written = bound.iter().find(|bound| bound.name == keyword.name);
+            let name =
+                written.map_or_else(|| unbound_name(&keyword.name), |_| keyword.name.clone());
+            let specializer = written
+                .and_then(|written| written.type_annotation.clone())
+                .unwrap_or_else(|| keyword_type(keyword));
             method.params.push(ast::MethodParam {
                 id: AstNodeId::generated(
                     module.source_file,
@@ -397,8 +432,8 @@ pub fn desugar(module: &ast::Module) -> Desugared<'_> {
                     method.span.end,
                 ),
                 name,
-                specializer: Some(keyword_type(keyword)),
-                span: keyword.span,
+                specializer: Some(specializer),
+                span: written.map_or(keyword.span, |written| written.span),
             });
         }
     }
@@ -411,13 +446,21 @@ pub fn desugar(module: &ast::Module) -> Desugared<'_> {
     }
 }
 
+/// The function or generic whose keyword defaults are being built.
+struct Owner<'a> {
+    source_file: SourceFileId,
+    name: &'a str,
+    /// Whether the owner is held to strict typing, which its defaults, part
+    /// of its source, are held to as well.
+    strict: bool,
+}
+
 /// Builds `keyword`'s default function of `owner`, taking `params`, when it
 /// has a default, and returns how a call fills it in.
 fn keyword_default(
     diagnostics: &mut Vec<Diagnostic>,
     defaults: &mut Vec<ast::Function>,
-    source_file: SourceFileId,
-    owner: &str,
+    owner: &Owner<'_>,
     keyword: &ast::KeywordParam,
     ty: &ast::TypeExpr,
     params: Vec<ast::FunctionParam>,
@@ -433,11 +476,11 @@ fn keyword_default(
         }
         return KeywordDefault::Unsupplied;
     };
-    let name = default_function_name(owner, &keyword.name);
+    let name = default_function_name(owner.name, &keyword.name);
     defaults.push(ast::Function {
         id: keyword.id,
         definition: DefinitionId::new(
-            source_file,
+            owner.source_file,
             DefinitionKind::Function,
             &name,
             "keyword-default",
@@ -455,7 +498,7 @@ fn keyword_default(
             result: default.clone(),
             span: default.span(),
         },
-        strict: false,
+        strict: owner.strict,
         span: keyword.span,
     });
     KeywordDefault::Function(name)
@@ -480,7 +523,7 @@ mod tests {
     #[test]
     fn a_module_without_keywords_is_borrowed() {
         let module = parse("define function f(x :: <integer>) => <integer>\n  x\nend;");
-        let out = desugar(&module);
+        let out = desugar(&module, &[]);
         assert!(matches!(out.module, Cow::Borrowed(_)));
         assert!(out.functions.is_empty() && out.generics.is_empty());
     }
@@ -491,7 +534,7 @@ mod tests {
             "define function f(x :: <integer>, #key by :: <integer> = 2, tag) => <integer>\n  \
              x\nend;",
         );
-        let out = desugar(&module);
+        let out = desugar(&module, &[]);
         let f = &out.module.functions[0];
         assert_eq!(param_names(&f.params), ["x", "by", "tag"]);
         assert!(f.keywords.is_empty());
@@ -529,7 +572,7 @@ mod tests {
              define method g(s :: <integer>, #key b) => <integer>\n  s\nend;\n\
              define method element(s :: <string>, k :: <integer>) => <object>\n  s\nend;",
         );
-        let out = desugar(&module);
+        let out = desugar(&module, &[]);
         let method = &out.module.methods[0];
         let names = method
             .params

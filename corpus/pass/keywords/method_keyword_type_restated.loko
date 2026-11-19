@@ -1,0 +1,14 @@
+// expect: run 3
+// expect: diagnostics 0
+// A method restates its generic's keyword type, compared as a type rather
+// than as text, so its bounds may come in either order.
+
+define generic g (s, #key k :: limited(<integer>, min: 0, max: 9) = 3) => <integer>;
+
+define method g (s :: <integer>, #key k :: limited(<integer>, max: 9, min: 0)) => <integer>
+  k
+end;
+
+define function main() => <integer>
+  g(1)
+end;

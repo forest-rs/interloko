@@ -1,0 +1,13 @@
+// expect: diagnostic code sem.duplicate-local
+// expect: diagnostics 1
+// A method binds each keyword once.
+
+define generic g (s, #key k) => <integer>;
+
+define method g (s :: <integer>, #key k, k) => <integer>
+  s
+end;
+
+define function main() => <integer>
+  g(1)
+end;

@@ -1,0 +1,16 @@
+// expect: diagnostic code typing.unproved-range
+// expect: run blocked
+// A keyword's default is part of its strict function's source, so it is
+// held to strict typing like the body.
+
+define function digit(n :: limited(<integer>, min: 0, max: 9)) => <integer>
+  n
+end;
+
+define strict function f(n :: <integer>, #key by :: <integer> = digit(n)) => <integer>
+  n + by
+end;
+
+define function main() => <integer>
+  f(3)
+end;
