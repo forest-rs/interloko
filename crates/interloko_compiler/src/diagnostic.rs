@@ -245,6 +245,8 @@ pub enum DiagnosticCode {
     DuplicateKeywordArgument,
     /// A definition binds a name the kernel reserves, `$unsupplied`.
     ReservedName,
+    /// A keyword argument has the wrong type for its keyword parameter.
+    KeywordArgumentTypeMismatch,
     /// A keyword parameter of a type other than `<object>` declares no
     /// default, so a call that does not pass it has no value for it.
     KeywordParameterNeedsDefault,
@@ -469,6 +471,7 @@ impl DiagnosticCode {
         Self::UnexpectedKeywordArgument,
         Self::DuplicateKeywordArgument,
         Self::ReservedName,
+        Self::KeywordArgumentTypeMismatch,
         Self::KeywordParameterNeedsDefault,
         Self::MethodKeywordNotInGeneric,
         Self::MethodKeywordDefault,
@@ -625,6 +628,7 @@ impl DiagnosticCode {
             Self::UnexpectedKeywordArgument => "sem.unexpected-keyword-argument",
             Self::DuplicateKeywordArgument => "sem.duplicate-keyword-argument",
             Self::ReservedName => "sem.reserved-name",
+            Self::KeywordArgumentTypeMismatch => "sem.keyword-argument-type-mismatch",
             Self::KeywordParameterNeedsDefault => "sem.keyword-parameter-needs-default",
             Self::MethodKeywordNotInGeneric => "sem.method-keyword-not-in-generic",
             Self::MethodKeywordDefault => "sem.method-keyword-default",
@@ -782,6 +786,7 @@ impl DiagnosticCode {
             "sem.unexpected-keyword-argument" => Self::UnexpectedKeywordArgument,
             "sem.duplicate-keyword-argument" => Self::DuplicateKeywordArgument,
             "sem.reserved-name" => Self::ReservedName,
+            "sem.keyword-argument-type-mismatch" => Self::KeywordArgumentTypeMismatch,
             "sem.keyword-parameter-needs-default" => Self::KeywordParameterNeedsDefault,
             "sem.method-keyword-not-in-generic" => Self::MethodKeywordNotInGeneric,
             "sem.method-keyword-default" => Self::MethodKeywordDefault,

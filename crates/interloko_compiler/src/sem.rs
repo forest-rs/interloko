@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::ast;
-use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
+use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticArgValue, DiagnosticCode};
 use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
 use crate::syntax::{self, Span};
@@ -28,6 +28,60 @@ pub use interloko_model::{
     OBJECT_CLASS_ID, SingleFloatBits, SlotId,
 };
 pub use interloko_runtime::FloatFunction;
+
+/// `call` after the hidden `let`s a keyword call evaluates its arguments
+/// into, when it needs any.
+fn with_lets(lets: Vec<Let>, call: Expr, span: Span) -> Expr {
+    if lets.is_empty() {
+        return call;
+    }
+    Expr::Block {
+        exit: None,
+        body: Box::new(Block {
+            statements: lets.into_iter().map(Statement::Let).collect(),
+            result: call,
+            span,
+        }),
+        cleanup: None,
+        span,
+    }
+}
+
+/// Rewrites each argument type mismatch in `diagnostics`, reported for a
+/// call of a callee taking `signature`'s keywords, that is about a keyword
+/// argument to name the keyword, rather than its parameter's position.
+fn name_keyword_mismatches(diagnostics: &mut [Diagnostic], signature: &KeywordSignature) {
+    for diagnostic in diagnostics {
+        if !matches!(
+            diagnostic.code,
+            DiagnosticCode::FunctionArgumentTypeMismatch
+                | DiagnosticCode::GenericArgumentTypeMismatch
+        ) {
+            continue;
+        }
+        let Some(position) = diagnostic.args.iter().find_map(|arg| match arg.value {
+            DiagnosticArgValue::Unsigned(index) if arg.name == "argument_index" => {
+                usize::try_from(index)
+                    .ok()?
+                    .checked_sub(1 + signature.required)
+            }
+            _ => None,
+        }) else {
+            continue;
+        };
+        let Some(slot) = signature.keywords.get(position) else {
+            continue;
+        };
+        diagnostic.code = DiagnosticCode::KeywordArgumentTypeMismatch;
+        for arg in &mut diagnostic.args {
+            match arg.name.as_str() {
+                "argument_index" => *arg = DiagnosticArg::text("keyword", slot.name.clone()),
+                "function" | "generic" => arg.name = "callee".into(),
+                _ => {}
+            }
+        }
+    }
+}
 
 /// The diagnostic for a definition of `name`, which the kernel reserves.
 fn reserved_name(name: &str, span: Span) -> Diagnostic {
@@ -8460,6 +8514,7 @@ impl Lowering {
             .iter()
             .map(|arg| self.lower_expr(ctx, arg))
             .collect::<Vec<_>>();
+        let first_diagnostic = ctx.diagnostics.len();
         let call = if let Some(symbol) = self.resolve_function(callee).cloned() {
             let kinds = symbol
                 .param_kinds
@@ -8497,19 +8552,10 @@ impl Lowering {
             None
         };
         ctx.hide_locals_from(scope);
+        name_keyword_mismatches(&mut ctx.diagnostics[first_diagnostic..], signature);
         match call {
             None => Expr::Error { span },
-            Some((lets, call)) if lets.is_empty() => call,
-            Some((lets, call)) => Expr::Block {
-                exit: None,
-                body: Box::new(Block {
-                    statements: lets.into_iter().map(Statement::Let).collect(),
-                    result: call,
-                    span,
-                }),
-                cleanup: None,
-                span,
-            },
+            Some((lets, call)) => with_lets(lets, call, span),
         }
     }
 
@@ -9109,20 +9155,10 @@ impl Lowering {
         let Some((lets, args)) = lowered else {
             return Expr::Error { span };
         };
+        let first_diagnostic = ctx.diagnostics.len();
         let send = self.lower_generic_send(ctx, &symbol, args, name, span);
-        if lets.is_empty() {
-            return send;
-        }
-        Expr::Block {
-            exit: None,
-            body: Box::new(Block {
-                statements: lets.into_iter().map(Statement::Let).collect(),
-                result: send,
-                span,
-            }),
-            cleanup: None,
-            span,
-        }
+        name_keyword_mismatches(&mut ctx.diagnostics[first_diagnostic..], &signature);
+        with_lets(lets, send, span)
     }
 
     /// The diagnostic for a keyword argument `callee` does not take.

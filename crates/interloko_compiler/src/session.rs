@@ -7773,13 +7773,12 @@ fn dump_ast(module: &ast::Module) -> String {
             generic.id,
             generic.definition,
             generic.name,
-            generic
-                .params
-                .iter()
-                .map(dump_generic_param)
-                .collect::<Vec<_>>()
-                .join(", ")
+            with_keywords(
+                generic.params.iter().map(dump_generic_param).collect(),
+                &generic.keywords
+            )
         );
+        dump_keyword_defaults(&mut out, &generic.keywords);
         if let Some(return_type) = &generic.return_type {
             indent_line(&mut out, 2);
             let _ = writeln!(out, "returns {}", dump_result_annotation(return_type));
@@ -7793,13 +7792,14 @@ fn dump_ast(module: &ast::Module) -> String {
                 Some(specializer) => format!("{} :: {specializer}", param.name),
                 None => format!("{} :: ", param.name),
             })
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>();
+        let params = with_keywords(params, &method.keywords);
         let _ = writeln!(
             out,
             "method {} {} {}({params})",
             method.id, method.definition, method.name
         );
+        dump_keyword_defaults(&mut out, &method.keywords);
         if let Some(return_type) = &method.return_type {
             indent_line(&mut out, 2);
             let _ = writeln!(out, "returns {}", dump_result_annotation(return_type));
@@ -7813,13 +7813,12 @@ fn dump_ast(module: &ast::Module) -> String {
             function.id,
             function.definition,
             function.name,
-            function
-                .params
-                .iter()
-                .map(dump_function_param)
-                .collect::<Vec<_>>()
-                .join(", ")
+            with_keywords(
+                function.params.iter().map(dump_function_param).collect(),
+                &function.keywords
+            )
         );
+        dump_keyword_defaults(&mut out, &function.keywords);
         if let Some(return_type) = &function.return_type {
             indent_line(&mut out, 2);
             let _ = writeln!(out, "returns {}", dump_result_annotation(return_type));
@@ -7827,6 +7826,38 @@ fn dump_ast(module: &ast::Module) -> String {
         dump_ast_block(&mut out, &function.body, 2);
     }
     out
+}
+
+/// `params` joined, then `#key` and `keywords`, as source writes a
+/// parameter list.
+fn with_keywords(mut params: Vec<String>, keywords: &[ast::KeywordParam]) -> String {
+    if let Some((first, rest)) = keywords.split_first() {
+        params.push(format!("#key {}", dump_keyword_param(first)));
+        params.extend(rest.iter().map(dump_keyword_param));
+    }
+    params.join(", ")
+}
+
+fn dump_keyword_param(keyword: &ast::KeywordParam) -> String {
+    let mut text = keyword.type_annotation.as_ref().map_or_else(
+        || keyword.name.clone(),
+        |annotation| format!("{} :: {}", keyword.name, dump_type_annotation(annotation)),
+    );
+    if keyword.default.is_some() {
+        text.push_str(" = ...");
+    }
+    text
+}
+
+/// Each keyword's default expression, under the definition line.
+fn dump_keyword_defaults(out: &mut String, keywords: &[ast::KeywordParam]) {
+    for keyword in keywords {
+        if let Some(default) = &keyword.default {
+            indent_line(out, 2);
+            let _ = writeln!(out, "#key {} default", keyword.name);
+            dump_ast_expr(out, default, 4);
+        }
+    }
 }
 
 fn dump_generic_param(param: &ast::GenericParam) -> String {

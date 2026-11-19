@@ -1,5 +1,7 @@
 // expect: run 15
 // expect: diagnostics 0
+// expect: dump ast contains area(s, #key scale :: <integer> = ...)
+// expect: dump ast contains area(s :: <sq>, #key scale :: <integer>)
 // A generic declares its keywords, types and defaults; a send fills the
 // defaults from it, and each method binds the keywords it uses. Dispatch
 // looks only at the required parameter.
