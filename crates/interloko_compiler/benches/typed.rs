@@ -95,7 +95,8 @@
 //! `<string>` by position: `s[p]`, a `<character>` compare and
 //! `next-position`, which decode the string's UTF-8 in tape code.
 //! `scan + digit?` tests each character with `digit?` instead, a runtime
-//! host call.
+//! host call. `string for` is the scan written `for (c in s)`, which goes
+//! through the `<string>` iteration protocol's callables.
 //!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
@@ -482,6 +483,15 @@ define function scanned(d :: <integer>) => <integer>
   n
 end;
 
+define function string-for(d :: <integer>) => <integer>
+  let s = \"let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = \";
+  let n = 0;
+  for (c in s)
+    if (as(<character>, c) = ' ') n := n + 1 end
+  end;
+  n
+end;
+
 define function scanned-digits(d :: <integer>) => <integer>
   let s = \"let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = \";
   let p = start-position(s);
@@ -590,6 +600,7 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("cell access", net("cell-looped", "looped")),
         ("character scan", net("scanned", "unlooped")),
         ("scan + digit?", net("scanned-digits", "unlooped")),
+        ("string for", net("string-for", "unlooped")),
         ("for iteration", net("for-looped", "unlooped")),
         ("vector element", net("vector-read", "vector-made")),
         ("vector for", net("vector-for", "vector-made")),
