@@ -181,7 +181,7 @@ The current slices include:
   so the key of each character indexes the string, and it has no element
   setter. Over a `<string>` typing knows, `for` steps positions itself and
   reads each character and the next position with one tape decode, binding
-  a `<character>`, about 60 ns per character; under an annotation a
+  a `<character>`, about 50 ns per character; under an annotation a
   character may not satisfy, it is cast as an `<object>` element would be,
   and typing warns that the cast always fails, which strict typing refuses.
   Over a string typing does not know, it goes through the protocol's
@@ -407,7 +407,8 @@ The current slices include:
   `end-position` read the string's UTF-8 in tape code, with no host call
   unless a position has no character there; the other operations are
   runtime host calls. A loop reading a character and stepping costs
-  about 87 ns per character. Normalization and grapheme clusters are
+  about 60 ns per character: `s[p]` followed by `next-position(s, p)`
+  decodes once when nothing between them can change `s` or `p`. Normalization and grapheme clusters are
   left to a library;
 - mutable collections, which live in the runtime's heap as instances do
   (a turn's stores into image collections are logged, undone if it aborts

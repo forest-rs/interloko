@@ -18,6 +18,10 @@
 //!   nothing else writes, is made once before the loop instead. A loop is a
 //!   backward jump to a label whose only entry from outside is the jump just
 //!   before it.
+//! - **Decode sharing.** `s[p]` (or `element(s, p, default:)`) followed by
+//!   `next-position(s, p)` decodes `p` once ([`super::DecodeShare`]), when
+//!   nothing between them writes `s` or `p` and nothing outside them can
+//!   reach the `next-position` without passing the read.
 //!
 //! Register reads and writes come from [`for_each_read`] and
 //! [`for_each_write`], and label references from [`for_each_label_ref`],
@@ -29,7 +33,7 @@ use alloc::vec::Vec;
 
 use execution_tape::program::Reg;
 
-use super::{BoxedEntry, Catch, Function, Instr, LabelId, ValueKind};
+use super::{BoxedEntry, Catch, DecodeShare, Function, Instr, LabelId, ValueKind};
 use crate::sem;
 
 /// Runs every peephole step over `function`.
@@ -37,6 +41,7 @@ pub(super) fn optimize(function: &mut Function) {
     thread_jumps(&mut function.instructions);
     coalesce_moves(function);
     hoist_loop_constants(function);
+    share_decodes(&mut function.instructions);
 }
 
 /// Calls `f` with every register `instr` reads.
@@ -548,6 +553,90 @@ fn coalesce_moves(function: &mut Function) {
     }
 }
 
+/// Pairs each character read with the first `next-position` of the same
+/// string and position registers that may use its decode.
+///
+/// The `next-position` may when every way to reach it passes the read with
+/// `s` and `p` unchanged since. In layout order the read comes first; no
+/// instruction between them writes `s` or `p`; and no label between them,
+/// the `next-position`'s own block included, is referred to from outside
+/// the stretch from the read to the `next-position`, so control enters that
+/// stretch only through the read. The read's decode stays valid however
+/// often the stretch loops within itself, as `s` and `p` do not change.
+///
+/// Exceptional control counts as a reference too: a region's catch targets
+/// are labels its `EnterRegion` names. That relies on regions being lexical,
+/// as lowering emits them, so a jump never lands in the middle of one.
+fn share_decodes(instructions: &mut [Instr]) {
+    let positions: BTreeMap<u32, usize> = instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, instr)| defined_label(instr).map(|label| (label.0, index)))
+        .collect();
+    let mut pairs = Vec::new();
+    for (read, instr) in instructions.iter().enumerate() {
+        let Instr::TextCall {
+            function: sem::TextFunction::StringElement | sem::TextFunction::StringElementOr,
+            args,
+            share: None,
+            ..
+        } = instr
+        else {
+            continue;
+        };
+        let (string, position) = (args[0], args[1]);
+        let Some(next) = (read + 1..instructions.len()).find_map(|index| {
+            let candidate = &instructions[index];
+            if let Instr::TextCall {
+                function: sem::TextFunction::NextPosition,
+                args,
+                share: None,
+                ..
+            } = candidate
+                && args.as_slice() == [string, position]
+            {
+                return Some(Some(index));
+            }
+            let mut writes = false;
+            for_each_write(candidate, |reg| writes |= reg == string || reg == position);
+            // A write ends the search: no later `next-position` may share.
+            writes.then_some(None)
+        }) else {
+            continue;
+        };
+        let Some(next) = next else {
+            continue;
+        };
+        let stretch = read..=next;
+        let entered_from_outside = instructions.iter().enumerate().any(|(index, instr)| {
+            if stretch.contains(&index) {
+                return false;
+            }
+            let mut enters = false;
+            for_each_label_ref(instr, |label| {
+                enters |= positions
+                    .get(&label.0)
+                    .is_some_and(|at| *at > read && *at <= next);
+            });
+            enters
+        });
+        if !entered_from_outside && !pairs.iter().any(|(_, used)| *used == next) {
+            pairs.push((read, next));
+        }
+    }
+    for (slot, (read, next)) in pairs.into_iter().enumerate() {
+        let slot = u32::try_from(slot).unwrap_or(u32::MAX);
+        for (index, share) in [
+            (read, DecodeShare::Keeps(slot)),
+            (next, DecodeShare::Uses(slot)),
+        ] {
+            if let Instr::TextCall { share: field, .. } = &mut instructions[index] {
+                *field = Some(share);
+            }
+        }
+    }
+}
+
 /// Moves constants made inside a loop to just before it.
 fn hoist_loop_constants(function: &mut Function) {
     // Hoisting out of an inner loop may expose the constant to an outer
@@ -925,5 +1014,112 @@ mod tests {
             assert!(in_loop.contains(&1), "{in_loop:?}");
             let _ = kept;
         }
+    }
+
+    fn text_call(dst: u32, function: sem::TextFunction) -> Instr {
+        Instr::TextCall {
+            dst: reg(dst),
+            function,
+            args: vec![reg(1), reg(2)],
+            check: None,
+            share: None,
+            span: SPAN,
+        }
+    }
+
+    fn shares(instructions: &[Instr]) -> Vec<Option<DecodeShare>> {
+        instructions
+            .iter()
+            .filter_map(|instr| match instr {
+                Instr::TextCall { share, .. } => Some(*share),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_next_position_reached_only_through_the_read_shares_its_decode() {
+        let pair = || {
+            vec![
+                text_call(3, sem::TextFunction::StringElement),
+                Instr::Jump {
+                    label: label(1),
+                    span: SPAN,
+                },
+                Instr::Label { label: label(1) },
+                text_call(4, sem::TextFunction::NextPosition),
+            ]
+        };
+        let mut shared = pair();
+        share_decodes(&mut shared);
+        assert_eq!(
+            shares(&shared),
+            [Some(DecodeShare::Keeps(0)), Some(DecodeShare::Uses(0))]
+        );
+
+        // A branch before the read reaches the `next-position` past it.
+        let mut entered = pair();
+        entered.insert(
+            0,
+            Instr::Branch {
+                cond: reg(5),
+                then_label: label(1),
+                else_label: label(1),
+                span: SPAN,
+            },
+        );
+        share_decodes(&mut entered);
+        assert_eq!(shares(&entered), [None, None]);
+
+        // A write to the position between them.
+        let mut written = pair();
+        written.insert(
+            1,
+            Instr::ConstI64 {
+                dst: reg(2),
+                value: 0,
+                span: SPAN,
+            },
+        );
+        share_decodes(&mut written);
+        assert_eq!(shares(&written), [None, None]);
+
+        // A region opened before the read catches into the stretch.
+        let mut caught = pair();
+        caught.insert(
+            0,
+            Instr::EnterRegion {
+                catches: vec![Catch::All { target: label(1) }],
+            },
+        );
+        share_decodes(&mut caught);
+        assert_eq!(shares(&caught), [None, None]);
+    }
+
+    #[test]
+    fn a_loop_inside_the_stretch_keeps_the_pair() {
+        // The read, then a loop that jumps back within the stretch, then the
+        // `next-position`: every way in passes the read.
+        let mut instructions = vec![
+            text_call(3, sem::TextFunction::StringElement),
+            Instr::Jump {
+                label: label(1),
+                span: SPAN,
+            },
+            Instr::Label { label: label(1) },
+            Instr::Branch {
+                cond: reg(5),
+                then_label: label(1),
+                else_label: label(2),
+                span: SPAN,
+            },
+            Instr::Label { label: label(2) },
+            text_call(4, sem::TextFunction::NextPosition),
+        ];
+        share_decodes(&mut instructions);
+        assert_eq!(
+            shares(&instructions),
+            [Some(DecodeShare::Keeps(0)), Some(DecodeShare::Uses(0))]
+        );
     }
 }

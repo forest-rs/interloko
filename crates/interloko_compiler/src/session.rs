@@ -23952,6 +23952,80 @@ end;
     }
 
     #[test]
+    fn a_shared_decode_signals_where_each_read_would() {
+        // `s[p]` and `next-position(s, p)` share one decode. Where `p` has a
+        // character both answer from it; where it has none each still
+        // signals, and each `use-value` replacement is read. In "é!", offset
+        // 1 is inside `é` and 3 is the end.
+        let cases: [(&str, &str, &[i64], i64); 3] = [
+            ("start-position(s)", "s[p]", &[], 2000 + 0xE9),
+            ("position-at(\"abc\", 1)", "s[p]", &[0, 0], 2000 + 0xE9),
+            (
+                "end-position(s)",
+                "element(s, p, default: 'd')",
+                &[0],
+                2000 + i64::from(b'd'),
+            ),
+        ];
+        for (position, read, replacements, expected) in cases {
+            let source = format!(
+                "define function main() => <integer>\n  let s = \"\u{e9}!\";\n  \
+                 let p = {position};\n  let c = {read};\n  \
+                 byte-offset(next-position(s, p)) * 1000 + as(<integer>, c)\nend;"
+            );
+            let artifacts =
+                CompilerSession::compile_source("shared.loko", &source, RuntimeMode::CompileOnly);
+            assert_eq!(artifacts.diagnostics, Vec::new(), "{read} at {position}");
+            for policy in lower::CodegenPolicy::ALL {
+                let artifacts = artifacts.with_codegen_policy(*policy);
+                let lowered = artifacts.dump_stage(DumpStage::Lowered);
+                assert!(
+                    lowered.contains("keeps decode#0") && lowered.contains("uses decode#0"),
+                    "{read} at {position} under {policy:?}:\n{lowered}"
+                );
+                let mut breaks = 0;
+                let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                    let report = condition.type_error().expect("a type error");
+                    assert_eq!(report.kind(), Some(TypeErrorKind::Range));
+                    breaks += 1;
+                    Choice::UseValue(vec![Value::I64(replacements[breaks - 1])])
+                });
+                assert_eq!(
+                    call_with_chooser(&artifacts, &mut chooser).expect("resumes"),
+                    FunctionValue::Integer(expected),
+                    "{read} at {position} under {policy:?}"
+                );
+                assert_eq!(
+                    breaks,
+                    replacements.len(),
+                    "{read} at {position} under {policy:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_position_written_between_reads_is_decoded_again() {
+        let artifacts = CompilerSession::compile_source(
+            "unshared.loko",
+            "define function main() => <integer>\n  let s = \"ab\";\n  \
+             let p = start-position(s);\n  let c = s[p];\n  p := next-position(s, p);\n  \
+             byte-offset(next-position(s, p)) * 1000 + as(<integer>, c)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let lowered = artifacts.dump_stage(DumpStage::Lowered);
+        // The first `next-position` shares the read's decode; the second, after
+        // `p` changed, decodes on its own.
+        assert_eq!(lowered.matches("uses decode#").count(), 1, "{lowered}");
+        let mut chooser = Scripted(|_: &UnhandledCondition<'_>| panic!("no read signals"));
+        assert_eq!(
+            call_with_chooser(&artifacts, &mut chooser).expect("runs"),
+            FunctionValue::Integer(2000 + i64::from(b'a'))
+        );
+    }
+
+    #[test]
     fn string_reads_agree_with_the_runtime_at_every_position() {
         // A read is made at an offset inside `é`, which signals; the
         // `use-value` replacement is the position under test, decoded in
