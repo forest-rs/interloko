@@ -438,6 +438,42 @@ fn a_join_that_only_adds_citations_keeps_the_cause_it_explains() {
 }
 
 #[test]
+fn a_method_parameter_typed_by_its_expected_signature_is_cited_as_such() {
+    // `a` and `b` write no type and take `<integer>` from the signature
+    // `fold` expects. The overflow of `a + b` stays at run time because
+    // neither is written, and the report says where their type came from.
+    let artifacts = compile(
+        "define function fold(f :: callable(<integer>, <integer>) => <integer>) => <integer>\n  \
+         f(1, 2)\nend;\n\
+         define function main() => <integer>\n  fold(method (a, b) a + b end)\nend;\n",
+    );
+    assert_eq!(artifacts.diagnostics, Vec::new());
+    let main = report(&artifacts, "main", ClaimDetail::Full);
+    let overflow = main
+        .residual_sites()
+        .find(|site| site.check == TypingCheck::Overflow)
+        .and_then(|site| site.residual.as_ref())
+        .unwrap_or_else(|| panic!("no unproved overflow in\n{}", main.render()));
+    assert_eq!(overflow.cause, ResidualCause::UnannotatedInput);
+    assert!(
+        overflow.explanation.contains(
+            "the type the callable signature expected of its method gives it (<integer>)"
+        ),
+        "{}",
+        overflow.explanation
+    );
+    assert!(
+        overflow
+            .input
+            .as_ref()
+            .is_some_and(|input| input.to_string().ends_with(":a")),
+        "{}",
+        main.render()
+    );
+    assert!(main.render().contains("expected(c0)"), "{}", main.render());
+}
+
+#[test]
 fn a_boxed_number_conversion_is_reported_as_the_conversion_it_is() {
     // The class tests an `as` of a boxed number makes to pick its
     // conversion are the `as`'s own, reported as such, not as `instance?`

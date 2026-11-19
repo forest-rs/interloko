@@ -1,0 +1,66 @@
+// expect: run 293
+// expect: diagnostics 0
+// expect: dump sem contains closure c0 (x:integer) captures=0 result=integer return=integer expected=x,results
+// expect: dump sem contains (a:integer, b:integer) captures=0 result=integer return=integer expected=a,b,results
+// expect: dump sem contains (h:callable, z:integer) captures=0 result=integer return=integer expected=h,z,results
+// expect: dump lowered lacks send
+// expect: dump typing contains expected(c
+
+// An anonymous method written where a typed callable is expected takes
+// the parameter types it does not write, and its result types when it
+// writes none, from the expected signature, wherever that is: a slot, its
+// default, a constant, a function's parameter, keyword or result, a
+// parameter of a callable parameter, a typed binding, assigned or not, or
+// an argument `apply` passes to any of those.
+// Every `+` and `*` below adds integers inline. A result keeps the first
+// value of a body that returns more, so `truncate/` fits `=> <integer>`.
+
+define class <op> (<object>)
+  constant slot combine :: callable(<integer>, <integer>) => <integer>,
+    required-init-keyword: combine:;
+  slot step :: callable(<integer>) => <integer>, init-value: method (x) x + 1 end;
+end;
+
+define constant $twice :: callable(<integer>) => <integer> = method (x) x * 2 end;
+
+define function fold(xs :: <vector>, f :: callable(<integer>, <integer>) => <integer>)
+ => <integer>
+  let total = 0;
+  for (x :: <integer> in xs) total := f(total, x) end;
+  total
+end;
+
+define function scaled(#key by :: callable(<integer>) => <integer> = method (x) x end)
+ => <integer>
+  by(10)
+end;
+
+define function adder(n :: <integer>) => callable(<integer>) => <integer>
+  method (x) x + n end
+end;
+
+define function apply-to-two(f :: callable(callable(<integer>) => <integer>, <integer>)
+                                     => <integer>)
+ => <integer>
+  f(method (x) x * 3 end, 2)
+end;
+
+define function main() => <integer>
+  let op = make(<op>, combine: method (a, b) truncate/(a, b) end);
+  op.step := method (x) x - 1 end;
+  let g :: callable(<integer>) => <integer> = method (x) x + 100 end;
+  g := method (x) x + 200 end;
+  let combine = op.combine;
+  let step = op.step;
+  let twice = $twice;
+  let add5 = adder(5);
+  fold(#[1, 2, 3], method (a, b) a + b end)       // 6
+    + scaled(by: method (x) x * 5 end)            // 50
+    + combine(17, 5)                              // 3
+    + step(10)                                    // 9
+    + twice(4)                                    // 8
+    + add5(1)                                     // 6
+    + apply-to-two(method (h, z) h(z) end)        // 6
+    + g(1)                                        // 201
+    + apply(fold, #[4], method (a, b) a + b end)  // 4
+end;

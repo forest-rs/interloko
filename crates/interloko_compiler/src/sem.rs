@@ -3376,8 +3376,49 @@ pub struct Closure {
     /// becomes a callable value. Every other closure is a callable value,
     /// with a typed entry and a boxed one ([`EntryCheck`]).
     pub restart_guard: bool,
+    /// The callable signature expected where the closure is written, when
+    /// it took types from it; see [`ExpectedSignature`].
+    pub expected: Option<ExpectedSignature>,
     /// Source span.
     pub span: Span,
+}
+
+/// The callable signature expected where an anonymous method is written,
+/// and what the method takes from it.
+///
+/// A method passed as an argument for a typed callable parameter or
+/// keyword, given as a typed callable slot's value, bound to a typed
+/// callable `let` or constant, assigned to a typed callable binding, or
+/// returned as a typed callable result is typed bidirectionally: each
+/// parameter it writes no type for takes the expected parameter's, and if
+/// it writes no result types its results are the expected ones, so a body
+/// returning more values keeps the first. A type it does write stays, and
+/// one that does not fit the expected signature is an error. A method whose
+/// arity differs from the signature's, or that is expected to take
+/// keywords, takes nothing from it.
+///
+/// What a method takes is checked as if written: its entry checks the
+/// parameters ([`EntryCheck`]) and its body the results, so typing may rely
+/// on them, citing the signature
+/// ([`crate::typing::ReasonKind::Expected`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpectedSignature {
+    /// The signature expected where the method is written.
+    pub signature: CallableSignature,
+    /// Whether each parameter, in order, takes its type from
+    /// [`Self::signature`] because it writes none.
+    pub params: Vec<bool>,
+    /// Whether the results are [`Self::signature`]'s because the method
+    /// writes no result types.
+    pub results: bool,
+}
+
+impl ExpectedSignature {
+    /// Whether anything is taken from the signature.
+    #[must_use]
+    pub fn takes_anything(&self) -> bool {
+        self.results || self.params.iter().any(|taken| *taken)
+    }
 }
 
 /// One source local captured by an anonymous function.
@@ -6515,10 +6556,10 @@ impl Lowering {
                         (slot.kind, slot.callable_signature.clone(), slot.range)
                     });
                 ctx.shared_names = ast::shared_local_names_in(init_value);
-                let value = adapt_literal(
-                    self.lower_expr(&mut ctx, init_value),
-                    Some(core::slice::from_ref(&slot_kind)),
-                );
+                let value = self
+                    .lower_method_against(&mut ctx, init_value, slot_signature.as_ref())
+                    .unwrap_or_else(|| self.lower_expr(&mut ctx, init_value));
+                let value = adapt_literal(value, Some(core::slice::from_ref(&slot_kind)));
                 let value = self.narrow(value, slot_kind, slot_signature.as_ref());
                 self.diagnostics.extend(ctx.diagnostics);
                 let value_kind = self.expr_kind(&value);
@@ -7691,7 +7732,15 @@ impl Lowering {
                 .get(index)
                 .and_then(|symbol| symbol.callable_signature.clone());
             ctx.shared_names = ast::shared_local_names_in(&constant.value);
-            let value = self.lower_expr_expected(&mut ctx, &constant.value, expected_kind);
+            let value = self
+                .lower_method_against(
+                    &mut ctx,
+                    &constant.value,
+                    expected_callable_signature.as_ref(),
+                )
+                .unwrap_or_else(|| {
+                    self.lower_expr_expected(&mut ctx, &constant.value, expected_kind)
+                });
             let value = match expected_kind {
                 Some(expected) => {
                     self.narrow(value, expected, expected_callable_signature.as_ref())
@@ -8125,7 +8174,12 @@ impl Lowering {
             ),
             None => (None, None, Vec::new()),
         };
-        let mut body = self.lower_block(&mut ctx, &method.body, return_annotation.as_deref());
+        let mut body = self.lower_result_block(
+            &mut ctx,
+            &method.body,
+            return_annotation.as_deref(),
+            annotated_callable_sigs.as_deref().unwrap_or_default(),
+        );
         if return_annotation.as_deref() == Some(&[]) {
             discard_results(&mut body);
         } else if let Some((expected, sigs)) = match (&return_annotation, &generic_symbol) {
@@ -8309,7 +8363,12 @@ impl Lowering {
         let annotated_return_callable_sigs = symbol
             .as_ref()
             .map_or_else(Vec::new, |symbol| symbol.return_callable_sigs.clone());
-        let mut body = self.lower_block(&mut ctx, &function.body, return_annotation.as_deref());
+        let mut body = self.lower_result_block(
+            &mut ctx,
+            &function.body,
+            return_annotation.as_deref(),
+            &annotated_return_callable_sigs,
+        );
         if return_annotation.as_deref() == Some(&[]) {
             discard_results(&mut body);
         } else if let Some(expected) = return_annotation.as_deref() {
@@ -8450,6 +8509,20 @@ impl Lowering {
         block: &ast::Block,
         expected_result: Option<&[ValueKind]>,
     ) -> Block {
+        self.lower_result_block(ctx, block, expected_result, &[])
+    }
+
+    /// Lowers a function's, method's or closure's body, whose results are
+    /// `expected_result` with the callable signatures `expected_sigs`: an
+    /// anonymous method it ends with takes its types from the one it
+    /// returns as.
+    fn lower_result_block(
+        &mut self,
+        ctx: &mut FunctionContext,
+        block: &ast::Block,
+        expected_result: Option<&[ValueKind]>,
+        expected_sigs: &[Option<CallableSignature>],
+    ) -> Block {
         let mut statements = Vec::new();
         for statement in &block.statements {
             let local = match statement {
@@ -8469,14 +8542,19 @@ impl Lowering {
                         self.resolve_type_annotation_detail_in_context(ctx, annotation)
                     });
                     let expected_kind = expected_type.as_ref().map(|resolved| resolved.kind);
-                    let value = match expected_kind {
-                        Some(kind) => self.lower_expr_expected_results(
-                            ctx,
-                            &local.value,
-                            Some(core::slice::from_ref(&kind)),
-                        ),
-                        None => self.lower_expr_expected_results(ctx, &local.value, None),
-                    };
+                    let expected_signature = expected_type
+                        .as_ref()
+                        .and_then(|resolved| resolved.callable_signature.as_ref());
+                    let value = self
+                        .lower_method_against(ctx, &local.value, expected_signature)
+                        .unwrap_or_else(|| match expected_kind {
+                            Some(kind) => self.lower_expr_expected_results(
+                                ctx,
+                                &local.value,
+                                Some(core::slice::from_ref(&kind)),
+                            ),
+                            None => self.lower_expr_expected_results(ctx, &local.value, None),
+                        });
                     let value = self.take_values(ctx, value, 1);
                     let actual_kind = self.expr_kind(&value);
                     let actual_callable_signature = self.expr_callable_signature(&value);
@@ -8794,9 +8872,64 @@ impl Lowering {
 
         Block {
             statements,
-            result: self.lower_expr_expected_results(ctx, &block.result, expected_result),
+            result: match expected_sigs {
+                [signature] => self.lower_method_against(ctx, &block.result, signature.as_ref()),
+                _ => None,
+            }
+            .unwrap_or_else(|| {
+                self.lower_expr_expected_results(ctx, &block.result, expected_result)
+            }),
             span: block.span,
         }
+    }
+
+    /// Lowers `expr` where a callable of `signature` is expected, when it is
+    /// an anonymous method: the method takes the types it leaves unwritten
+    /// from the signature ([`ExpectedSignature`]). `None` for any other
+    /// expression, or without a signature; the caller lowers it as usual.
+    fn lower_method_against(
+        &mut self,
+        ctx: &mut FunctionContext,
+        expr: &ast::Expr,
+        signature: Option<&CallableSignature>,
+    ) -> Option<Expr> {
+        let signature = signature?;
+        let ast::Expr::Function {
+            params,
+            return_type,
+            body,
+            span,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        Some(self.lower_closure_expr(
+            ctx,
+            params,
+            return_type.as_ref(),
+            body,
+            *span,
+            Some(signature),
+        ))
+    }
+
+    /// Lowers call arguments, each where its parameter's callable signature
+    /// in `signatures`, if any, is expected ([`Self::lower_method_against`]).
+    fn lower_args_against(
+        &mut self,
+        ctx: &mut FunctionContext,
+        args: &[ast::Expr],
+        signatures: &[Option<CallableSignature>],
+    ) -> Vec<Expr> {
+        args.iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                let signature = signatures.get(index).and_then(Option::as_ref);
+                self.lower_method_against(ctx, arg, signature)
+                    .unwrap_or_else(|| self.lower_expr(ctx, arg))
+            })
+            .collect()
     }
 
     fn lower_expr(&mut self, ctx: &mut FunctionContext, expr: &ast::Expr) -> Expr {
@@ -8993,7 +9126,7 @@ impl Lowering {
                 body,
                 span,
                 ..
-            } => self.lower_closure_expr(ctx, params, return_type.as_ref(), body, *span),
+            } => self.lower_closure_expr(ctx, params, return_type.as_ref(), body, *span, None),
             // `$unsupplied` is reserved, so it always means the kernel's.
             ast::Expr::Name { name, span, .. } if name == keywords::UNSUPPLIED => {
                 self.unsupplied(*span)
@@ -9136,7 +9269,11 @@ impl Lowering {
                     {
                         return call;
                     }
-                    let lowered_args = args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
+                    let signatures = self
+                        .callable_signature_of(&target)
+                        .map(|signature| signature.param_sigs)
+                        .unwrap_or_default();
+                    let lowered_args = self.lower_args_against(ctx, args, &signatures);
                     return self.lower_local_value_call(
                         ctx,
                         *id,
@@ -9148,8 +9285,11 @@ impl Lowering {
                         *span,
                     );
                 }
-                let mut lowered_args: Vec<_> =
-                    args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
+                let signatures = self
+                    .resolve_function(callee)
+                    .map(|symbol| symbol.param_callable_sigs.clone())
+                    .unwrap_or_default();
+                let mut lowered_args = self.lower_args_against(ctx, args, &signatures);
                 if callee == "class-of" {
                     if args.len() == 1 {
                         let object = lowered_args.into_iter().next().expect("arity was checked");
@@ -9606,6 +9746,9 @@ impl Lowering {
             || self.resolve_accessor_callable(name) != AccessorResolution::None
     }
 
+    /// Lowers the anonymous method `method (params) => return_type body
+    /// end`, taking what it leaves unwritten from the `expected` signature
+    /// of the position it is written in; see [`ExpectedSignature`].
     fn lower_closure_expr(
         &mut self,
         ctx: &mut FunctionContext,
@@ -9613,6 +9756,7 @@ impl Lowering {
         return_type: Option<&ast::ResultAnnotation>,
         body: &ast::Block,
         span: Span,
+        expected: Option<&CallableSignature>,
     ) -> Expr {
         let id = ClosureId(u32::try_from(self.closures.len()).unwrap_or(u32::MAX));
         self.closures.push(Closure {
@@ -9634,9 +9778,15 @@ impl Lowering {
             return_annotation: None,
             entry_checks: Vec::new(),
             restart_guard: false,
+            expected: None,
             span,
         });
 
+        // A signature of the method's arity without keywords lends its
+        // types to what the method leaves unwritten.
+        let expected = expected.filter(|signature| {
+            signature.params.len() == params.len() && signature.keywords.is_empty()
+        });
         let mut closure_ctx =
             FunctionContext::for_closure(ctx.visible_local_sources(), ctx.exit_definitions.clone());
         closure_ctx.shared_names.clone_from(&ctx.shared_names);
@@ -9644,15 +9794,22 @@ impl Lowering {
         let mut param_kinds = Vec::new();
         let mut param_callable_sigs = Vec::new();
         let mut param_ranges = Vec::new();
-        for param in params {
+        for (index, param) in params.iter().enumerate() {
             if closure_ctx.find_local(&param.name).is_some() {
                 closure_ctx.diagnostics.push(
                     Diagnostic::error(param.span, DiagnosticCode::DuplicateLocal)
                         .with_arg(DiagnosticArg::text("local", param.name.clone())),
                 );
             }
-            let resolved =
-                self.resolve_function_type_detail(param.type_annotation.as_ref(), ValueKind::Any);
+            // An unwritten type is the expected parameter's, or `<object>`.
+            let resolved = match (param.type_annotation.as_ref(), expected) {
+                (None, Some(expected)) => ResolvedType {
+                    kind: expected.params[index],
+                    callable_signature: expected.param_sig(index).cloned(),
+                    range: expected.param_range(index),
+                },
+                (annotation, _) => self.resolve_function_type_detail(annotation, ValueKind::Any),
+            };
             param_kinds.push(resolved.kind);
             param_callable_sigs.push(resolved.callable_signature.clone());
             param_ranges.push(resolved.range);
@@ -9673,8 +9830,8 @@ impl Lowering {
         }
 
         let (return_annotation, annotated_return_callable_sigs, annotated_ranges) =
-            match return_type {
-                Some(annotation) => {
+            match (return_type, expected) {
+                (Some(annotation), _) => {
                     let resolved = self.resolve_result_annotation_detail(annotation);
                     (
                         Some(resolved.kinds),
@@ -9682,10 +9839,20 @@ impl Lowering {
                         resolved.ranges,
                     )
                 }
-                None => (None, Vec::new(), Vec::new()),
+                // Unwritten results are the expected ones.
+                (None, Some(expected)) => (
+                    Some(expected.results.clone()),
+                    expected.result_sigs.clone(),
+                    expected.result_ranges.clone(),
+                ),
+                (None, None) => (None, Vec::new(), Vec::new()),
             };
-        let mut lowered_body =
-            self.lower_block(&mut closure_ctx, body, return_annotation.as_deref());
+        let mut lowered_body = self.lower_result_block(
+            &mut closure_ctx,
+            body,
+            return_annotation.as_deref(),
+            &annotated_return_callable_sigs,
+        );
         if return_annotation.as_deref() == Some(&[]) {
             discard_results(&mut lowered_body);
         } else if let Some(expected) = return_annotation.as_deref() {
@@ -9775,6 +9942,16 @@ impl Lowering {
                 return_annotation,
                 entry_checks: Vec::new(),
                 restart_guard: false,
+                expected: expected
+                    .map(|signature| ExpectedSignature {
+                        signature: signature.clone(),
+                        params: params
+                            .iter()
+                            .map(|param| param.type_annotation.is_none())
+                            .collect(),
+                        results: return_type.is_none(),
+                    })
+                    .filter(ExpectedSignature::takes_anything),
                 span,
             };
         }
@@ -9810,10 +9987,11 @@ impl Lowering {
             return Expr::Error { span };
         };
         let target = self.lower_expr(ctx, target);
-        let lowered_args = args
-            .iter()
-            .map(|arg| self.lower_expr(ctx, arg))
-            .collect::<Vec<_>>();
+        let signatures = self
+            .callable_signature_of(&target)
+            .map(|signature| signature.param_sigs)
+            .unwrap_or_default();
+        let lowered_args = self.lower_args_against(ctx, args, &signatures);
         // A function or generic that takes keywords is called through its
         // value's typed entry, which fills the defaults `apply` leaves out.
         if self
@@ -9955,10 +10133,13 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let scope = ctx.scope_start();
-        let positional = args
-            .iter()
-            .map(|arg| self.lower_expr(ctx, arg))
-            .collect::<Vec<_>>();
+        // A function's typed callable parameters' signatures are expected
+        // of its arguments; a generic's parameters have none.
+        let signatures = self
+            .resolve_function(callee)
+            .map(|symbol| symbol.param_callable_sigs.clone())
+            .unwrap_or_default();
+        let positional = self.lower_args_against(ctx, args, &signatures);
         let first_diagnostic = ctx.diagnostics.len();
         let call = if let Some(symbol) = self.resolve_function(callee).cloned() {
             let kinds = symbol
@@ -9968,7 +10149,15 @@ impl Lowering {
                 .map(Some)
                 .collect::<Vec<_>>();
             self.lower_keyword_args(
-                ctx, id, callee, signature, &kinds, positional, keywords, span,
+                ctx,
+                id,
+                callee,
+                signature,
+                &kinds,
+                &signatures,
+                positional,
+                keywords,
+                span,
             )
             .map(|(lets, args)| {
                 (
@@ -9983,6 +10172,7 @@ impl Lowering {
                 callee,
                 signature,
                 &symbol.param_kinds,
+                &[],
                 positional,
                 keywords,
                 span,
@@ -10006,7 +10196,8 @@ impl Lowering {
 
     /// Lowers the arguments of a call of `callee`, which takes `signature`'s
     /// keyword parameters after its required ones, all of kinds
-    /// `param_kinds`, to one argument per parameter in parameter order.
+    /// `param_kinds` and, where they are typed callables, of signatures
+    /// `param_sigs`, to one argument per parameter in parameter order.
     /// `positional` are the call's positional arguments, already lowered.
     ///
     /// The order the call evaluates its arguments in is the one [`keywords`]
@@ -10026,6 +10217,7 @@ impl Lowering {
         callee: &str,
         signature: &KeywordSignature,
         param_kinds: &[Option<ValueKind>],
+        param_sigs: &[Option<CallableSignature>],
         mut positional: Vec<Expr>,
         keywords: &[ast::KeywordArg],
         span: Span,
@@ -10061,7 +10253,16 @@ impl Lowering {
         }
         let mut passed = keywords
             .iter()
-            .map(|keyword| Some(self.lower_expr(ctx, &keyword.value)))
+            .map(|keyword| {
+                let expected = signature
+                    .position(&keyword.name)
+                    .and_then(|position| param_sigs.get(signature.required + position))
+                    .and_then(Option::as_ref);
+                Some(
+                    self.lower_method_against(ctx, &keyword.value, expected)
+                        .unwrap_or_else(|| self.lower_expr(ctx, &keyword.value)),
+                )
+            })
             .collect::<Vec<_>>();
         if !valid {
             return None;
@@ -10797,6 +10998,7 @@ impl Lowering {
             name,
             &signature,
             &symbol.param_kinds,
+            &[],
             args,
             keywords,
             span,
@@ -11883,10 +12085,15 @@ impl Lowering {
             ctx.diagnostics
                 .push(Self::unexpected_keyword(&name, keyword));
         }
-        let lowered = args
-            .iter()
-            .map(|arg| self.lower_expr(ctx, arg))
-            .collect::<Vec<_>>();
+        let signatures = match callable {
+            KnownCallable::DirectFunction(function) => self
+                .functions
+                .get(function.0 as usize)
+                .map(|symbol| symbol.param_callable_sigs.clone())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let lowered = self.lower_args_against(ctx, args, &signatures);
         Some(match callable {
             KnownCallable::DirectFunction(function) => {
                 let symbol = self.functions.get(function.0 as usize)?.clone();
@@ -13385,7 +13592,7 @@ impl Lowering {
             span,
         };
         let closure =
-            self.lower_closure_expr(ctx, core::slice::from_ref(&param), None, &body, span);
+            self.lower_closure_expr(ctx, core::slice::from_ref(&param), None, &body, span, None);
         if let Expr::Closure { closure, .. } = &closure
             && let Some(closure) = self.closures.get_mut(closure.0 as usize)
         {
@@ -14526,10 +14733,10 @@ impl Lowering {
                 );
                 continue;
             };
-            let value = adapt_literal(
-                self.lower_expr(ctx, &field.value),
-                Some(core::slice::from_ref(&slot.kind)),
-            );
+            let value = self
+                .lower_method_against(ctx, &field.value, slot.callable_signature.as_ref())
+                .unwrap_or_else(|| self.lower_expr(ctx, &field.value));
+            let value = adapt_literal(value, Some(core::slice::from_ref(&slot.kind)));
             let value = self.narrow(value, slot.kind, slot.callable_signature.as_ref());
             let value_kind = self.expr_kind(&value);
             if !self.kinds_match(slot.kind, value_kind) {
@@ -14831,8 +15038,11 @@ impl Lowering {
         range: Option<IntRange>,
         value: &ast::Expr,
     ) -> Expr {
-        let value_expr =
-            self.lower_expr_expected_results(ctx, value, Some(core::slice::from_ref(&kind)));
+        let value_expr = self
+            .lower_method_against(ctx, value, signature)
+            .unwrap_or_else(|| {
+                self.lower_expr_expected_results(ctx, value, Some(core::slice::from_ref(&kind)))
+            });
         let value_expr = self.take_values(ctx, value_expr, 1);
         let actual_kinds = self.expr_kinds(&value_expr);
         let actual_kind = self.expr_kind(&value_expr);
@@ -15507,8 +15717,24 @@ impl Lowering {
     ) -> Expr {
         let receiver = self.lower_expr(ctx, receiver);
         let receiver = self.narrow_receiver(receiver, slot_name);
-        let value = self.lower_expr(ctx, value);
         let receiver_kind = self.expr_kind(&receiver);
+        // A typed callable slot's signature is expected of the value.
+        let signature = match receiver_kind {
+            ValueKind::Object(class) => self
+                .classes
+                .get(class.0 as usize)
+                .and_then(|class| {
+                    class
+                        .effective_slots
+                        .iter()
+                        .find(|slot| slot.name == slot_name || slot.accessor.name == slot_name)
+                })
+                .and_then(|slot| slot.callable_signature.clone()),
+            _ => None,
+        };
+        let value = self
+            .lower_method_against(ctx, value, signature.as_ref())
+            .unwrap_or_else(|| self.lower_expr(ctx, value));
         let ValueKind::Object(class_id) = receiver_kind else {
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::SlotReceiverTypeMismatch)

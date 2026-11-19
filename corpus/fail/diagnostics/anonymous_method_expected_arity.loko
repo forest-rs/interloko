@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.function-argument-type-mismatch
+// expect: diagnostic contains function `fold` argument 1 expects callable(<integer>, <integer>) => <integer> but got callable(<object>) => <object>
+
+// A method of another arity takes nothing from the expected signature:
+// its parameter is an `<object>`, and it is not a callable of two.
+
+define function fold(f :: callable(<integer>, <integer>) => <integer>) => <integer>
+  f(1, 2)
+end;
+
+define function main() => <integer>
+  fold(method (a) a end)
+end;

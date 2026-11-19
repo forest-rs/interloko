@@ -1,0 +1,38 @@
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump typing contains function total strict=declared
+// expect: dump typing contains dispatch proved rule=dispatch-covered
+// expect: dump typing contains because=expected(c0)
+
+// The method passed to `sum-of` writes no type for `c`, and takes
+// `<circle>` from the signature `sum-of` expects. Its entry checks that, as
+// it would a written type, so typing relies on it, citing the signature:
+// the strict `total` proves its send to `area`. Without the signature, `c`
+// is an `<object>` and the send cannot be proved
+// (`fail/strict/unexpected_method_types.loko`).
+
+define class <circle> (<object>)
+end;
+
+define generic area(c :: <circle>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  1
+end;
+
+define function sum-of(circles :: <stretchy-vector>, measure :: callable(<circle>) => <integer>)
+ => <integer>
+  let total = 0;
+  for (c :: <circle> in circles) total := total + measure(c) end;
+  total
+end;
+
+define strict function total(circles :: <stretchy-vector>) => <integer>
+  sum-of(circles, method (c) area(c) end)
+end;
+
+define function main() => <integer>
+  let circles = make(<stretchy-vector>);
+  for (i from 0 below 3) add!(circles, make(<circle>)) end;
+  total(circles)
+end;

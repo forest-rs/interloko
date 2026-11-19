@@ -129,7 +129,23 @@ The current slices include:
   checks each value assigned to it. Parameters, block exits and constants
   are not assignable;
 - Dylan's anonymous functions, `method (params) => results body end`,
-  which take the parameter and result annotations a `define function` does;
+  which take the parameter and result annotations a `define function` does.
+  One written where a typed callable is expected (an argument for a
+  `callable(...)` parameter or keyword, `apply`'s included, a typed
+  callable slot's value or default, a `let`, constant or assignment
+  declared `callable(...)`, or a result declared one) takes each parameter
+  type it does not write, and its results when it writes none, from that
+  signature, so `fold(xs, method (a, b) a + b end)` adds integers inline
+  when `fold` takes a `callable(<integer>, <integer>) => <integer>`. Its
+  results keep the first value of a body that returns more, so
+  `method (a, b) truncate/(a, b) end` fits `=> <integer>`. A type it writes
+  stays, and is an error if it does not fit; a method of another arity
+  takes nothing. Its entry checks what it takes as it would a written
+  type, and typing cites the signature where it relies on one
+  (`expected(c…)` in its reasons). Only a method written directly in such
+  a position takes a signature, not one in an `if` arm or `begin` there,
+  and a `define generic`'s parameters carry no callable signatures, so a
+  method passed in a send takes none;
 - closures that share assigned locals: a `let` local that is assigned and
   that a closure refers to lives in a heap cell its frame and every
   capturing closure use, so counters, accumulators and callbacks that

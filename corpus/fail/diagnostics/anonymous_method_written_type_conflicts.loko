@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.function-argument-type-mismatch
+// expect: diagnostic contains function `fold` argument 1 expects callable(<integer>, <integer>) => <integer> but got callable(<string>, <integer>) => <integer>
+
+// A type the method writes stays: `b` takes `<integer>` from the expected
+// signature, but `a`'s `<string>` does not fit it.
+
+define function fold(f :: callable(<integer>, <integer>) => <integer>) => <integer>
+  f(1, 2)
+end;
+
+define function main() => <integer>
+  fold(method (a :: <string>, b) b end)
+end;

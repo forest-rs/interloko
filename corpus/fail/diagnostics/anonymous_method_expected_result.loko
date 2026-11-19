@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.function-return-type-mismatch
+// expect: diagnostic contains function `<closure>` returns <integer> but body has <string>
+
+// A method that writes no result types returns the expected ones, so a
+// body of another type is an error.
+
+define function fold(f :: callable(<integer>, <integer>) => <integer>) => <integer>
+  f(1, 2)
+end;
+
+define function main() => <integer>
+  fold(method (a, b) "sum" end)
+end;

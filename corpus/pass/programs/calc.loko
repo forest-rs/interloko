@@ -47,17 +47,17 @@ define constant $statement-power = 1;
 
 define constant $infix :: <table> = begin
   let t = make(<table>);
-  infix(t, ";", $statement-power, method (a :: <integer>, b :: <integer>) => <integer> b end);
-  infix(t, "==", 10, method (a :: <integer>, b :: <integer>) => <integer> flag(a = b) end);
-  infix(t, "!=", 10, method (a :: <integer>, b :: <integer>) => <integer> flag(a < b | a > b) end);
-  infix(t, "<",  10, method (a :: <integer>, b :: <integer>) => <integer> flag(a < b) end);
-  infix(t, "<=", 10, method (a :: <integer>, b :: <integer>) => <integer> flag(a <= b) end);
-  infix(t, ">",  10, method (a :: <integer>, b :: <integer>) => <integer> flag(a > b) end);
-  infix(t, ">=", 10, method (a :: <integer>, b :: <integer>) => <integer> flag(a >= b) end);
-  infix(t, "+",  20, method (a :: <integer>, b :: <integer>) => <integer> a + b end);
-  infix(t, "-",  20, method (a :: <integer>, b :: <integer>) => <integer> a - b end);
-  infix(t, "*",  30, method (a :: <integer>, b :: <integer>) => <integer> a * b end);
-  infix(t, "/",  30, method (a :: <integer>, b :: <integer>) => <integer> truncate/(a, b) end);
+  infix(t, ";", $statement-power, method (a, b) b end);
+  infix(t, "==", 10, method (a, b) flag(a = b) end);
+  infix(t, "!=", 10, method (a, b) flag(a < b | a > b) end);
+  infix(t, "<",  10, method (a, b) flag(a < b) end);
+  infix(t, "<=", 10, method (a, b) flag(a <= b) end);
+  infix(t, ">",  10, method (a, b) flag(a > b) end);
+  infix(t, ">=", 10, method (a, b) flag(a >= b) end);
+  infix(t, "+",  20, method (a, b) a + b end);
+  infix(t, "-",  20, method (a, b) a - b end);
+  infix(t, "*",  30, method (a, b) a * b end);
+  infix(t, "/",  30, method (a, b) truncate/(a, b) end);
   infix(t, "^",  50, power-of, associativity: #right);
   t
 end;
@@ -65,8 +65,7 @@ end;
 // Unary minus binds tighter than `*` but looser than `^`: -2 ^ 2 is -4.
 define constant $prefix :: <table> = begin
   let t = make(<table>);
-  t["-"] := make(<prefix>, name: "-", power: 40,
-                 apply: method (a :: <integer>) => <integer> - a end);
+  t["-"] := make(<prefix>, name: "-", power: 40, apply: method (a) - a end);
   t
 end;
 

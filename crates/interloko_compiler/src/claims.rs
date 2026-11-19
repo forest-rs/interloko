@@ -330,7 +330,8 @@ pub enum ResidualCause {
     Declared,
     /// An operand comes from a parameter, or a callee's result, whose type
     /// no annotation writes, so typing has only the parameter's default
-    /// (`<object>`) or sem's inferred result category.
+    /// (`<object>`), the type an anonymous method's parameter takes from
+    /// its expected signature, or sem's inferred result category.
     UnannotatedInput,
     /// An operand is a cone over an open class whose current subclasses
     /// would satisfy the check: sealing the class would let typing rely on
@@ -870,6 +871,9 @@ fn residual(
                 .get(*index)
                 .map_or_else(String::new, |ty| typing::type_name(module, ty));
             let source = match typed.reason(reason).map(|reason| &reason.kind) {
+                Some(ReasonKind::Expected { .. }) => {
+                    "the type the callable signature expected of its method gives it"
+                }
                 Some(ReasonKind::Contract { .. }) => "what sem inferred",
                 _ => "its default",
             };
