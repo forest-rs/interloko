@@ -59,9 +59,9 @@ pub const INTERLOKO_VALUE_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f56_414c);
 
 use boxed::BoxedHandle;
 
-/// What a boxed `<object>` holds.
+/// What a boxed `<object>` holds; see [`InterlokoHost::unbox_top_value`].
 #[derive(Clone, Debug, PartialEq)]
-enum Unboxed {
+pub enum Unboxed {
     /// A value with an `execution_tape` representation of its own: a
     /// number, a boolean, a callable or a runtime object.
     Value(Value),
@@ -2230,6 +2230,29 @@ impl InterlokoHost {
                 adapter: alloc::boxed::Box::new(adapter),
             },
         }))
+    }
+
+    /// Decodes a value of the top `<object>` runtime representation into
+    /// what it holds, undoing [`Self::box_top_value`]: an `<i32>` or
+    /// `<u32>` boxed comes back as the `<integer>` it is.
+    pub fn unbox_top_value(&self, value: &Value) -> Result<Unboxed, RuntimeError> {
+        match value {
+            Value::Obj(obj) => self.unbox(*obj),
+            _ => Err(RuntimeError::ValueKindMismatch {
+                expected: ValueKind::Any,
+            }),
+        }
+    }
+
+    /// Boxes a `<character>` into the top `<object>` runtime
+    /// representation, which a `u32` register value would box as a `<u32>`
+    /// integer instead.
+    #[must_use]
+    pub const fn box_top_character(value: char) -> Value {
+        Value::Obj(Obj {
+            host_type: INTERLOKO_VALUE_TYPE,
+            handle: BoxedHandle::immediate_character(value),
+        })
     }
 
     /// Boxes a value into the top `<object>` runtime representation.

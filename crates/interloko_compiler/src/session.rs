@@ -165,7 +165,8 @@ pub enum RuntimeResult {
         failure: HostFunctionFailure,
     },
     /// `main` does not return exactly one scalar value that can leave the
-    /// runtime.
+    /// runtime: a number, boolean, character or string, declared or held
+    /// by an `<object>` result.
     UnsupportedResult {
         /// Declared result categories.
         declared: String,
@@ -666,7 +667,9 @@ pub enum FunctionCallError {
         /// Partial trace captured before the failed host call, when requested.
         trace: Option<ExecutionTrace>,
     },
-    /// The function does not return exactly one supported scalar value.
+    /// The function does not return exactly one supported scalar value: a
+    /// number, boolean, character or string, declared or held by an
+    /// `<object>` result.
     UnsupportedResult {
         /// Requested function name.
         name: String,
@@ -3014,9 +3017,11 @@ impl SessionArtifacts {
     /// Calls a direct function with typed scalar arguments and records an
     /// execution trace when `trace` requests one.
     ///
-    /// This calm embedding surface currently supports integer, boolean, and
-    /// string arguments and exactly one result of one of those categories.
-    /// Object handles and VM-owned storage do not cross the API boundary.
+    /// This calm embedding surface passes and returns [`FunctionValue`]s:
+    /// numbers, booleans, characters and strings. An `<object>` parameter
+    /// takes any of them boxed, and an `<object>` result holding one is
+    /// reported as it. Object handles and VM-owned storage do not cross the
+    /// API boundary.
     /// Like every call, it is refused with
     /// [`FunctionCallError::CompilationFailed`] when compilation reported
     /// errors ([`Self::check_runnable`]).
@@ -7049,6 +7054,13 @@ fn run_turn_body<'a>(
                     index,
                     kind: argument.kind(),
                 })?,
+            // An `<object>` parameter takes any of them, boxed.
+            (argument, sem::ValueKind::Any) => host.box_top(argument).map_err(|_| {
+                FunctionCallError::ArgumentMaterializationFailed {
+                    index,
+                    kind: argument.kind(),
+                }
+            })?,
             _ => {
                 return Err(FunctionCallError::ArgumentTypeMismatch {
                     name: function_name.to_string(),
@@ -7171,6 +7183,15 @@ fn run_turn_body<'a>(
                 }
             })?)
         }
+        // An `<object>` result holding a number, boolean, character or
+        // string is reported as that value.
+        ([sem::ValueKind::Any], [value]) => {
+            host.top_value(value)
+                .ok_or_else(|| FunctionCallError::UnsupportedResult {
+                    name: function_name.to_string(),
+                    declared: sem_kind_list_label(module, &function.result_kinds),
+                })?
+        }
         _ => {
             return Err(FunctionCallError::UnsupportedResult {
                 name: function_name.to_string(),
@@ -7263,6 +7284,39 @@ impl<'a> SharedFunctionCallHost<'a> {
 
     fn make_string(&self, value: &str) -> Result<Value, runtime::RuntimeError> {
         self.0.borrow_mut().runtime.make_string(value)
+    }
+
+    /// `value` boxed as an `<object>`, as an `<object>` parameter takes it.
+    fn box_top(&self, value: &FunctionValue) -> Result<Value, runtime::RuntimeError> {
+        let mut host = self.0.borrow_mut();
+        let value = match value {
+            FunctionValue::Integer(value) => Value::I64(*value),
+            FunctionValue::Float(value) => Value::F64(*value),
+            FunctionValue::I32(value) => Value::I32(*value),
+            FunctionValue::U32(value) => Value::U32(*value),
+            FunctionValue::SingleFloat(value) => Value::F32(*value),
+            FunctionValue::Boolean(value) => Value::Bool(*value),
+            FunctionValue::Character(value) => return Ok(InterlokoHost::box_top_character(*value)),
+            FunctionValue::String(value) => host.runtime.make_string(value.as_str())?,
+        };
+        host.runtime.box_top_value(value)
+    }
+
+    /// The scalar a boxed `<object>` holds, when it holds one: a number,
+    /// boolean, character or string.
+    fn top_value(&self, value: &Value) -> Option<FunctionValue> {
+        let host = self.0.borrow();
+        Some(match host.runtime.unbox_top_value(value).ok()? {
+            runtime::Unboxed::Value(Value::I64(value)) => FunctionValue::Integer(value),
+            runtime::Unboxed::Value(Value::F64(value)) => FunctionValue::Float(value),
+            runtime::Unboxed::Value(Value::F32(value)) => FunctionValue::SingleFloat(value),
+            runtime::Unboxed::Value(Value::Bool(value)) => FunctionValue::Boolean(value),
+            runtime::Unboxed::Character(value) => FunctionValue::Character(value),
+            runtime::Unboxed::Value(object @ Value::Obj(_)) => {
+                FunctionValue::String(host.runtime.string_text(&object).ok()?.to_string())
+            }
+            _ => return None,
+        })
     }
 
     fn string_text(&self, value: &Value) -> Result<String, runtime::RuntimeError> {
@@ -18242,6 +18296,84 @@ mod tests {
         assert!(
             matches!(run_scalar(&artifacts, "object_result"), Err(FunctionCallError::UnsupportedResult { name, .. }) if name == "object_result")
         );
+    }
+
+    #[test]
+    fn session_reports_an_object_result_by_the_scalar_it_holds() {
+        let artifacts = CompilerSession::compile_source(
+            "scratch.loko",
+            "define function integer() => <object>\n  42\nend;\n\
+             define function float() => <object>\n  2.5\nend;\n\
+             define function boolean() => <object>\n  #t\nend;\n\
+             define function character() => <object>\n  'x'\nend;\n\
+             define function string() => <object>\n  \"glass\"\nend;\n\
+             define function boxed() => <object>\n  make(<box>)\nend;\n\
+             define class <box> (<object>)\nend;",
+            RuntimeMode::CompileOnly,
+        );
+
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        assert!(matches!(
+            run_scalar(&artifacts, "integer"),
+            Ok(FunctionValue::Integer(42))
+        ));
+        assert!(matches!(
+            run_scalar(&artifacts, "float"),
+            Ok(FunctionValue::Float(value)) if value == 2.5
+        ));
+        assert!(matches!(
+            run_scalar(&artifacts, "boolean"),
+            Ok(FunctionValue::Boolean(true))
+        ));
+        assert!(matches!(
+            run_scalar(&artifacts, "character"),
+            Ok(FunctionValue::Character('x'))
+        ));
+        assert!(matches!(
+            run_scalar(&artifacts, "string"),
+            Ok(FunctionValue::String(text)) if text == "glass"
+        ));
+        assert!(
+            matches!(run_scalar(&artifacts, "boxed"), Err(FunctionCallError::UnsupportedResult { name, .. }) if name == "boxed")
+        );
+    }
+
+    #[test]
+    fn session_passes_scalars_to_object_parameters_boxed() {
+        let artifacts = CompilerSession::compile_source(
+            "scratch.loko",
+            "define function echo(x :: <object>)\n  x\nend;\n\
+             define function inc(x :: <object>)\n  x + 1\nend;",
+            RuntimeMode::CompileOnly,
+        );
+
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let call = |name: &str, argument: FunctionValue| {
+            artifacts
+                .call_function(name, &[argument], None)
+                .map(|outcome| outcome.value)
+        };
+        assert!(matches!(
+            call("inc", FunctionValue::Integer(41)),
+            Ok(FunctionValue::Integer(42))
+        ));
+        assert!(matches!(
+            call("inc", FunctionValue::Float(1.5)),
+            Ok(FunctionValue::Float(value)) if value == 2.5
+        ));
+        // A 32-bit integer boxes as the `<integer>` it is.
+        assert!(matches!(
+            call("echo", FunctionValue::U32(7)),
+            Ok(FunctionValue::Integer(7))
+        ));
+        for value in [
+            FunctionValue::Boolean(false),
+            FunctionValue::Character('y'),
+            FunctionValue::String("glass".into()),
+            FunctionValue::SingleFloat(1.5),
+        ] {
+            assert_eq!(call("echo", value.clone()).ok(), Some(value));
+        }
     }
 
     #[test]
