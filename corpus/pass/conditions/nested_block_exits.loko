@@ -1,0 +1,40 @@
+// expect: run 1051
+// expect: diagnostics 0
+// expect: dump ast contains block-expr exit
+// expect: dump sem contains exit=
+
+// Nested blocks bind their own exit procedures. Calling the inner one
+// leaves only the inner block; calling the outer one from inside the
+// inner block leaves both, running the inner cleanup on the way out.
+
+define class <log> (<object>)
+  slot trail :: <integer>, init-value: 0;
+end;
+
+define function inner-only() => <integer>
+  block (outer)
+    let inner-value = block (inner)
+      inner(20);
+      99
+    end;
+    inner-value + 1
+  end
+end;
+
+define function through-both(log :: <log>) => <integer>
+  block (outer)
+    let ignored = block (inner)
+      outer(3);
+      99
+    cleanup
+      log.trail := log.trail + 1000
+    end;
+    77
+  end
+end;
+
+define function main() => <integer>
+  let log = make(<log>);
+  let leaves-both = through-both(log);
+  log.trail + leaves-both * 10 + inner-only()
+end;

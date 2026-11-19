@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.duplicate-local
+// expect: diagnostic contains duplicate local `out`
+
+// As with `let`, an inner block's exit may not reuse a name an enclosing
+// block's exit already binds.
+
+define function main() => <integer>
+  block (out)
+    block (out)
+      out(1)
+    end
+  end
+end;

@@ -3857,6 +3857,33 @@ mod tests {
     }
 
     #[test]
+    fn nested_blocks_bind_their_own_exit_names() {
+        let tree = parse(
+            "define function main() => <integer>\n  \
+             block (outer)\n    block (inner) inner(1) end\n  end\nend;",
+        );
+        assert_eq!(tree.diagnostics, Vec::new());
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::Block {
+            exit: Some(outer),
+            body,
+            ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected the outer block");
+        };
+        assert_eq!(outer.name, "outer");
+        let Expr::Block {
+            exit: Some(inner), ..
+        } = &body.result
+        else {
+            panic!("expected the inner block");
+        };
+        assert_eq!(inner.name, "inner");
+    }
+
+    #[test]
     fn bodies_hold_statements_loops_and_local_assignments() {
         let tree = parse(
             "define function main() => <integer>\n  \
