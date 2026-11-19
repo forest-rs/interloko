@@ -5,8 +5,8 @@
 // assigns the callable afterwards, the closure calls the new one.
 
 define function main() => <integer>
-  let f :: callable(<integer>) => <integer> = function (n :: <integer>) => <integer> n end;
-  let g = function () => <integer> f(10) end;
-  f := function (n :: <integer>) => <integer> n + 100 end;
+  let f :: callable(<integer>) => <integer> = method (n :: <integer>) => <integer> n end;
+  let g = method () => <integer> f(10) end;
+  f := method (n :: <integer>) => <integer> n + 100 end;
   g()
 end;

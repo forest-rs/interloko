@@ -2232,12 +2232,15 @@ fn block_definition_boundary(tokens: &[syntax::Token]) -> Option<PendingDefiniti
     let mut previous = None;
     for (index, token) in tokens.iter().enumerate() {
         match token.kind {
-            TokenKind::Class | TokenKind::Method if previous == Some(TokenKind::Define) => {
+            // `class` also names class-object types, as in `class <shape>`.
+            TokenKind::Class if previous == Some(TokenKind::Define) => {
                 depth += 1;
             }
-            // Every form closed by `end`: a defined or anonymous function,
-            // the conditionals, the loops, `handle`, `block` and `begin`.
+            // Every form closed by `end`: a defined function or method, an
+            // anonymous `method`, the conditionals, the loops, `handle`,
+            // `block` and `begin`.
             TokenKind::Function
+            | TokenKind::Method
             | TokenKind::If
             | TokenKind::Unless
             | TokenKind::Case
@@ -4112,6 +4115,31 @@ mod tests {
         assert_eq!(forms[1].name, "area");
         assert_eq!(forms[2].kind, "function");
         assert_eq!(forms[2].name, "answer");
+    }
+
+    #[test]
+    fn pending_definitions_wait_for_anonymous_methods() {
+        // An anonymous `method` is closed by its own `end`, inside a defined
+        // function or method alike; `class` in a parameter type opens nothing.
+        for header in [
+            "define function go(n :: <integer>)",
+            "define method go(n :: <integer>)",
+        ] {
+            let open = format!("{header}\n  let f = method (x :: <integer>) x end;\n");
+            assert_eq!(
+                pending_definition_state(&open),
+                PendingDefinitionState::Incomplete
+            );
+            let closed = format!("{open}  f(n)\nend;\n");
+            assert_eq!(
+                pending_definition_state(&closed),
+                PendingDefinitionState::Ready
+            );
+        }
+        assert_eq!(
+            pending_definition_state("define function name-of(k :: class <object>)\n  1\nend;\n"),
+            PendingDefinitionState::Ready
+        );
     }
 
     #[test]

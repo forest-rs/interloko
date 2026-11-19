@@ -731,7 +731,7 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Anonymous function expression.
+    /// Anonymous function: a `method (params) => results body end` expression.
     Function {
         /// Stable-ish AST node identity.
         id: AstNodeId,
@@ -2267,7 +2267,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::SymbolExpr => self.lower_symbol(node),
             CstKind::KeywordExpr => self.lower_keyword_value(node),
             CstKind::VectorExpr => self.lower_vector(node),
-            CstKind::FunctionExpr => self.lower_function_expr(node),
+            CstKind::MethodExpr => self.lower_method_expr(node),
             CstKind::NameExpr => self.lower_name(node),
             CstKind::TypeExpr => self.lower_class_name(node),
             CstKind::CallExpr => self.lower_call(node),
@@ -2294,7 +2294,7 @@ impl<'tree> Lowering<'tree> {
         }
     }
 
-    fn lower_function_expr(&mut self, node: &CstNode) -> Expr {
+    fn lower_method_expr(&mut self, node: &CstNode) -> Expr {
         let mut params = Vec::new();
         let mut return_type = None;
         let mut saw_result_arrow = false;
@@ -4910,7 +4910,7 @@ mod tests {
              define generic pick(s) => callable(<integer>) => <integer>;\n\
              define method pick(s :: <shape>) => (callable(<integer>) => <integer>)\n  1\nend;\n\
              define function both() => (callable(<integer>) => (<integer>, <shape>), <integer>)\n  \
-             let f = function () => callable(<integer>) => <integer> 1 end;\n  1\nend;",
+             let f = method () => callable(<integer>) => <integer> 1 end;\n  1\nend;",
         );
         let module = lower(&tree);
         assert_eq!(module.diagnostics, Vec::new());

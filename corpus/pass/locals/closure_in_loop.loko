@@ -9,7 +9,7 @@ define function main() => <integer>
   let i = 0;
   while (i < 4)
     let step = i * 5;
-    let add-step = function (n :: <integer>) => <integer> n + step end;
+    let add-step = method (n :: <integer>) => <integer> n + step end;
     total := add-step(total);
     i := i + 1
   end;

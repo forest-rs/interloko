@@ -4,6 +4,6 @@
 // that takes them can be passed as a value instead.
 
 define function main() => <integer>
-  let g = function (x :: <integer>, #key by) => <integer> x end;
+  let g = method (x :: <integer>, #key by) => <integer> x end;
   g(1)
 end;

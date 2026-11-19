@@ -10,7 +10,7 @@ define class <inventory> (<object>)
   slot all :: <sequence>, init-value: #[1, 2];
   slot log :: <string-builder>, init-value: make(<string-builder>);
   slot mark :: <character>, init-value: 'x';
-  slot step :: <function>, init-value: function (n :: <integer>) => <integer> n + 1 end;
+  slot step :: <function>, init-value: method (n :: <integer>) => <integer> n + 1 end;
 end;
 
 define function main() => <integer>

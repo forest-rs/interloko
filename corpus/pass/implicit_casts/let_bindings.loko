@@ -22,7 +22,7 @@ define function main() => <integer>
   t["mark"] := 'x';
   t["half"] := 0.5;
   t["name"] := "loko";
-  t["twice"] := function (n :: <integer>) => <integer> n * 2 end;
+  t["twice"] := method (n :: <integer>) => <integer> n * 2 end;
   let s :: <shape> = make(<circle>, radius: 1);
   let c :: <circle> = s;
   let count :: <integer> = t["count"];

@@ -20,6 +20,6 @@ define function twice(x :: <integer>) => <integer>
 end;
 
 define function main() => <integer>
-  let boxed :: <object> = function (x :: <integer>) => <integer> x * 100 end;
+  let boxed :: <object> = method (x :: <integer>) => <integer> x * 100 end;
   run-it(boxed, 10) + run-it(twice, 6) * 10 + run-it("text", 1) + run-it(1, 2)
 end;

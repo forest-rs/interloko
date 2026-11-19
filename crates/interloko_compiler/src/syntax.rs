@@ -443,8 +443,8 @@ pub enum CstKind {
     SelectClause = 62,
     /// Recoverable condition handler expression.
     HandleExpr = 21,
-    /// Anonymous function expression.
-    FunctionExpr = 31,
+    /// Anonymous `method (params) => results body end` expression.
+    MethodExpr = 31,
     /// Restart clause in a handler expression.
     RestartClause = 22,
     /// Dylan-style `block` expression.

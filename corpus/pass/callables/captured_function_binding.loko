@@ -8,6 +8,6 @@ end;
 
 define function main() => <integer>
   let f = inc;
-  let g = function (x :: <integer>) => <integer> f(f(x)) end;
+  let g = method (x :: <integer>) => <integer> f(f(x)) end;
   g(9)
 end;

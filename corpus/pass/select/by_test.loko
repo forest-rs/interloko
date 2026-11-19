@@ -18,7 +18,7 @@ define function near(n :: <integer>) => <integer>
 end;
 
 define function successor(n :: <integer>) => <integer>
-  select (n by function (a :: <integer>, b :: <integer>) => <boolean> a = b + 1 end)
+  select (n by method (a :: <integer>, b :: <integer>) => <boolean> a = b + 1 end)
     10 => 1;
     otherwise => 0;
   end
@@ -34,5 +34,5 @@ end;
 
 define function main() => <integer>
   near(11) * 1000 + successor(11) * 100 + near(50) * 10
-    + match-with(7, function (a :: <integer>, b :: <integer>) => <boolean> a = b end)
+    + match-with(7, method (a :: <integer>, b :: <integer>) => <boolean> a = b end)
 end;

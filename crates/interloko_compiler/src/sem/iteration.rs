@@ -146,7 +146,7 @@ impl KernelTree {
         }
     }
 
-    /// `function (params :: <object>) => result body end`.
+    /// `method (params :: <object>) => result body end`.
     fn function(&mut self, params: &[&str], result: &str, body: Expr) -> Expr {
         let params = params
             .iter()

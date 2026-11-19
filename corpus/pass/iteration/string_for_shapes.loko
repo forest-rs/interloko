@@ -35,9 +35,9 @@ define function pairs(s :: <string>) => <integer>
 end;
 
 define function last-captured(s :: <string>) => <character>
-  let read = function () => <character> '?' end;
+  let read = method () => <character> '?' end;
   for (c in s)
-    read := function () => <character> c end
+    read := method () => <character> c end
   end;
   read()
 end;

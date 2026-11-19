@@ -23,7 +23,7 @@ define function main() => <integer>
   let c = make(<counter>, n: 1);
   bump(c);
   scale(c);
-  let add-three = function (x :: <counter>) => () x.n := x.n + 3 end;
+  let add-three = method (x :: <counter>) => () x.n := x.n + 3 end;
   add-three(c);
   c.n
 end;

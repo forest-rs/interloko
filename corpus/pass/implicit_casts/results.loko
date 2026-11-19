@@ -32,7 +32,7 @@ define function main() => <integer>
   env["c"] := 2;
   env["d"] := 1;
   env["name"] := "x";
-  let get = function (key :: <string>) => <integer> env[key] end;
+  let get = method (key :: <string>) => <integer> env[key] end;
   let (d, name) = both(env);
   lookup(env, "a") * 1000 + peek(env) * 100 + fetch(env) * 10 + d
     + size(name) - get("d")

@@ -4,7 +4,7 @@
 // capture it.
 
 define function adder(#key by :: <integer> = 5) => callable(<integer>) => <integer>
-  function (x :: <integer>) => <integer> x + by end
+  method (x :: <integer>) => <integer> x + by end
 end;
 
 define function main() => <integer>

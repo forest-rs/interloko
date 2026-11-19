@@ -35,7 +35,7 @@ end;
 
 define function in-closure() => <integer>
   let a = 10;
-  let f = function () => <integer> let z = 5; $k + a + z end;
+  let f = method () => <integer> let z = 5; $k + a + z end;
   f()
 end;
 

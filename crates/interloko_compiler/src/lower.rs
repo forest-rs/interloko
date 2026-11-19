@@ -15430,13 +15430,13 @@ mod tests {
         // in one place, however many `make`s take the default, and is
         // specialized as the same closure written in a function body is.
         let source = "define class <box> (<object>)\n  \
-              slot f :: <callable>, init-value: function (x :: <integer>) => <integer>\n    \
+              slot f :: <callable>, init-value: method (x :: <integer>) => <integer>\n    \
                 if (x < 10) if (x > 0) x + 1 else 0 end else 0 end\n  end;\n\
             end;\n\
             define function one() => <box>\n  make(<box>)\nend;\n\
             define function two() => <box>\n  make(<box>)\nend;\n\
             define function own() => <callable>\n  \
-              function (x :: <integer>) => <integer>\n    \
+              method (x :: <integer>) => <integer>\n    \
                 if (x < 10) if (x > 0) x + 1 else 0 end else 0 end\n  end\nend;";
         let proved = lower_with_policy(source, CodegenPolicy::Proved);
         let closures = proved

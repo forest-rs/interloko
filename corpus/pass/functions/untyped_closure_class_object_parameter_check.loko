@@ -17,5 +17,5 @@ define function name-with(f :: <callable>, c :: class <other>) => <string>
 end;
 
 define function main()
-  name-with(function (c :: class <shape>) => <string> class-name(c) end, <other>)
+  name-with(method (c :: class <shape>) => <string> class-name(c) end, <other>)
 end;

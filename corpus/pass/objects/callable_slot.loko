@@ -10,9 +10,9 @@ define class <stash> (<object>)
 end;
 
 define function main() => <integer>
-  let stash = make(<stash>, fn: function (x :: <integer>) => <integer> x + 1 end);
+  let stash = make(<stash>, fn: method (x :: <integer>) => <integer> x + 1 end);
   let first :: <integer> = apply(stash.fn, 20);
-  let replaced = stash.fn := function (x :: <integer>) => <integer> x + first end;
+  let replaced = stash.fn := method (x :: <integer>) => <integer> x + first end;
   let second :: <integer> = apply(stash.fn, 21);
   second
 end;

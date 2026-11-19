@@ -15,12 +15,12 @@ end;
 
 define function equal-test(c :: <counter>) => callable(<integer>, <integer>) => <boolean>
   let made = tick(c);
-  function (a :: <integer>, b :: <integer>) => <boolean> a = b end
+  method (a :: <integer>, b :: <integer>) => <boolean> a = b end
 end;
 
 define function main() => <integer>
   let c = make(<counter>);
-  let run = function (n :: <integer>) => <integer>
+  let run = method (n :: <integer>) => <integer>
     select (n by equal-test(c))
       1 => 0;
       2 => 0;

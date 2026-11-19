@@ -18,5 +18,5 @@ define function call-with(f :: <callable>, s :: <square>) => <integer>
 end;
 
 define function main()
-  call-with(function (c :: <circle>) => <integer> c.radius end, make(<square>, side: 7))
+  call-with(method (c :: <circle>) => <integer> c.radius end, make(<square>, side: 7))
 end;
