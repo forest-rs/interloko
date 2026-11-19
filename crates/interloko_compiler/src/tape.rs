@@ -178,7 +178,9 @@ pub fn emit(module: &lower::Module) -> Result<TapeModule, TapeError> {
         let sites = type_errors
             .get_mut(func.0 as usize)
             .ok_or_else(|| invalid_lowered("function id is out of range"))?;
-        let asm = FunctionEmitter::new(function, &ids, &abi, &mut builder, sites).emit()?;
+        let asm = FunctionEmitter::new(function, &ids, &abi, &mut builder, sites)
+            .with_layout(&module.runtime)
+            .emit()?;
         builder.define_function(func, asm).map_err(build_error)?;
     }
 
@@ -338,6 +340,10 @@ fn build_error(error: impl core::fmt::Display) -> TapeError {
         message: format!("{error}"),
     }
 }
+
+/// The most classes an `instance?` test compares keys with before asking
+/// the host instead.
+const KEYED_INSTANCE_CLASSES: usize = 4;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct TapeIds {
@@ -1374,6 +1380,9 @@ struct FunctionEmitter<'a> {
     type_errors: &'a mut Vec<TypeErrorSite>,
     /// Registers the function's signal paths share, by role and type.
     shared: Vec<(SharedTemp, ValueType, Reg)>,
+    /// The runtime layout, whose class hierarchy `instance?` tests compare
+    /// keys against.
+    layout: Option<&'a RuntimeLayout>,
 }
 
 /// What a register shared by every signal path of a function holds.
@@ -1423,7 +1432,27 @@ impl<'a> FunctionEmitter<'a> {
             labels,
             type_errors,
             shared: Vec::new(),
+            layout: None,
         }
+    }
+
+    const fn with_layout(mut self, layout: &'a RuntimeLayout) -> Self {
+        self.layout = Some(layout);
+        self
+    }
+
+    /// The classes an `instance?` test of `class` accepts, when there are at
+    /// most [`KEYED_INSTANCE_CLASSES`] of them, so the test compares an
+    /// `obj.key` with each instead of asking the host.
+    fn keyed_instance_classes(&self, class: sem::ClassId) -> Option<Vec<u32>> {
+        let layout = self.layout?;
+        let accepted = (0..layout.classes.len())
+            .filter_map(|index| u32::try_from(index).ok())
+            .filter(|&id| layout.is_same_or_subclass(sem::ClassId(id), class))
+            .collect::<Vec<_>>();
+        (1..=KEYED_INSTANCE_CLASSES)
+            .contains(&accepted.len())
+            .then_some(accepted)
     }
 
     fn emit(mut self) -> Result<Asm, TapeError> {
@@ -2295,14 +2324,27 @@ impl<'a> FunctionEmitter<'a> {
                 input,
                 span,
             } => {
-                let sig = if *input == lower::ValueKind::Any {
-                    self.abi.class_of_any
-                } else {
-                    self.abi.class_of
-                };
+                // `obj.key` reads the class without a host call; a boxed
+                // scalar's key also carries `SCALAR_KEY_BIT`, which a class
+                // id does not.
                 self.set_span(*span);
-                self.asm
-                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*object], &[*dst]);
+                if let ValueType::Obj(_) = self.register_type(*object)? {
+                    self.asm.obj_key(*dst, *object);
+                    if *input == lower::ValueKind::Any {
+                        let mask = self.alloc_temp(ValueType::U64);
+                        self.asm
+                            .const_u64(mask, !runtime::SCALAR_KEY_BIT)
+                            .u64_and(*dst, *dst, mask);
+                    }
+                } else {
+                    let sig = if *input == lower::ValueKind::Any {
+                        self.abi.class_of_any
+                    } else {
+                        self.abi.class_of
+                    };
+                    self.asm
+                        .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*object], &[*dst]);
+                }
             }
             lower::Instr::UnboxValue {
                 dst,
@@ -2357,6 +2399,42 @@ impl<'a> FunctionEmitter<'a> {
                 class,
                 span,
             } => {
+                if let (ValueType::Obj(_), Some(accepted)) = (
+                    self.register_type(*value)?,
+                    self.keyed_instance_classes(*class),
+                ) {
+                    // `obj.key` and a compare per accepted class, without a
+                    // host call; a boxed scalar's key is its class too.
+                    let key = self.alloc_temp(ValueType::U64);
+                    let expected = self.alloc_temp(ValueType::U64);
+                    let (yes, done) = (self.asm.label(), self.asm.label());
+                    self.set_span(*span);
+                    self.asm.obj_key(key, *value);
+                    if *input == lower::ValueKind::Any {
+                        self.asm
+                            .const_u64(expected, !runtime::SCALAR_KEY_BIT)
+                            .u64_and(key, key, expected);
+                    }
+                    for id in accepted {
+                        let no = self.asm.label();
+                        self.asm
+                            .const_u64(expected, u64::from(id))
+                            .u64_eq(*dst, key, expected)
+                            .br(*dst, yes, no);
+                        self.asm
+                            .place(no)
+                            .map_err(|_| invalid_lowered("instance label is placed twice"))?;
+                    }
+                    self.asm.jmp(done);
+                    self.asm
+                        .place(yes)
+                        .map_err(|_| invalid_lowered("instance label is placed twice"))?;
+                    self.asm.const_bool(*dst, true).jmp(done);
+                    self.asm
+                        .place(done)
+                        .map_err(|_| invalid_lowered("instance label is placed twice"))?;
+                    return Ok(());
+                }
                 let sig = self.instance_sig(*input)?;
                 let class_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
@@ -3206,6 +3284,53 @@ mod tests {
         let flag = runtime_class(&tape, "<flag>");
         assert_eq!(flag.slots[0].name, "valid?");
         assert_eq!(flag.slots[0].kind, runtime::ValueKind::Bool);
+    }
+
+    #[test]
+    fn instance_tests_read_keys_unless_too_many_classes_apply() {
+        // `<circle>` has no subclasses, so `instance?` compares one key;
+        // `<object>` covers every class, so it still asks the host.
+        let module = lower_source(
+            "define class <shape> (<object>)\nend;\n\
+             define class <circle> (<shape>)\nend;\n\
+             define function round?(x :: <object>) => <boolean>\n  instance?(x, <circle>)\nend;\n\
+             define function any?(x :: <object>) => <boolean>\n  instance?(x, <object>)\nend;\n\
+             define class <four> (<object>)\nend;\n\
+             define class <f1> (<four>)\nend;\ndefine class <f2> (<four>)\nend;\n\
+             define class <f3> (<four>)\nend;\n\
+             define class <five> (<object>)\nend;\n\
+             define class <v1> (<five>)\nend;\ndefine class <v2> (<five>)\nend;\n\
+             define class <v3> (<five>)\nend;\ndefine class <v4> (<five>)\nend;\n\
+             define function four?(x :: <object>) => <boolean>\n  instance?(x, <four>)\nend;\n\
+             define function five?(x :: <object>) => <boolean>\n  instance?(x, <five>)\nend;",
+        );
+        let tape = emit(&module).expect("tape emission should succeed");
+        let text = |name: &str| {
+            let function = module
+                .functions
+                .iter()
+                .find(|function| function.name == name)
+                .expect("function");
+            execution_tape::disasm::disassemble_function(
+                tape.program().program(),
+                FuncId(function.id.0),
+            )
+            .expect("disassembles")
+            .instrs()
+            .map(|instr| instr.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        let round = text("round?");
+        assert!(round.contains("obj.key"), "{round}");
+        assert!(!round.contains("interloko.instance_of"), "{round}");
+        let any = text("any?");
+        assert!(any.contains("interloko.instance_of"), "{any}");
+        // Up to four accepted classes compare keys; five ask the host.
+        let four = text("four?");
+        assert!(!four.contains("interloko.instance_of"), "{four}");
+        let five = text("five?");
+        assert!(five.contains("interloko.instance_of"), "{five}");
     }
 
     #[test]
