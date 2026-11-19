@@ -1,7 +1,22 @@
-// expect: diagnostic code sem.function-argument-type-mismatch
-// expect: diagnostics 1
+// expect: diagnostic code sem.keyword-argument-type-mismatch
+// expect: diagnostics 3
+// expect: diagnostic contains `f` keyword `n:` expects <integer> but got <string>
+// expect: diagnostic contains `f` keyword `m:` expects <integer> but got <string>
+// expect: diagnostic contains `g` keyword `scale:` expects <integer> but got <string>
 // A keyword argument is checked against its parameter's type like a
-// positional one.
+// positional one, and a mismatch names the keyword, wherever the call
+// passes it and whether the callee is a function or a generic.
 
-define function f(x :: <integer>, #key n :: <integer> = 1) => <integer> x + n end;
-define function main() => <integer> f(1, n: "two") end;
+define function f(x :: <integer>, #key n :: <integer> = 1, m :: <integer> = 2) => <integer>
+  x + n + m
+end;
+
+define generic g (x, #key scale :: <integer> = 1) => <integer>;
+
+define method g (x :: <integer>, #key scale :: <integer>) => <integer>
+  x * scale
+end;
+
+define function main() => <integer>
+  f(1, n: "two") + f(1, m: "three", n: 4) + g(1, scale: "four")
+end;
