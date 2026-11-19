@@ -1,5 +1,6 @@
 // expect: diagnostics 1
-// expect: diagnostic code syntax.expected-token
+// expect: diagnostic code syntax.expected-expression
+// expect: diagnostic contains expected expression
 
 // Loko's anonymous functions are Dylan's: `method (x) … end`. The
 // `function` keyword only starts a `define function`, so

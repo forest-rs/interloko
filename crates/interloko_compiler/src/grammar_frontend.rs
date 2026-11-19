@@ -4841,7 +4841,11 @@ mod tests {
         assert_eq!(diagnostic.span, Span::new(7, 13));
         assert_eq!(
             diagnostic_arg(diagnostic, "expected"),
-            Some("`class` or `generic` or `method` or `function` or `constant`".to_string())
+            Some(
+                "`sealed` or `open` or `abstract` or `concrete` or `class` or `strict` or \
+                 `generic` or `method` or `function` or `constant`"
+                    .to_string()
+            )
         );
         let fact = report
             .grammar_diagnostics
@@ -4870,37 +4874,42 @@ mod tests {
         assert_eq!(fact.unexpected_fragment, None);
     }
 
-    /// Pins the failure the kernel reports when a body form fails: it
-    /// backtracks past the form and reports the enclosing definition's
-    /// required `end` where the form starts, rather than diving into the
-    /// failed rule. Guards against silent changes to that strategy.
+    /// A body form that fails is reported where the source stopped
+    /// matching inside it, naming what could have come there, rather than
+    /// as the enclosing definition's missing `end` where the form starts.
     #[test]
-    fn base_loko_failed_body_form_reports_enclosing_end() {
-        // The `"` and the `let` keyword both start at byte 25.
-        for (source, span) in [
-            (
-                "define function main()\n  \"unterminated\nend;",
-                Span::new(25, 26),
-            ),
-            (
-                "define function main()\n  let x = ;\nend;",
-                Span::new(25, 28),
-            ),
-        ] {
-            let report = parse_file(SourceFileId::from_path("bad-body.loko"), source);
-            let diagnostic = report
-                .diagnostics
-                .iter()
-                .find(|diagnostic| diagnostic.code == DiagnosticCode::SyntaxExpectedToken)
-                .expect("syntax diagnostic");
+    fn base_loko_failed_body_form_reports_where_source_stops_matching() {
+        let unterminated = "define function main()\n  \"unterminated\nend;";
+        let report = parse_file(SourceFileId::from_path("bad-body.loko"), unterminated);
+        let diagnostic = report.diagnostics.first().expect("syntax diagnostic");
+        assert_eq!(diagnostic.code, DiagnosticCode::SyntaxExpectedToken);
+        assert_eq!(
+            diagnostic.span,
+            Span::new(unterminated.len(), unterminated.len())
+        );
+        assert_eq!(
+            diagnostic_arg(diagnostic, "expected").as_deref(),
+            Some("`\"`")
+        );
 
-            assert_eq!(diagnostic.span, span, "{source:?}");
-            assert_eq!(
-                diagnostic_arg(diagnostic, "expected").as_deref(),
-                Some("`end`"),
-                "{source:?}"
-            );
-        }
+        let report = parse_file(
+            SourceFileId::from_path("bad-body.loko"),
+            "define function main()\n  let x = ;\nend;",
+        );
+        let diagnostic = report.diagnostics.first().expect("syntax diagnostic");
+        assert_eq!(diagnostic.code, DiagnosticCode::SyntaxExpectedExpression);
+        assert_eq!(diagnostic.span, Span::new(33, 34));
+
+        let report = parse_file(
+            SourceFileId::from_path("bad-body.loko"),
+            "define function main()\n  foo(1 2)\nend;",
+        );
+        let diagnostic = report.diagnostics.first().expect("syntax diagnostic");
+        assert_eq!(diagnostic.span, Span::new(31, 32));
+        assert_eq!(
+            diagnostic_arg(diagnostic, "expected").as_deref(),
+            Some("`,` or `)`")
+        );
     }
 
     #[test]

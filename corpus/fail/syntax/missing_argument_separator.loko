@@ -1,0 +1,13 @@
+// expect: diagnostics 1
+// expect: diagnostic code syntax.expected-token
+// expect: diagnostic contains expected `,` or `)`
+
+// A syntax error is reported where the source stopped matching, at the
+// `2` here, naming what could have come there, rather than as the
+// function's missing `end` where the broken statement starts.
+
+define function main() => <integer>
+  let total = 0;
+  total := max(1 2);
+  total
+end;

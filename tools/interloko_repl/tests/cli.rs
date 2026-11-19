@@ -888,7 +888,7 @@ fn malformed_completed_definition_reports_and_repl_continues() {
     );
 
     assert!(stderr.contains("diagnostics:"), "{stderr}");
-    assert!(stderr.contains("syntax.expected-token"), "{stderr}");
+    assert!(stderr.contains("syntax.expected-expression"), "{stderr}");
     assert!(stdout.lines().any(|line| line == "3"));
 }
 

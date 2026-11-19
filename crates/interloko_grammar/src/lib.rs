@@ -2011,6 +2011,14 @@ struct ParseContext<'g, 's> {
     apply_memo: PositionMemo<ApplyMemoKey<'g>, Result<ApplyMatch, ParseFailure<'g>>>,
     active_rules: Vec<(usize, MemoKey<'g>)>,
     metrics: ParseMetrics,
+    /// The failure that got farthest into the source, when the parse
+    /// tracks it; see [`Self::tracking_farthest`].
+    farthest: Option<Option<ParseFailure<'g>>>,
+    /// How many lookaheads and raw (token) rules enclose the expression
+    /// being matched. A failure inside a lookahead is how it succeeds or
+    /// decides, and one inside a token is a detail of the token, so neither
+    /// is what the source was expected to hold and neither is tracked.
+    lookahead_depth: usize,
 }
 
 impl<'g, 's> ParseContext<'g, 's> {
@@ -2023,7 +2031,47 @@ impl<'g, 's> ParseContext<'g, 's> {
             apply_memo: PositionMemo::new(),
             active_rules: Vec::new(),
             metrics: ParseMetrics::default(),
+            farthest: None,
+            lookahead_depth: 0,
         }
+    }
+
+    /// A context that also tracks the farthest failure, at the cost of
+    /// recording every failure: what an error report needs, since the
+    /// failure a rule returns is often where a repetition or option gave
+    /// up rather than where the source went wrong.
+    fn tracking_farthest(source: &'s str, source_offset: usize) -> Self {
+        Self {
+            farthest: Some(None),
+            ..Self::new(source, source_offset)
+        }
+    }
+
+    /// Records `failure` as a candidate farthest failure.
+    fn note_failure(&mut self, failure: &ParseFailure<'g>) {
+        if self.lookahead_depth > 0 {
+            return;
+        }
+        if let Some(farthest) = &mut self.farthest {
+            merge_failure(farthest, failure.clone());
+        }
+    }
+
+    /// Records that rule `name`, tried at `position` from a caller that
+    /// skips trivia, failed at `failed`. When it failed without progress
+    /// past any leading trivia, the source there was expected to hold the
+    /// rule as a whole.
+    fn note_rule_failure(&mut self, name: &'g str, position: usize, failed: usize, raw: bool) {
+        if raw || self.lookahead_depth > 0 || self.farthest.is_none() {
+            return;
+        }
+        let start = skip_trivia(self.source, position);
+        if failed > start {
+            return;
+        }
+        let failure =
+            ParseFailure::expected_at_source(self.source, start, ExpectedFragment::Rule(name), raw);
+        self.note_failure(&failure);
     }
 
     /// Region-relative end of a recorded node.
@@ -3140,7 +3188,8 @@ pub fn inspect_region_compiled<'g, 's>(
 /// `inner` and skips forward past per-iteration failures, emitting a
 /// [`RuleNodeKind::RecoveryError`] child for each skipped region.
 /// Returns a [`RecoveryReport`] with a root that always spans the
-/// whole input plus a list of every recovered failure.
+/// whole input plus a list of every recovered failure, each reported as
+/// [`interpret_rule_error`] reports it: where the source stopped matching.
 ///
 /// For non-repetition root rules this falls back to
 /// [`inspect_region_compiled`] and wraps the result in a
@@ -3208,8 +3257,16 @@ pub fn interpret_region_recovering<'g, 's>(
                 children.push(context.rule_node(node));
                 position = advance;
             }
-            Err(failure) => {
-                errors.push(failure.into_error(source_offset));
+            Err(_) => {
+                // Report where the source stopped matching, which needs a
+                // tracking parse; failures are rare, so only they pay.
+                errors.push(interpret_rule_error_with(
+                    lookup,
+                    iteration_target,
+                    source,
+                    try_position,
+                    source_offset,
+                ));
                 let recovery_start = try_position;
                 let mut scan = next_char_boundary(source, try_position);
                 let mut recovered: Option<NodeId> = None;
@@ -3333,7 +3390,14 @@ fn inspect_region_with<'g, 's>(
 ///
 /// This helper is for diagnostics and recovery. It does not require the full
 /// region to be consumed, and it returns the [`ParseError`] that matching
-/// `rule_name` at `position` would produce.
+/// `rule_name` at `position` would produce: the failure that got farthest
+/// into the source, with every fragment expected there. That is where the
+/// source stopped matching, which is often past where the rule itself gave
+/// up: a body's repetition stops before a broken statement, but the
+/// statement's own failure is inside it. A rule that failed there without
+/// consuming anything is expected there as a whole
+/// ([`ExpectedFragment::Rule`]), alongside its first fragments; failures
+/// inside a lookahead are not counted.
 #[must_use]
 pub fn interpret_rule_error<'g>(
     rules: &[SourceAuthoredRule<'g>],
@@ -3373,9 +3437,21 @@ fn interpret_rule_error_with<'g>(
     let raw = lookup
         .rule(rule_name)
         .is_some_and(|rule| matches!(rule.trivia, TriviaMode::Raw));
-    let mut context = ParseContext::new(source, source_offset);
-    interpret_rule(&mut context, lookup, rule_name, position)
-        .err()
+    let mut context = ParseContext::tracking_farthest(source, source_offset);
+    let Err(failure) = interpret_rule(&mut context, lookup, rule_name, position) else {
+        return ParseFailure::expected_at_source(
+            source,
+            position,
+            ExpectedFragment::Rule(rule_name),
+            raw,
+        )
+        .into_error(source_offset);
+    };
+    // Where a repetition or option stopped is only where the rule gave up;
+    // the farthest failure is where the source stopped matching.
+    let mut farthest = context.farthest.flatten();
+    merge_failure(&mut farthest, failure);
+    farthest
         .unwrap_or_else(|| {
             ParseFailure::expected_at_source(
                 source,
@@ -3423,7 +3499,12 @@ fn interpret_rule<'g>(
         // that rule's own parent chain, not against whichever grammar
         // the lookup started in.
         context.active_rules.push((position, key));
+        // A raw rule is one token to its callers: where inside it a
+        // character failed is not what the source was expected to hold.
+        let token = matches!(rule.trivia, TriviaMode::Raw);
+        context.lookahead_depth += usize::from(token);
         let result = interpret_rule_definition(context, active, rule, name, position);
+        context.lookahead_depth -= usize::from(token);
         context.active_rules.pop();
         context.memo.insert(position, key, result.clone());
         return result;
@@ -3744,8 +3825,9 @@ fn interpret_expression<'g>(
 ) -> Result<ExpressionMatch, ParseFailure<'g>> {
     let children_from = context.arena.pending.len();
     let result = match_expression(context, lookup, params, expression, position, raw);
-    if result.is_err() {
+    if let Err(failure) = &result {
         context.arena.pending.truncate(children_from);
+        context.note_failure(failure);
     }
     result
 }
@@ -3825,6 +3907,7 @@ fn interpret_reference<'g>(
             // it on failure too.
             let node = interpret_rule(context, lookup, name, position).map_err(|mut failure| {
                 failure.committed = false;
+                context.note_rule_failure(name, position, failure.position(), raw);
                 failure
             })?;
             context.arena.push_child(node);
@@ -4085,12 +4168,13 @@ fn interpret_modifier<'g>(
         RuleExpression::And(inner) => {
             // Lookahead is non-consuming inspection; an inner cut commit
             // must not extend out to the enclosing choice scope.
-            interpret_expression(context, lookup, params, inner, position, raw).map_err(
-                |mut failure| {
-                    failure.committed = false;
-                    failure
-                },
-            )?;
+            context.lookahead_depth += 1;
+            let inspected = interpret_expression(context, lookup, params, inner, position, raw);
+            context.lookahead_depth -= 1;
+            inspected.map_err(|mut failure| {
+                failure.committed = false;
+                failure
+            })?;
             context.arena.pending.truncate(children_from);
             Ok(ExpressionMatch {
                 end: position,
@@ -4098,7 +4182,10 @@ fn interpret_modifier<'g>(
             })
         }
         RuleExpression::Not(inner) => {
-            match interpret_expression(context, lookup, params, inner, position, raw) {
+            context.lookahead_depth += 1;
+            let inspected = interpret_expression(context, lookup, params, inner, position, raw);
+            context.lookahead_depth -= 1;
+            match inspected {
                 Ok(_) => Err(ParseFailure::expected_at_source(
                     context.source,
                     position,
@@ -6257,6 +6344,33 @@ end
         assert!(character_class_contains(r"\n", '\n'));
         assert!(character_class_contains(r"\t", '\t'));
         assert!(!character_class_contains(r"\]", '['));
+    }
+
+    #[test]
+    fn rule_error_reports_the_farthest_failure() {
+        // The repetition stops before the broken `x`, so the rule itself
+        // fails expecting `end` there; the source stopped matching after
+        // that `x`, where an item's `;` was expected. A failure inside the
+        // lookahead or the raw `word` token is not counted.
+        let rules = parse_grammar_source(
+            "grammar t\n\
+             rule root = `begin` item* `end`\n\
+             rule item = `x` !`?` word? `;`\n\
+             rule word raw = [a-c]+\n\
+             end\n",
+        );
+        let source = "begin x; x end";
+        let error = interpret_rule_error(&rules, "root", source, 0, 0);
+        assert_eq!(error.span, Span::new(11, 14));
+        assert!(error.expected.contains(&ExpectedFragment::Literal(";")));
+        assert!(!error.expected.contains(&ExpectedFragment::Literal("?")));
+        assert!(
+            !error
+                .expected
+                .iter()
+                .any(|expected| matches!(expected, ExpectedFragment::CharacterClass(_)))
+        );
+        assert!(error.expected.contains(&ExpectedFragment::Rule("word")));
     }
 
     #[test]
