@@ -1581,6 +1581,10 @@ struct FunctionEmitter<'a> {
     /// The runtime layout, whose class hierarchy `instance?` tests compare
     /// keys against.
     layout: Option<&'a RuntimeLayout>,
+    /// Where control goes after the instruction being emitted when the
+    /// next lowered instruction is a jump: its target. An expansion that
+    /// would otherwise jump to its own end and then on can go there directly.
+    continuation: Option<Label>,
 }
 
 /// What a register shared by every signal path of a function holds.
@@ -1641,6 +1645,7 @@ impl<'a> FunctionEmitter<'a> {
             type_errors,
             shared: Vec::new(),
             layout: None,
+            continuation: None,
         }
     }
 
@@ -1664,7 +1669,12 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit(mut self) -> Result<Asm, TapeError> {
-        for instr in &self.function.instructions {
+        let instructions = &self.function.instructions;
+        for (index, instr) in instructions.iter().enumerate() {
+            self.continuation = match instructions.get(index + 1) {
+                Some(lower::Instr::Jump { label, .. }) => Some(self.label(*label)?),
+                _ => None,
+            };
             self.emit_instr(instr)?;
         }
         Ok(self.asm)
@@ -3148,7 +3158,12 @@ impl<'a> FunctionEmitter<'a> {
         let at = self.shared_temp(SharedTemp::TextPosition, ValueType::U64);
         let moved = self.shared_temp(SharedTemp::TextMoved, ValueType::U64);
         let missing = self.shared_temp(SharedTemp::TextMissing, ValueType::Bool);
-        let scalar = if reads_character {
+        // The decode writes its character before the host call that follows
+        // a miss reads the arguments, so it writes `dst` itself only when
+        // `dst` is no argument, such as `element`'s default: the call must
+        // read every argument before its result is written.
+        let direct = reads_character && !args.contains(&dst);
+        let scalar = if direct {
             dst
         } else {
             self.shared_temp(SharedTemp::TextScalar, ValueType::U32)
@@ -3159,14 +3174,18 @@ impl<'a> FunctionEmitter<'a> {
         } else {
             self.asm.obj_utf8_next(scalar, moved, missing, string, at);
         }
-        if reads_character {
+        if direct {
             // The decode wrote the character to `dst` already.
             self.asm.br(missing, slow, done);
         } else {
             let found = self.asm.label();
             self.asm.br(missing, slow, found);
             self.asm.place(found).map_err(build_error)?;
-            self.asm.u64_to_i64_wrap(dst, moved);
+            if reads_character {
+                self.asm.mov(dst, scalar);
+            } else {
+                self.asm.u64_to_i64_wrap(dst, moved);
+            }
             self.asm.jmp(done);
         }
         Ok(true)
@@ -3217,7 +3236,10 @@ impl<'a> FunctionEmitter<'a> {
             self.asm.label(),
         );
         self.set_span(span);
-        if self.emit_string_decode(dst, function, args, slow, done)? {
+        // A read that finds its character skips the call; when a jump follows
+        // the call, it goes straight to that jump's target.
+        let found = self.continuation.unwrap_or(done);
+        if self.emit_string_decode(dst, function, args, slow, found)? {
             self.asm.place(slow).map_err(build_error)?;
         }
         let copy_type = self.register_type(args[checked])?;

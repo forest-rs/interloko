@@ -85,6 +85,7 @@ use interloko_runtime::code::{Contracts, DispatchCase, GenericDispatch};
 use interloko_runtime::control::{RestartDescriptor, RestartParameter, TypeErrorSite};
 
 mod facts;
+mod peephole;
 mod reads;
 
 use facts::TypingFacts;
@@ -2636,6 +2637,9 @@ impl<'module> Lowering<'module> {
             })
             .collect::<Result<Vec<_>, LowerError>>()?;
 
+        for function in &mut functions {
+            peephole::optimize(function);
+        }
         let dispatch = self.ids.dispatch.clone();
         let check_codegen = merge_check_records(checks);
         Ok(Module {
@@ -13415,7 +13419,44 @@ mod tests {
         assert!(dump.contains("i64.lt"));
         assert!(dump.contains("br "));
         assert!(dump.contains("jmp bb"));
-        assert!(dump.contains(" = mov "));
+        // Each branch writes its value straight into the join's register.
+        assert!(dump.contains("%r5 = const.i64 1"), "{dump}");
+        assert!(dump.contains("%r5 = const.i64 2"), "{dump}");
+    }
+
+    #[test]
+    fn loops_make_constants_once_and_write_results_where_they_go() {
+        // `256` and `1` are made once, before the loop's head; `i := i + 1`
+        // writes `i` itself; and the `if` without an `else` branches past
+        // its empty arm to the join's own target.
+        let module = lower_with_policy(
+            "define function main() => <integer>\n  let total = 0;\n  let i = 0;\n  \
+             while (i < 256)\n    if (i = 7) total := total + i end;\n    i := i + 1\n  end;\n  \
+             total\nend;",
+            CodegenPolicy::Proved,
+        );
+        let dump = module.dump();
+        let head = dump.find("bb1:").expect("the loop's head");
+        for constant in ["const.i64 256", "const.i64 1 "] {
+            assert!(
+                dump.find(constant).is_some_and(|at| at < head),
+                "{constant} is made inside the loop:\n{dump}"
+            );
+        }
+        let step = dump
+            .lines()
+            .find(|line| line.contains("i64.add ") && !line.contains("ovf"))
+            .unwrap_or_else(|| panic!("no unchecked step:\n{dump}"));
+        let i = dump
+            .lines()
+            .find(|line| line.trim_start().starts_with("local l1 i = "))
+            .and_then(|line| line.split(" = ").nth(1))
+            .and_then(|rest| rest.split(':').next())
+            .expect("i's register");
+        assert!(
+            step.trim_start().starts_with(&format!("{i} = ")),
+            "{step}\n{dump}"
+        );
     }
 
     #[test]
