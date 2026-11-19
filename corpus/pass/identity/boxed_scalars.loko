@@ -1,0 +1,24 @@
+// expect: run 111100
+// expect: diagnostics 0
+// expect: dump lowered contains identical
+
+// Boxing a number or boolean as `<object>` never changes what `==` says:
+// a boxed integer, large or small, is `==` the integer it holds, as is a
+// boxed float or boolean. An integer is never `==` a float or a boolean.
+
+define function bit(b :: <boolean>) => <integer>
+  if (b) 1 else 0 end
+end;
+
+define function main() => <integer>
+  let big = 4611686018427387904;
+  let boxed-big :: <object> = as(<object>, big);
+  let boxed-seven :: <object> = as(<object>, 7);
+  let boxed-half :: <object> = as(<object>, 0.5);
+  bit(boxed-big == as(<object>, big)) * 100000
+    + bit(boxed-seven == 7) * 10000
+    + bit(boxed-half == 0.5) * 1000
+    + bit(as(<object>, #t) == #t) * 100
+    + bit(boxed-seven == 7.0) * 10
+    + bit(#t == 1)
+end;

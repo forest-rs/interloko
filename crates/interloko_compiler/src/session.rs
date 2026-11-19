@@ -5871,7 +5871,7 @@ fn collect_dispatch_sites_in_expr(
             collect_dispatch_sites_in_expr(artifacts, owner, lhs, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, rhs, sites);
         }
-        sem::Expr::ValueEqual { lhs, rhs, .. } => {
+        sem::Expr::ValueEqual { lhs, rhs, .. } | sem::Expr::Identical { lhs, rhs, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner, lhs, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, rhs, sites);
         }
@@ -8025,6 +8025,11 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             id, op, lhs, rhs, ..
         } => {
             let _ = writeln!(out, "{id} compare {op:?}");
+            dump_ast_expr(out, lhs, indent + 2);
+            dump_ast_expr(out, rhs, indent + 2);
+        }
+        ast::Expr::Identical { id, lhs, rhs, .. } => {
+            let _ = writeln!(out, "{id} identical");
             dump_ast_expr(out, lhs, indent + 2);
             dump_ast_expr(out, rhs, indent + 2);
         }
@@ -14165,6 +14170,11 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             dump_sem_expr(out, lhs, indent + 2);
             dump_sem_expr(out, rhs, indent + 2);
         }
+        sem::Expr::Identical { lhs, rhs, .. } => {
+            let _ = writeln!(out, "identical");
+            dump_sem_expr(out, lhs, indent + 2);
+            dump_sem_expr(out, rhs, indent + 2);
+        }
         sem::Expr::If {
             condition,
             refinement,
@@ -15560,6 +15570,13 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::ValueEqual { lhs, rhs, kind, .. } => {
             let kind = sem_kind_fingerprint(module, *kind);
             let _ = write!(out, "value-eq({kind}:");
+            fingerprint_sem_expr(module, lhs, out);
+            out.push(',');
+            fingerprint_sem_expr(module, rhs, out);
+            out.push(')');
+        }
+        sem::Expr::Identical { lhs, rhs, .. } => {
+            out.push_str("identical(");
             fingerprint_sem_expr(module, lhs, out);
             out.push(',');
             fingerprint_sem_expr(module, rhs, out);

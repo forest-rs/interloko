@@ -3632,6 +3632,7 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::Star
         | TokenKind::Slash
         | TokenKind::Equal
+        | TokenKind::EqualEqual
         | TokenKind::Arrow
         | TokenKind::Less
         | TokenKind::LessEqual

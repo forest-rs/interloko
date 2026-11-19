@@ -1137,7 +1137,8 @@ impl<'a> Analysis<'a> {
             }
             E::Compare { lhs, rhs, .. }
             | E::MixedCompare { lhs, rhs, .. }
-            | E::ValueEqual { lhs, rhs, .. } => {
+            | E::ValueEqual { lhs, rhs, .. }
+            | E::Identical { lhs, rhs, .. } => {
                 let _ = self.eval(env, lhs);
                 let _ = self.eval(env, rhs);
                 self.declared(expr)
@@ -2585,7 +2586,8 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
         E::Binary { lhs, rhs, .. }
         | E::Compare { lhs, rhs, .. }
         | E::MixedCompare { lhs, rhs, .. }
-        | E::ValueEqual { lhs, rhs, .. } => {
+        | E::ValueEqual { lhs, rhs, .. }
+        | E::Identical { lhs, rhs, .. } => {
             walk(module, lhs, visit);
             walk(module, rhs, visit);
         }

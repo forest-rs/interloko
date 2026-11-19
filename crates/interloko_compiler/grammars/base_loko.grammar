@@ -71,7 +71,7 @@ rule assignment-expression = assignment-target `:=` expression | comparison-expr
 rule assignment-target = postfix-expression
 rule comparison-expression = additive-expression comparison-tail?
 rule comparison-tail = comparison-op additive-expression
-rule comparison-op = `=` | `<=` | `<` | `>=` | `>`
+rule comparison-op = `==` | `=` | `<=` | `<` | `>=` | `>`
 rule additive-expression = multiplicative-expression (add-op multiplicative-expression)*
 rule add-op = `+%` | `-%` | `+` | `-`
 rule multiplicative-expression = unary-expression (mul-op unary-expression)*

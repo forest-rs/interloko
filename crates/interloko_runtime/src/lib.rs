@@ -87,6 +87,9 @@ pub const SYMBOL_LITERAL: &str = "interloko.literal.symbol";
 pub const VECTOR_LITERAL: &str = "interloko.literal.vector";
 /// Host-call symbol for runtime value equality.
 pub const VALUE_EQ: &str = "interloko.value_eq";
+/// Host-call symbol for identity, `==`, of two boxed values. It takes
+/// [`identical_signature`].
+pub const IDENTICAL: &str = "interloko.identical";
 /// Host-call symbol for creating a class metaobject.
 pub const META_CLASS_OBJECT: &str = "interloko.meta.class_object";
 /// Host-call symbol for reading the class id a class metaobject names.
@@ -1611,6 +1614,43 @@ enum RuntimeObjectStorage {
     },
 }
 
+impl RuntimeObjectStorage {
+    /// Whether two objects are the same Loko object although the heap holds
+    /// them separately.
+    ///
+    /// Symbols, metaobjects and type objects stand for something outside the
+    /// heap (a name, a class, a generic, a method, a slot, a type), and a
+    /// fresh heap object may be made each time one is named, so each is the
+    /// same object as any other standing for the same thing. Every other
+    /// object is only ever itself.
+    fn denotes_same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Symbol { name: left }, Self::Symbol { name: right }) => left == right,
+            (Self::GenericMeta { generic: left }, Self::GenericMeta { generic: right }) => {
+                left == right
+            }
+            (Self::MethodMeta { method: left }, Self::MethodMeta { method: right }) => {
+                left == right
+            }
+            (
+                Self::SlotDescriptor {
+                    class: left_class,
+                    slot: left_slot,
+                },
+                Self::SlotDescriptor {
+                    class: right_class,
+                    slot: right_slot,
+                },
+            ) => left_class == right_class && left_slot == right_slot,
+            // Type objects are the same when they are the same type.
+            (left, right) => match (left.type_object(), right.type_object()) {
+                (Some(left), Some(right)) => left.same_type(&right),
+                _ => false,
+            },
+        }
+    }
+}
+
 struct InternedObject {
     name: String,
     object: Obj,
@@ -2119,6 +2159,13 @@ impl Host for InterlokoHost {
                     return Err(HostError::Failed);
                 };
                 rets[0] = Value::Bool(self.objects_equal(*lhs, *rhs)?);
+                Ok(0)
+            }
+            IDENTICAL => {
+                let [ValueRef::Obj(lhs), ValueRef::Obj(rhs)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::Bool(self.identical(*lhs, *rhs)?);
                 Ok(0)
             }
             META_CLASS_OBJECT => {
@@ -2835,40 +2882,43 @@ impl InterlokoHost {
                 RuntimeObjectStorage::String { value: right },
             ) => left == right,
             (
-                RuntimeObjectStorage::Symbol { name: left },
-                RuntimeObjectStorage::Symbol { name: right },
-            ) => left == right,
-            (
                 RuntimeObjectStorage::Vector { elements: left },
                 RuntimeObjectStorage::Vector { elements: right },
             ) => left == right,
-            (
-                RuntimeObjectStorage::ClassMeta { class: left },
-                RuntimeObjectStorage::ClassMeta { class: right },
-            ) => left == right,
-            (
-                RuntimeObjectStorage::GenericMeta { generic: left },
-                RuntimeObjectStorage::GenericMeta { generic: right },
-            ) => left == right,
-            (
-                RuntimeObjectStorage::MethodMeta { method: left },
-                RuntimeObjectStorage::MethodMeta { method: right },
-            ) => left == right,
-            (
-                RuntimeObjectStorage::SlotDescriptor {
-                    class: left_class,
-                    slot: left_slot,
-                },
-                RuntimeObjectStorage::SlotDescriptor {
-                    class: right_class,
-                    slot: right_slot,
-                },
-            ) => left_class == right_class && left_slot == right_slot,
-            // Type objects compare as types.
-            (left, right) => match (left.type_object(), right.type_object()) {
-                (Some(left), Some(right)) => left.same_type(&right),
-                _ => false,
-            },
+            (left, right) => left.denotes_same(right),
+        })
+    }
+
+    /// Whether two boxed values are identical, `==`.
+    ///
+    /// Heap objects are identical when they are the same object. Integers,
+    /// floats and booleans have no identity apart from their value, so they
+    /// are identical when they are the same class and value: integers by
+    /// value, floats by class and IEEE 754 bit pattern (so a NaN is identical
+    /// to itself, and `0.0` and `-0.0` are not identical). Whether a value is
+    /// boxed in its handle or on the heap does not change the answer.
+    fn identical(&self, lhs: Obj, rhs: Obj) -> Result<bool, HostError> {
+        if lhs == rhs {
+            return Ok(true);
+        }
+        let lhs = self.boxed_value(lhs)?;
+        let rhs = self.boxed_value(rhs)?;
+        Ok(match (lhs, rhs) {
+            (Value::I64(left), Value::I64(right)) => left == right,
+            (Value::F64(left), Value::F64(right)) => left.to_bits() == right.to_bits(),
+            (Value::F32(left), Value::F32(right)) => left.to_bits() == right.to_bits(),
+            (Value::Bool(left), Value::Bool(right)) => left == right,
+            (Value::Obj(left), Value::Obj(right))
+                if left.host_type == INTERLOKO_OBJECT_TYPE
+                    && right.host_type == INTERLOKO_OBJECT_TYPE =>
+            {
+                left == right
+                    || self
+                        .object(left)?
+                        .storage
+                        .denotes_same(&self.object(right)?.storage)
+            }
+            _ => false,
         })
     }
 
@@ -3083,6 +3133,15 @@ pub fn vector_literal_signature() -> HostSig {
 pub fn value_eq_signature() -> HostSig {
     HostSig {
         args: vec![object_type(), object_type()],
+        rets: vec![ValueType::Bool],
+    }
+}
+
+/// Host signature for identity, `==`: two boxed values in, a boolean out.
+#[must_use]
+pub fn identical_signature() -> HostSig {
+    HostSig {
+        args: vec![any_type(), any_type()],
         rets: vec![ValueType::Bool],
     }
 }

@@ -1,0 +1,17 @@
+// expect: run 111
+// expect: diagnostics 0
+
+// A boxed `<i32>` or `<u32>` is the `<integer>` it holds, so it is `==` that
+// integer boxed or not.
+
+define function bit(b :: <boolean>) => <integer>
+  if (b) 1 else 0 end
+end;
+
+define function main() => <integer>
+  let small :: <i32> = -7i32;
+  let top :: <u32> = 4294967295u32;
+  bit(as(<object>, small) == -7) * 100
+    + bit(as(<object>, top) == as(<object>, 4294967295)) * 10
+    + bit(as(<object>, top) == top)
+end;

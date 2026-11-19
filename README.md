@@ -173,6 +173,17 @@ The current slices include:
 - booleans: `#t` and `#f` are the instances of the concrete `<boolean>`
   class, so methods may specialize on it, `instance?` and `class-of` see it,
   and a boolean boxes to `<object>` and back like a number;
+- identity: `a == b` is Dylan's `==`, defined on any two objects, never
+  dispatching and not user-definable; `=` stays the equality of numbers,
+  strings, symbols and types. Heap objects are `==` when they are the same
+  object (two strings with the same text need not be). Numbers and booleans
+  have no identity apart from their value, so they are `==` when they are
+  the same class and value: integers by value whatever limited type holds
+  them (`1 == 1i32`), floats by class and IEEE 754 bit pattern, so a NaN is
+  `==` itself, `0.0 == -0.0` is false and `1 == 1.0` and
+  `1.5f32 == 1.5` are false. Symbols, classes and other metaobjects are
+  `==` when they name the same thing. Boxing a value as `<object>` never
+  changes the answer;
 - floats: literals such as `1.5`/`2e10` are `<double-float>` (IEEE 754
   binary64) instances under the abstract `<number>` > `<real>` > `<float>`
   classes, with slots, boxing to `<object>`, `<double-float>`

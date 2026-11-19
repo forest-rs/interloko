@@ -726,6 +726,17 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Identity test, `==`: whether both operands are the same object.
+    Identical {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Left operand.
+        lhs: Box<Expr>,
+        /// Right operand.
+        rhs: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// `if (test) body elseif (test) body … else body end`.
     ///
     /// The arms are tried in order and the first whose test is true runs.
@@ -831,6 +842,7 @@ impl Expr {
             | Self::Binary { id, .. }
             | Self::UnaryMinus { id, .. }
             | Self::Compare { id, .. }
+            | Self::Identical { id, .. }
             | Self::If { id, .. }
             | Self::Unless { id, .. }
             | Self::Case { id, .. }
@@ -865,6 +877,7 @@ impl Expr {
             | Self::Binary { span, .. }
             | Self::UnaryMinus { span, .. }
             | Self::Compare { span, .. }
+            | Self::Identical { span, .. }
             | Self::If { span, .. }
             | Self::Unless { span, .. }
             | Self::Case { span, .. }
@@ -2527,6 +2540,12 @@ impl<'tree> Lowering<'tree> {
             Some(TokenKind::Equal) => Expr::Compare {
                 id: self.ast_id(node),
                 op: CompareOp::Eq,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
+            Some(TokenKind::EqualEqual) => Expr::Identical {
+                id: self.ast_id(node),
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
                 span: node.span,

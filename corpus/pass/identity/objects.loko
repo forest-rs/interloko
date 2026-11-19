@@ -1,0 +1,31 @@
+// expect: run 1101111
+// expect: diagnostics 0
+
+// Heap objects are `==` when they are the same object: two instances with
+// equal slots are not, and two strings with the same text need not be.
+// Symbols, classes and type objects are `==` when they name the same thing.
+// `==` works on `<object>` values without dispatching.
+
+define class <point> (<object>)
+  slot x :: <integer>;
+end;
+
+define function bit(b :: <boolean>) => <integer>
+  if (b) 1 else 0 end
+end;
+
+define function same?(a :: <object>, b :: <object>) => <boolean>
+  a == b
+end;
+
+define function main() => <integer>
+  let p = make(<point>, x: 1);
+  let text = "loko";
+  bit(p == p) * 1000000
+    + bit(same?(p, p)) * 100000
+    + bit(p == make(<point>, x: 1)) * 10000
+    + bit(text == text) * 1000
+    + bit(#loko == #loko) * 100
+    + bit(<point> == class-of(p)) * 10
+    + bit(<i32> == <i32>)
+end;

@@ -82,6 +82,7 @@
 "sem.cast-type-mismatch" = "as converts an object or number, not { $actual }"
 "sem.cast-impossible" = "cast is impossible: { $actual } is not { $expected }"
 "sem.vector-element-type-mismatch" = "vector element { $element_index } expects { $expected } but got { $actual }"
+"sem.identity-operand-type-mismatch" = "`==` compares objects, not { $actual }"
 "sem.make-class-argument-type-mismatch" = "make needs a class, such as <circle>, not { $actual }"
 "sem.host-backed-make" = "host-backed class `{ $class }` cannot be constructed with make"
 "sem.builtin-value-make" = "built-in value class `{ $class }` cannot be constructed with make"

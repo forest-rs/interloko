@@ -1213,6 +1213,7 @@ impl Module {
             | Expr::Compare { .. }
             | Expr::MixedCompare { .. }
             | Expr::ValueEqual { .. }
+            | Expr::Identical { .. }
             | Expr::InstanceOf { .. }
             | Expr::InstanceOfLimited { .. } => ValueKind::Bool,
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
@@ -1689,7 +1690,8 @@ impl<'a> SiteNumbering<'a> {
             }
             Expr::Compare { lhs, rhs, .. }
             | Expr::MixedCompare { lhs, rhs, .. }
-            | Expr::ValueEqual { lhs, rhs, .. } => {
+            | Expr::ValueEqual { lhs, rhs, .. }
+            | Expr::Identical { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);
             }
@@ -3759,6 +3761,16 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Identity, `==`: whether two values are the same object. Both operands
+    /// are boxed values; integer operands lower to an integer compare instead.
+    Identical {
+        /// Left operand.
+        lhs: Box<Expr>,
+        /// Right operand.
+        rhs: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Conditional expression.
     If {
         /// Boolean condition.
@@ -3854,6 +3866,7 @@ impl Expr {
             | Self::Compare { span, .. }
             | Self::MixedCompare { span, .. }
             | Self::ValueEqual { span, .. }
+            | Self::Identical { span, .. }
             | Self::If { span, .. }
             | Self::Discard { span, .. }
             | Self::Handle { span, .. }
@@ -7437,6 +7450,11 @@ impl Lowering {
                 };
                 self.lower_compare(ctx, *op, lhs, rhs, *span)
             }
+            ast::Expr::Identical { lhs, rhs, span, .. } => {
+                let lhs = self.lower_expr(ctx, lhs);
+                let rhs = self.lower_expr(ctx, rhs);
+                self.lower_identical(ctx, lhs, rhs, *span)
+            }
             ast::Expr::If {
                 arms,
                 else_body,
@@ -9469,6 +9487,51 @@ impl Lowering {
         Expr::Error { span }
     }
 
+    /// Lowers `lhs == rhs`, Dylan's identity test: it never dispatches and
+    /// is defined on every pair of objects.
+    ///
+    /// Heap objects are identical when they are the same object. Numbers and
+    /// booleans have no identity apart from their value, so they are
+    /// identical when they are the same class and the same value: integers
+    /// by value, whatever `<integer>` or limited representation holds them,
+    /// and floats by class and bit pattern. Boxing never changes the answer.
+    fn lower_identical(
+        &mut self,
+        ctx: &mut FunctionContext,
+        lhs: Expr,
+        rhs: Expr,
+        span: Span,
+    ) -> Expr {
+        let lhs_kind = self.expr_kind(&lhs);
+        let rhs_kind = self.expr_kind(&rhs);
+        // Exact integers are identical exactly when they are equal, so two
+        // unboxed integers compare as `=` compares them, without boxing.
+        let integer = |kind| matches!(kind, ValueKind::I64 | ValueKind::I32 | ValueKind::U32);
+        if integer(lhs_kind) && integer(rhs_kind) {
+            return self.lower_compare(ctx, ast::CompareOp::Eq, lhs, rhs, span);
+        }
+        let mut valid = true;
+        for (operand, kind) in [(&lhs, lhs_kind), (&rhs, rhs_kind)] {
+            if kind == ValueKind::Error {
+                valid = false;
+            } else if !self.kinds_match(ValueKind::Any, kind) {
+                ctx.diagnostics.push(
+                    Diagnostic::error(operand.span(), DiagnosticCode::IdentityOperandTypeMismatch)
+                        .with_arg(DiagnosticArg::text("actual", self.kind_name(kind))),
+                );
+                valid = false;
+            }
+        }
+        if !valid {
+            return Expr::Error { span };
+        }
+        Expr::Identical {
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+            span,
+        }
+    }
+
     /// The type object `object`, of the built-in class `<limited-integer>`.
     fn lower_type_object(&self, object: TypeObject, span: Span) -> Expr {
         match self.builtin_value_class(BuiltinValueClass::LimitedIntegerType) {
@@ -10268,6 +10331,7 @@ impl Lowering {
             | Expr::Compare { .. }
             | Expr::MixedCompare { .. }
             | Expr::ValueEqual { .. }
+            | Expr::Identical { .. }
             | Expr::InstanceOf { .. }
             | Expr::InstanceOfLimited { .. } => ValueKind::Bool,
             Expr::Local { result_kind, .. } => *result_kind,

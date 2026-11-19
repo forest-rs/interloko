@@ -1,0 +1,23 @@
+// expect: run 110111
+// expect: diagnostics 0
+// expect: dump lowered lacks identical
+
+// Exact integers have no identity apart from their value, so two integers
+// are `==` when they are equal, whatever limited type holds them, and two
+// unboxed integers compare without boxing.
+
+define function bit(b :: <boolean>) => <integer>
+  if (b) 1 else 0 end
+end;
+
+define function main() => <integer>
+  let small :: <i32> = 7i32;
+  let count :: <u32> = 7u32;
+  let top :: <u32> = 4294967295u32;
+  bit(7 == small) * 100000
+    + bit(small == count) * 10000
+    + bit(7 == 8) * 1000
+    + bit(-1 == -1) * 100
+    + bit(top == 4294967295) * 10
+    + bit(-1i32 == -1)
+end;
