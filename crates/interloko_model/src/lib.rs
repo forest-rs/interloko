@@ -281,7 +281,7 @@ impl BuiltinValueClass {
             Self::Integer => Some(Self::Rational),
             Self::DoubleFloat | Self::SingleFloat => Some(Self::Float),
             Self::StretchyVector => Some(Self::Vector),
-            Self::Vector => Some(Self::Sequence),
+            Self::Vector | Self::String => Some(Self::Sequence),
             _ => None,
         }
     }

@@ -176,10 +176,13 @@ The current slices include:
   a limit, `next-state(c, s)`, `finished-state?(c, s, limit)`,
   `current-key(c, s)`, `current-element(c, s)`, and
   `current-element-setter(v, c, s)` or `#f` for a constant collection. It
-  is an open built-in generic, sealed over `<vector>`, `<table>` and
-  `<sequence>` itself. The abstract `<sequence>` class, whose subclasses are
-  `<vector>` and a program's own (`<string>` joins when it can be
-  iterated), has a default method iterating from 0 below
+  is an open built-in generic, sealed over `<vector>`, `<string>`, `<table>`
+  and `<sequence>` itself. A string's states are its `<string-position>`s,
+  so the key of each character indexes the string, and it has no element
+  setter; a `for` over a string goes through the protocol's callables for
+  now, one boxed character per step. The abstract `<sequence>` class, whose
+  subclasses are `<vector>`, `<string>` and a program's own, has a default
+  method iterating from 0 below
   `size(c)` with `element`, so a program's sequence class iterates once it
   defines `size` and `element`; any other class defines its own method;
 - Dylan-style names, where a hyphen is always a name character: `x-1` and

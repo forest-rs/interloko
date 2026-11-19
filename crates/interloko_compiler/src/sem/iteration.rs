@@ -10,7 +10,8 @@
 //!
 //! It is a built-in open generic like `size` and `element`: a program adds
 //! methods for its own classes, and the kernel's methods serve `<vector>`
-//! (so `<stretchy-vector>`), `<table>` and, as a default, `<sequence>`,
+//! (so `<stretchy-vector>`), `<string>`, `<table>` and, as a default,
+//! `<sequence>`,
 //! whose integer states run from 0 below `size(c)` and whose elements are
 //! read with `element`. The generic is sealed over `<vector>`, `<table>`
 //! and `<sequence>` itself, so a program's `<sequence>` subclass may define
@@ -40,13 +41,17 @@ pub const FORWARD_ITERATION_PROTOCOL: &str = "forward-iteration-protocol";
 
 /// The kernel classes with an iteration method of their own, over which the
 /// generic is sealed.
-pub const SEALED_ITERATION_CLASSES: &[BuiltinValueClass] =
-    &[BuiltinValueClass::Vector, BuiltinValueClass::Table];
+pub const SEALED_ITERATION_CLASSES: &[BuiltinValueClass] = &[
+    BuiltinValueClass::Vector,
+    BuiltinValueClass::String,
+    BuiltinValueClass::Table,
+];
 
 /// The kernel classes with an iteration method, in method order: the
 /// sealed ones, then the `<sequence>` default.
 pub const ITERATION_CLASSES: &[BuiltinValueClass] = &[
     BuiltinValueClass::Vector,
+    BuiltinValueClass::String,
     BuiltinValueClass::Table,
     BuiltinValueClass::Sequence,
 ];
@@ -248,6 +253,7 @@ impl KernelTree {
     ) -> Block {
         match class {
             BuiltinValueClass::Vector => self.vector_protocol(definition),
+            BuiltinValueClass::String => self.string_protocol(),
             BuiltinValueClass::Table => self.table_protocol(definition),
             _ => self.sequence_protocol(),
         }
@@ -297,6 +303,40 @@ impl KernelTree {
         let constant = self.call("%vector-constant?", vec![c]);
         let no_setter = self.boolean(false);
         let setter = self.if_else(constant, no_setter, setter);
+        let result = self.values(vec![initial, limit, next, done, key, element, setter]);
+        self.block(Vec::new(), result)
+    }
+
+    /// States are `<string-position>`s, from the start to the end, so a
+    /// position the loop finds indexes the string, as in Swift. Each
+    /// element is the character at its state. A string is immutable, so it
+    /// has no element setter.
+    fn string_protocol(&mut self) -> Block {
+        let c = self.name("c");
+        let initial = self.call("%start-position", vec![c]);
+        let c = self.name("c");
+        let limit = self.call("%end-position", vec![c]);
+        let c = self.name("c");
+        let string = self.cast("<string>", c);
+        let s = self.name("s");
+        let state = self.cast("<string-position>", s);
+        let next_body = self.call("%next-position", vec![string, state]);
+        let next = self.function(&["c", "s"], "<object>", next_body);
+        let s = self.name("s");
+        let state = self.cast("<string-position>", s);
+        let l = self.name("l");
+        let limit_value = self.cast("<string-position>", l);
+        let done_body = self.compare(CompareOp::Ge, state, limit_value);
+        let done = self.function(&["c", "s", "l"], "<boolean>", done_body);
+        let key_body = self.name("s");
+        let key = self.function(&["c", "s"], "<object>", key_body);
+        let c = self.name("c");
+        let string = self.cast("<string>", c);
+        let s = self.name("s");
+        let state = self.cast("<string-position>", s);
+        let element_body = self.call("%string-element", vec![string, state]);
+        let element = self.function(&["c", "s"], "<object>", element_body);
+        let setter = self.boolean(false);
         let result = self.values(vec![initial, limit, next, done, key, element, setter]);
         self.block(Vec::new(), result)
     }

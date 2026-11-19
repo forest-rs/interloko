@@ -1,0 +1,13 @@
+// expect: run 'b'
+// expect: diagnostics 0
+
+// The protocol's states are positions: the initial state is the string's
+// start, its limit the end, and the key of each element is its position,
+// which indexes the string.
+
+define function main() => <character>
+  let (state, limit, next, done?, key, elt, setter)
+    = forward-iteration-protocol("abc");
+  let second = next("abc", state);
+  if (setter == #f) "abc"[as(<string-position>, key("abc", second))] else 'x' end
+end;
