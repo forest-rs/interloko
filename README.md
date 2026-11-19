@@ -246,6 +246,10 @@ The current slices include:
 - booleans: `#t` and `#f` are the instances of the concrete `<boolean>`
   class, so methods may specialize on it, `instance?` and `class-of` see it,
   and a boolean boxes to `<object>` and back like a number;
+- `a & b` and `a | b`, Dylan's short-circuit operators: they share one
+  precedence below the comparisons and associate left, the right operand
+  runs only when it decides the answer, and it sees what the left one
+  established, as an `if` arm does (`instance?(x, <box>) & x.n > 3`);
 - characters: `<character>` is a concrete class of Unicode scalar values,
   written `'a'`, `'\n'`, `'\t'`, `'\r'`, `'\0'`, `'\\'`, `'\''` or
   `'\u{1F600}'` (string literals take the same escapes). A character is an

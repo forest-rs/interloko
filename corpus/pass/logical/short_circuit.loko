@@ -1,0 +1,18 @@
+// expect: run #t
+// expect: diagnostics 0
+
+// The right operand runs only when it decides the answer: neither call to
+// `boom` here signals.
+
+define class <boom> (<error>)
+end;
+
+define function boom() => <boolean>
+  signal(make(<boom>))
+end;
+
+define function main() => <boolean>
+  let x = 1;
+  let quiet = x = 2 & boom();
+  if (quiet) #f else x = 1 | boom() end
+end;

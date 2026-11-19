@@ -507,6 +507,7 @@ impl BaseLokoCstProjector<'_> {
             "select-expression" => self.build_select(node),
             "assignment-expression" => self.build_assignment(node),
             "assignment-target" => self.unwrap_first_expr(node),
+            "logical-expression" => self.build_logical(node),
             "comparison-expression" => self.build_comparison(node),
             "additive-expression" => self.build_additive(node),
             "multiplicative-expression" => self.build_multiplicative(node),
@@ -841,7 +842,7 @@ impl BaseLokoCstProjector<'_> {
         let target = node
             .children
             .iter()
-            .find(|child| child.is_rule("comparison-expression"))
+            .find(|child| child.is_rule("logical-expression"))
             .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
         let Some(tail) = node
             .children
@@ -861,6 +862,35 @@ impl BaseLokoCstProjector<'_> {
             CstElement::Node(value),
         ];
         self.node(CstKind::SlotAssignExpr, children, node.span)
+    }
+
+    /// Folds `a & b | c` left to right into binary expressions: `&` and `|`
+    /// share one precedence, below the comparisons, as in Dylan.
+    fn build_logical(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let operands = node
+            .children
+            .iter()
+            .filter(|child| child.is_rule("comparison-expression"))
+            .collect::<Vec<_>>();
+        let Some(first) = operands.first() else {
+            return self.error_node(node.span);
+        };
+        let mut folded = self.build_expr(first);
+        for rhs_node in operands.into_iter().skip(1) {
+            let rhs = self.build_expr(rhs_node);
+            let op = self.first_operator_token(Span::new(folded.span.end, rhs.span.start));
+            let span = folded.span.cover(rhs.span);
+            folded = self.node(
+                CstKind::BinaryExpr,
+                vec![
+                    CstElement::Node(folded),
+                    CstElement::Token(op),
+                    CstElement::Node(rhs),
+                ],
+                span,
+            );
+        }
+        folded
     }
 
     fn build_comparison(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
@@ -1317,6 +1347,7 @@ impl BaseLokoCstProjector<'_> {
                 | "select-expression"
                 | "assignment-expression"
                 | "assignment-target"
+                | "logical-expression"
                 | "comparison-expression"
                 | "additive-expression"
                 | "multiplicative-expression"

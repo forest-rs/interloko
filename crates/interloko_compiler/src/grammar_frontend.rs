@@ -3281,8 +3281,18 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "assignment-expression",
-            "assignment-target `:=` expression | comparison-expression",
+            "assignment-target `:=` expression | logical-expression",
             "syntax.rs:Parser::parse_assignment",
+        ),
+        (
+            "logical-expression",
+            "comparison-expression (logical-op comparison-expression)*",
+            "base_loko_primary::BaseLokoCstBuilder::build_logical",
+        ),
+        (
+            "logical-op",
+            "`&` | `|`",
+            "base_loko_primary::BaseLokoCstBuilder::build_logical",
         ),
         (
             "assignment-target",
@@ -4440,7 +4450,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 80);
+        assert_eq!(grammar.effective_rules.len(), 82);
 
         assert!(
             !records

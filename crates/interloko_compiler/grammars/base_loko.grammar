@@ -83,7 +83,9 @@ rule otherwise-clause = `otherwise` `=>` body `;`?
 rule select-expression = `select` `(` expression select-test? `)` select-clause* otherwise-clause? `end`
 rule select-test = `by` expression
 rule select-clause = list-of<expression, `,`> `=>` body case-clause-end
-rule assignment-expression = assignment-target `:=` expression | comparison-expression
+rule assignment-expression = assignment-target `:=` expression | logical-expression
+rule logical-expression = comparison-expression (logical-op comparison-expression)*
+rule logical-op = `&` | `|`
 rule assignment-target = postfix-expression
 rule comparison-expression = additive-expression comparison-tail?
 rule comparison-tail = comparison-op additive-expression
