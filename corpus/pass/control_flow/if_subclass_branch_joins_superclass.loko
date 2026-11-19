@@ -13,6 +13,6 @@ end;
 
 define function main() => <integer>
   let c :: <boolean> = #f;
-  (if c then make(<shape>) else make(<circle>) end).size
-    + (if c then make(<circle>) else make(<shape>) end).size
+  (if (c) make(<shape>) else make(<circle>) end).size
+    + (if (c) make(<circle>) else make(<shape>) end).size
 end;

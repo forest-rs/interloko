@@ -8,8 +8,8 @@
 // branches, so the conversion to <i32> is proved in range.
 
 define function bucket(n :: <integer>) => <i32>
-  if n >= 0 then
-    if n < 100 then as(<i32>, n) else 99i32 end
+  if (n >= 0)
+    if (n < 100) as(<i32>, n) else 99i32 end
   else
     0i32
   end

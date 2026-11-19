@@ -22,7 +22,7 @@ end;
 
 define function round?(s :: <shape>) => <integer>
   let c :: <shape> = make(<circle>);
-  if instance?(c, <circle>) then 1 else never() end
+  if (instance?(c, <circle>)) 1 else never() end
 end;
 
 define function main() => <integer>

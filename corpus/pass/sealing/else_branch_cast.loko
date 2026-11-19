@@ -22,7 +22,7 @@ define class <square> (<shape>)
 end;
 
 define function side(s :: <shape>) => <integer>
-  if instance?(s, <circle>) then 0 else as(<square>, s).side end
+  if (instance?(s, <circle>)) 0 else as(<square>, s).side end
 end;
 
 define function main() => <integer>

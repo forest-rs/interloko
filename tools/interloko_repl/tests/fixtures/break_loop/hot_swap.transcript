@@ -44,7 +44,7 @@ editing form:f6; enter a replacement definition
 >   check-sample(max(0, 1.0 - distance / s.radius), distance)
 > end;
 ! diagnostics:
-!   Error sem.function-argument-type-mismatch 1091..1092 function `max` argument 1 expects <float> but got <integer>
+!   Error sem.function-argument-type-mismatch 1088..1089 function `max` argument 1 expects <float> but got <integer>
 ! edit rejected; the definitions and break [1] are unchanged
 > define method shade(s :: <sphere>, distance :: <double-float>) => <double-float>
 >   // A ray that misses the sphere is black, not negatively bright.
@@ -213,7 +213,7 @@ choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
 > :edit form:f4
 editing form:f4; enter a replacement definition
 > define function radius-of(s :: <shape>) => <integer>
->   if instance?(s, <circle>) then as(<circle>, s).radius else 0 end
+>   if (instance?(s, <circle>)) as(<circle>, s).radius else 0 end
 > end;
 installed the edit as a new code unit; still running replaced code:
   frame:0 radius-of  u0:f1  superseded by u1:f1
@@ -311,7 +311,7 @@ choose with :restart <n|name> [args...], or :edit <form-id> to fix a definition
 > :edit form:f5
 editing form:f5; enter a replacement definition
 > define function measure(s :: <shape>) => <integer>
->   if instance?(s, <circle>) then area(s) + 1 else 0 end
+>   if (instance?(s, <circle>)) area(s) + 1 else 0 end
 > end;
 installed the edit as a new code unit; still running replaced code:
   frame:1 measure  u0:f0  superseded by u1:f0

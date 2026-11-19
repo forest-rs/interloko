@@ -6,7 +6,7 @@
 define generic describe(x) => <integer>;
 
 define method describe(b :: <boolean>) => <integer>
-  if b then 1 else 2 end
+  if (b) 1 else 2 end
 end;
 
 define method describe(n :: <integer>) => <integer>

@@ -5,7 +5,7 @@
 // `<object>`, and a test refines the `<object>` to the boolean it holds.
 
 define function test(x :: <object>) => <integer>
-  if instance?(x, <boolean>) then (if x then 1 else 2 end) else 0 end
+  if (instance?(x, <boolean>)) (if (x) 1 else 2 end) else 0 end
 end;
 
 define function main() => <integer>

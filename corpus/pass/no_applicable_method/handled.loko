@@ -24,10 +24,10 @@ end;
 
 define function reports(e :: <no-applicable-method>) => <boolean>
   let arguments = e.no-applicable-method-arguments;
-  if e.no-applicable-method-code = "dispatch.no-applicable-method" then
-    if generic-function-name(e.no-applicable-method-generic) = "scale" then
-      if vector-size(arguments) = 2 then
-        if instance?(vector-ref(arguments, 0), <square>) then
+  if (e.no-applicable-method-code = "dispatch.no-applicable-method")
+    if (generic-function-name(e.no-applicable-method-generic) = "scale")
+      if (vector-size(arguments) = 2)
+        if (instance?(vector-ref(arguments, 0), <square>))
           as(<integer>, vector-ref(arguments, 1)) = 3
         else
           #f
@@ -47,7 +47,7 @@ define function scaled(s :: <shape>) => <integer>
   handle
     scale(s, 3)
   with restart e :: <no-applicable-method>
-    if reports(e) then 7 else 0 end
+    if (reports(e)) 7 else 0 end
   end
 end;
 

@@ -21,7 +21,7 @@ define function twice(n :: <integer>) => <integer>
 end;
 
 define function adder(x :: <object>) => <integer>
-  if instance?(x, <integer>) then
+  if (instance?(x, <integer>))
     apply(function (y :: <integer>) => <integer> x + y end, 1)
   else
     0
@@ -29,9 +29,9 @@ define function adder(x :: <object>) => <integer>
 end;
 
 define function recovered(x :: <object>) => <integer>
-  if instance?(x, <integer>) then
+  if (instance?(x, <integer>))
     handle
-      if x < 0 then signal(make(<odd>, value: x)) else x end
+      if (x < 0) signal(make(<odd>, value: x)) else x end
     with restart e :: <odd>
       e.value + x
     end
@@ -41,9 +41,9 @@ define function recovered(x :: <object>) => <integer>
 end;
 
 define function exited(x :: <object>) => <integer>
-  if instance?(x, <integer>) then
+  if (instance?(x, <integer>))
     block (return)
-      if x > 5 then return(x * 10) else x end
+      if (x > 5) return(x * 10) else x end
     end
   else
     0
@@ -51,15 +51,15 @@ define function exited(x :: <object>) => <integer>
 end;
 
 define function nested(x :: <object>) => <integer>
-  if instance?(x, <integer>) then
-    if instance?(x, <i32>) then x + 1 else twice(x) end
+  if (instance?(x, <integer>))
+    if (instance?(x, <i32>)) x + 1 else twice(x) end
   else
     0
   end
 end;
 
 define function passed(x :: <object>) => <object>
-  if instance?(x, <double-float>) then keep(x) else x end
+  if (instance?(x, <double-float>)) keep(x) else x end
 end;
 
 define function main() => <integer>

@@ -4,7 +4,7 @@
 // Dispatched comparisons are exact across integers and floats, like the
 // statically typed ones: 2^53 + 1 is greater than 2.0^53.
 define function bit(flag :: <boolean>, weight :: <integer>) => <integer>
-  if flag then weight else 0 end
+  if (flag) weight else 0 end
 end;
 
 define function main() => <integer>

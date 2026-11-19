@@ -3,7 +3,7 @@
 
 // `<single-float>` is the second concrete `<float>`, beside `<double-float>`.
 define function name-and-superclasses(c :: <object>, depth :: <integer>) => <string>
-  if depth = 0 then
+  if (depth = 0)
     class-name(c)
   else
     concatenate(

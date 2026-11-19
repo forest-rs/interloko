@@ -9,7 +9,7 @@
 
 define function nest(depth :: <integer>, outer :: <callable>) => <integer>
   block (here)
-    if depth = 0 then outer(3) else nest(depth - 1, here) + 100 end
+    if (depth = 0) outer(3) else nest(depth - 1, here) + 100 end
   end
 end;
 

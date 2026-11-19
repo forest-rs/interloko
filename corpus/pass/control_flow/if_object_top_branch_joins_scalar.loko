@@ -6,6 +6,6 @@
 
 define function main() => <integer>
   let c :: <boolean> = #f;
-  as(<integer>, if c then as(<object>, 1) else 2 end)
-    + as(<integer>, if c then 2 else as(<object>, 1) end)
+  as(<integer>, if (c) as(<object>, 1) else 2 end)
+    + as(<integer>, if (c) 2 else as(<object>, 1) end)
 end;

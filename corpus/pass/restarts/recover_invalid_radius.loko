@@ -18,7 +18,7 @@ define generic area(x);
 
 define method area(c :: <circle>)
   handle
-    if c.radius < 0 then
+    if (c.radius < 0)
       signal(make(<invalid-radius>, fallback: 0))
     else
       c.radius * c.radius

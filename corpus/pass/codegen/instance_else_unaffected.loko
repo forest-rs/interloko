@@ -9,7 +9,7 @@
 // `<integer>`, so the same `x + 1` still dispatches on it.
 
 define function bump(x :: <object>) => <object>
-  if instance?(x, <integer>) then x + 1 else x + 1 end
+  if (instance?(x, <integer>)) x + 1 else x + 1 end
 end;
 
 define function main() => <double-float>

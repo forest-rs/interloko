@@ -12,7 +12,7 @@ define class <stash> (<object>)
 end;
 
 define function choose(c :: <boolean>, f :: <callable>, g :: <callable>) => <integer>
-  let h :: <callable> = if c then f else g end;
+  let h :: <callable> = if (c) f else g end;
   let r :: <integer> = apply(h, 1);
   r
 end;

@@ -4,5 +4,5 @@
 // expect: dump lowered contains const.bool false
 
 define function main()
-  if #f then 0 else 42 end
+  if (#f) 0 else 42 end
 end;

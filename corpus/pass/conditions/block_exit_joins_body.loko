@@ -16,7 +16,7 @@ end;
 
 define function pick(c :: <boolean>) => <shape>
   block (return)
-    if c then return(make(<square>)) else make(<circle>) end
+    if (c) return(make(<square>)) else make(<circle>) end
   end
 end;
 

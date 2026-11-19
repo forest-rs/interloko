@@ -15,5 +15,5 @@ end;
 
 define function main() => <integer>
   let s :: <object> = make(<square>);
-  if instance?(s, <circle>) then 1 else 2 end
+  if (instance?(s, <circle>)) 1 else 2 end
 end;

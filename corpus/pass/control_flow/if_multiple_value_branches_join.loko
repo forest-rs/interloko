@@ -14,7 +14,7 @@ define class <square> (<shape>)
 end;
 
 define function pick(c :: <boolean>)
-  if c then
+  if (c)
     values(as(<shape>, make(<circle>)), 1)
   else
     values(as(<shape>, make(<square>)), 2)

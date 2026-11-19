@@ -13,7 +13,7 @@ define function guarded(depth :: <integer>) => <integer>
 end;
 
 define function descend(depth :: <integer>) => <integer>
-  if depth = 0 then signal(make(<bottom>)) else guarded(depth) + 1 end
+  if (depth = 0) signal(make(<bottom>)) else guarded(depth) + 1 end
 end;
 
 define function main() => <integer>

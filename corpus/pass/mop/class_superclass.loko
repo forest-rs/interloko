@@ -10,5 +10,5 @@ define class <circle> (<shape>)
 end;
 
 define function main() => <integer>
-  if class-name(class-direct-superclass(<circle>)) = "<shape>" then 1 else 0 end
+  if (class-name(class-direct-superclass(<circle>)) = "<shape>") 1 else 0 end
 end;

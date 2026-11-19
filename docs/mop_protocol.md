@@ -25,9 +25,10 @@ end;
 define function main() => <integer>
   let direct = class-direct-slots(<circle>);
   let slot = vector-ref(direct, 0);
-  if class-name(object-class(make(<circle>, radius: 12))) = "<circle>"
-  then if slot-name(slot) = "radius" then 1 else 0 end
-  else 0
+  if (class-name(object-class(make(<circle>, radius: 12))) = "<circle>")
+    if (slot-name(slot) = "radius") 1 else 0 end
+  else
+    0
   end
 end;
 ```

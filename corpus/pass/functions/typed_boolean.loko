@@ -9,5 +9,5 @@ define function keep?(flag :: <boolean>) => <boolean>
 end;
 
 define function main()
-  if keep?(#t) then 1 else 0 end
+  if (keep?(#t)) 1 else 0 end
 end;

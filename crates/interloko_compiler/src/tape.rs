@@ -2788,7 +2788,7 @@ mod tests {
 
     #[test]
     fn emits_verified_tape_for_boolean_control_flow() {
-        let module = lower_source("define function main()\n  if 10 >= 5 then 42 else 0 end\nend;");
+        let module = lower_source("define function main()\n  if (10 >= 5) 42 else 0 end\nend;");
         let tape = emit(&module).expect("tape emission should succeed");
 
         assert_eq!(tape.program().program().functions.len(), 1);
@@ -2811,7 +2811,7 @@ mod tests {
     fn emits_verified_tape_for_typed_runtime_slots() {
         let module = lower_source(
             "define class <flag> (<object>)\n  slot valid? :: <boolean>;\nend;\n\
-             define function main()\n  if make(<flag>, valid?: #t).valid? then 1 else 0 end\nend;",
+             define function main()\n  if (make(<flag>, valid?: #t).valid?) 1 else 0 end\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
 

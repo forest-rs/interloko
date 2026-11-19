@@ -13,7 +13,7 @@ define function checked-sum(a :: <integer>, b :: <integer>) => <integer>
   handle
     sum(a, b)
   with restart e :: <error>
-    if instance?(e, <type-error>) then
+    if (instance?(e, <type-error>))
       3
     else
       0

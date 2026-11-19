@@ -41,11 +41,11 @@ define method area(q :: <square>)
   4
 end;
 define function measure(s :: <shape>)
-  let bonus = if instance?(s, <circle>) then 1 else 0 end;
+  let bonus = if (instance?(s, <circle>)) 1 else 0 end;
   area(s) + bonus
 end;
 define function exact(c :: <circle>)
-  if instance?(c, <circle>) then area(c) else 0 end
+  if (instance?(c, <circle>)) area(c) else 0 end
 end;
 define function narrow(s :: <shape>)
   area(as(<circle>, s))
@@ -298,7 +298,7 @@ fn widened_analysis_is_named_as_the_cause() {
     }
     source.push_str(
         "define function pick(b :: <big>)
-  if instance?(b, <k0>) then 0 else name(b) end
+  if (instance?(b, <k0>)) 0 else name(b) end
 end;
 define function both(a :: <big>, b :: <big>)
   mix(a, b)

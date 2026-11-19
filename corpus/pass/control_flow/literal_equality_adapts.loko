@@ -9,5 +9,5 @@
 define function main() => <boolean>
   let level :: <u32> = 5;
   let gain = 0.1f32;
-  if level = 5 then gain = 0.1 else #f end
+  if (level = 5) gain = 0.1 else #f end
 end;

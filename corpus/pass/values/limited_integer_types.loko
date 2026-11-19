@@ -28,6 +28,6 @@ define function main() => <integer>
   let d = make(<dial>);
   let set = d.level := 3;
   let small :: limited(<integer>, max: 9) = 7;
-  let tested = if instance?(small, limited(<integer>, max: 9)) then 10 else 0 end;
+  let tested = if (instance?(small, limited(<integer>, max: 9))) 10 else 0 end;
   $base + byte(50) + weigh(5) + d.level + set + as(limited(<integer>, min: 0), small) + tested
 end;

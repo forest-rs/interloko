@@ -6,7 +6,7 @@
 // expect: dump tape contains sig=[Bool] -> [I64, I64]
 
 define function split(flag :: <boolean>) => (<integer>, <integer>)
-  if flag then
+  if (flag)
     values(40, 2)
   else
     values(10, 5)

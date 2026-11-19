@@ -13,7 +13,7 @@
 // and on to the cast, without a box in between.
 
 define function chain(x :: <object>) => <integer>
-  if instance?(x, <integer>) then ((x + 1) * 2) - x else 0 end
+  if (instance?(x, <integer>)) ((x + 1) * 2) - x else 0 end
 end;
 
 define function sends(d :: <integer>) => <integer>

@@ -1319,7 +1319,7 @@ fn soft_typing_warns_runs_and_explains_decisions() {
     let (stdout, stderr) = run_lab_success(&["run", path]);
     assert_eq!(stdout.trim(), "7");
     assert!(stderr.contains(
-        "Warning typing.dispatch-no-applicable-method 259..278 no method of `area` can apply to exactly <shape>"
+        "Warning typing.dispatch-no-applicable-method 256..275 no method of `area` can apply to exactly <shape>"
     ));
     assert!(stderr.contains("Warning typing.cast-always-fails"));
 

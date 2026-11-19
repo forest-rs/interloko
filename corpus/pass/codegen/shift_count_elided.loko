@@ -9,7 +9,7 @@
 // that signals outside 0..=31 is not emitted.
 
 define function scale(x :: <i32>, n :: <i32>) => <i32>
-  if n < 1i32 then x else if n > 3i32 then x else shift-left(x, n) end end
+  if (n < 1i32) x elseif (n > 3i32) x else shift-left(x, n) end
 end;
 
 define function main() => <i32>

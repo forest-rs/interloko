@@ -38,7 +38,7 @@ define function main() => <double-float>
   let small :: <integer> = as(<integer>, call(take-i32, 41));
   let held :: <integer> = as(<integer>, call(hold, 50));
   let measured :: <integer> = as(<integer>, call(radius-of, make(<circle>, radius: 60)));
-  let flip :: <callable> = function (b :: <boolean>) => <integer> if b then 9 else 0 end end;
+  let flip :: <callable> = function (b :: <boolean>) => <integer> if (b) 9 else 0 end end;
   let flipped :: <integer> = apply(flip, #t);
   let halver :: <callable> = half;
   let halved :: <double-float> = apply(halver, 1);

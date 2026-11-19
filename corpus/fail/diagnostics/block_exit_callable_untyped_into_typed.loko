@@ -8,7 +8,7 @@
 
 define function go(h :: <callable>, n :: <integer>) => <integer>
   let g :: callable(<i32>) => <i32> = block (return)
-    let ignored :: <callable> = if n > 0 then return(h) else h end;
+    let ignored :: <callable> = if (n > 0) return(h) else h end;
     function (x :: <i32>) => <i32> x end
   end;
   as(<integer>, g(3i32)) + 1

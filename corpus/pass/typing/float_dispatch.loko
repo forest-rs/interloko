@@ -46,7 +46,7 @@ define function on-object(x :: <object>)
 end;
 
 define function main()
-  if 1 < 2 then
+  if (1 < 2)
     size-of(2.5) + size-of(3) + magnitude(widen(2.5)) + on-object(as(<object>, 2.5))
   else
     whole(2.5)

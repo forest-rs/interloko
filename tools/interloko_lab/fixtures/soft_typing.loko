@@ -10,7 +10,7 @@ define function measure(s :: <shape>)
   area(s)
 end;
 define function main()
-  if 1 < 2 then area(make(<circle>)) else area(make(<shape>)) end
+  if (1 < 2) area(make(<circle>)) else area(make(<shape>)) end
 end;
 define function narrow() => <circle>
   as(<circle>, make(<shape>))

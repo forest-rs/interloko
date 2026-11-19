@@ -31,13 +31,13 @@ end;
 define method evaluate(node :: <binary-node>) => <double-float>
   let a = evaluate(node.left);
   let b = evaluate(node.right);
-  if node.operator = #add then
+  if (node.operator = #add)
     a + b
   else
-    if node.operator = #subtract then
+    if (node.operator = #subtract)
       a - b
     else
-      if node.operator = #multiply then a * b else a / b end
+      if (node.operator = #multiply) a * b else a / b end
     end
   end
 end;

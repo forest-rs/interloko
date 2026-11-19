@@ -21,5 +21,5 @@ define method area(c :: <circle>)
 end;
 
 define function main()
-  if 1 < 2 then area(make(<circle>)) else area(make(<shape>)) end
+  if (1 < 2) area(make(<circle>)) else area(make(<shape>)) end
 end;

@@ -9,5 +9,5 @@
 define function main() => <double-float>
   let tenth = as(<single-float>, 0.1);
   let big = as(<single-float>, 16777217);
-  if as(<integer>, big) = 16777216 then as(<double-float>, tenth) else 0.0 end
+  if (as(<integer>, big) = 16777216) as(<double-float>, tenth) else 0.0 end
 end;

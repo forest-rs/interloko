@@ -8,5 +8,5 @@ end;
 
 define function main() => <integer>
   let descriptor = vector-ref(class-direct-slots(<circle>), 0);
-  if generic-function-name(slot-setter(descriptor)) = "radius-setter" then 1 else 0 end
+  if (generic-function-name(slot-setter(descriptor)) = "radius-setter") 1 else 0 end
 end;

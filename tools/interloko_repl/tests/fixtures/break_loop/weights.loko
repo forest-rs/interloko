@@ -21,7 +21,7 @@ define method weight(s :: <circle>) => <integer>
 end;
 
 define function check(w :: <integer>) => <integer>
-  if w > 50 then signal(make(<too-heavy>)) else w end
+  if (w > 50) signal(make(<too-heavy>)) else w end
 end;
 
 define function main() => <integer>

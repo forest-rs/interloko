@@ -21,8 +21,7 @@ define method score(c :: <circle>) => <integer>
 end;
 
 define function main() => <integer>
-  if generic-function-name(score) = "score"
-  then vector-size(generic-function-methods(score))
+  if (generic-function-name(score) = "score") vector-size(generic-function-methods(score))
   else 0
   end
 end;

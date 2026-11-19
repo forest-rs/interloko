@@ -23,9 +23,9 @@ define function radius-of(s :: <shape>) => <integer>
   handle
     as(<circle>, s).radius
   with restart e :: <type-error>
-    if e.type-error-code = "type-error.cast" then
-      if e.type-error-expected-type = <circle> then
-        if instance?(e.type-error-value, <square>) then 7 else 2 end
+    if (e.type-error-code = "type-error.cast")
+      if (e.type-error-expected-type = <circle>)
+        if (instance?(e.type-error-value, <square>)) 7 else 2 end
       else
         1
       end
