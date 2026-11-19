@@ -26555,6 +26555,26 @@ end;
         assert_eq!(seen.value, Some(FunctionValue::Integer(3)));
     }
 
+    #[test]
+    fn a_retry_passes_the_arguments_an_assigned_parameter_was_called_with() {
+        // `scale` assigns its parameter before pausing, in a register of its
+        // own or, when a closure shares it, in a cell. The retry runs the new
+        // body on the argument as passed, 4, not on the assigned 40.
+        for shared in ["", "\n  let read = method () => <integer> n end;"] {
+            let old = alloc::format!(
+                "define class <oops> (<object>)\nend;\n\
+                 define function pause() => <integer>\n  signal(make(<oops>))\nend;\n\
+                 define function scale(n :: <integer>) => <integer>{shared}\n  \
+                 n := n * 10;\n  pause() + n\nend;\n\
+                 define function main() => <integer>\n  scale(4)\nend;"
+            );
+            let new = old.replace("pause() + n", "pause() + n + 1000");
+            let seen = run_across_an_edit(&old, &new, Then::Retry("scale"));
+            assert_eq!((seen.refused, seen.retry_refused), (None, None));
+            assert_eq!(seen.value, Some(FunctionValue::Integer(1040)), "{shared:?}");
+        }
+    }
+
     /// `pick` declares a `<shape>` result and `size` a `<shape>` parameter;
     /// `main` sends both after pausing.
     const PICK: &str = "define class <oops> (<object>)\nend;\n\

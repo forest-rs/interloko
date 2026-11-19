@@ -125,11 +125,15 @@ The current slices include:
   without one. A body with no expression to end it, empty (`while (#f)
   end`, `method () => () end`, `begin end`, an empty arm) or ending in a
   `let`, produces no values, as an `if` without `else` does;
-- assignable `let` locals: `x := v` is an expression whose value is the new
-  value. A local keeps the type it declares, or its initializer's when it
-  declares none, so `let n = 0; n := "s"` is an error, and a limited local
-  checks each value assigned to it. Parameters, block exits and constants
-  are not assignable;
+- assignable `let` locals and parameters: `x := v` is an expression whose
+  value is the new value. A local keeps the type it declares, or its
+  initializer's when it declares none, so `let n = 0; n := "s"` is an
+  error, and a limited local checks each value assigned to it. As in
+  Dylan, a parameter is assignable too, and assigning it changes only the
+  parameter: an assigned parameter moves out of the register the call
+  passed it in, so retrying a frame after an edit passes the arguments it
+  was called with. Block exits, `for` loop variables, a restart's
+  condition and constants are not assignable;
 - Dylan's anonymous functions, `method (params) => results body end`,
   which take the parameter and result annotations a `define function` does.
   One written where a typed callable is expected (an argument for a
@@ -148,9 +152,9 @@ The current slices include:
   a position takes a signature, not one in an `if` arm or `begin` there,
   and a `define generic`'s parameters carry no callable signatures, so a
   method passed in a send takes none;
-- closures that share assigned locals: a `let` local that is assigned and
-  that a closure refers to lives in a heap cell its frame and every
-  capturing closure use, so counters, accumulators and callbacks that
+- closures that share assigned locals: a `let` local or parameter that is
+  assigned and that a closure refers to lives in a heap cell its frame and
+  every capturing closure use, so counters, accumulators and callbacks that
   update state work, and the cell lives as long as a closure keeps it,
   within the run. Only such locals pay for the cell (a host call per read
   or write); every other local stays in a register and every other capture

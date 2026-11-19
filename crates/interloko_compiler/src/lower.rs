@@ -3134,6 +3134,7 @@ impl<'module> Lowering<'module> {
     ) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_function(self.module, &self.ids, function)?
             .typed(self.facts, Some(function.definition));
+        body.home_params(&function.params, function.span)?;
         let rets = self.value_kinds(&function.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
         body.lower_retryable_block(&function.body, &rets, function.span)?;
@@ -3232,6 +3233,7 @@ impl<'module> Lowering<'module> {
     ) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_method(self.module, &self.ids, method)?
             .typed(self.facts, Some(method.definition));
+        body.home_params(&method.params, method.span)?;
         let rets = self.value_kinds(&method.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
         body.lower_retryable_block(&method.body, &rets, method.span)?;
@@ -4100,6 +4102,7 @@ impl<'module> Lowering<'module> {
         let mut body =
             BodyLowering::for_closure(self.module, &self.ids, closure)?.typed(self.facts, owner);
         body.check_closure_entry(closure)?;
+        body.home_params(&closure.params, closure.span)?;
         let rets = self.value_kinds(&closure.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
         body.lower_block(&closure.body, &rets)?;
@@ -5919,13 +5922,6 @@ impl<'module> BodyLowering<'module> {
         Ok(())
     }
 
-    /// Lowers a function or method body inside a retry region.
-    ///
-    /// A retry exception counts down through the retry regions it crosses.
-    /// The region it reaches at zero calls the function it carries with this
-    /// frame's own arguments and returns the results, so the frame's caller
-    /// sees an ordinary return from the newer code. Parameters live in the
-    /// input registers, which the body never writes.
     /// Opens a protected region catching `catches`, starting it at a block
     /// of its own.
     ///
@@ -5943,6 +5939,30 @@ impl<'module> BodyLowering<'module> {
         self.instructions.push(Instr::EnterRegion { catches });
     }
 
+    /// Moves each parameter that is assigned out of its input register, on
+    /// entry: into a register of its own ([`Self::home`]), or into a cell
+    /// when a closure shares it. The input registers then keep the
+    /// arguments as passed, which a retry region calls the newer code with,
+    /// and an assignment changes only the parameter.
+    fn home_params(&mut self, params: &[sem::LocalId], span: Span) -> Result<(), LowerError> {
+        for param in params.iter().copied() {
+            let Some(value) = self.local_regs.get(param.0 as usize).copied().flatten() else {
+                return Err(invalid_semantic("parameter is not bound"));
+            };
+            let homed = self.home(param, value, span);
+            self.set_local(param, homed)?;
+        }
+        Ok(())
+    }
+
+    /// Lowers a function or method body inside a retry region.
+    ///
+    /// A retry exception counts down through the retry regions it crosses.
+    /// The region it reaches at zero calls the function it carries with this
+    /// frame's own arguments and returns the results, so the frame's caller
+    /// sees an ordinary return from the newer code. The input registers
+    /// hold the arguments as passed: the body never writes them, and an
+    /// assigned parameter moves out of its on entry ([`Self::home_params`]).
     fn lower_retryable_block(
         &mut self,
         block: &sem::Block,

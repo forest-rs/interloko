@@ -1,0 +1,49 @@
+// expect: run 1
+// expect: diagnostics 0
+
+// As in Dylan, a parameter is assignable like a `let` local: assigning it
+// changes only the parameter, not a local bound to its earlier value. One
+// that a closure also refers to lives in a cell they share, as an assigned
+// `let` does.
+
+define function remainder-of(x :: <integer>, by :: <integer>) => <integer>
+  while (x >= by) x := x - by end;
+  x
+end;
+
+define function earlier(p :: <integer>) => <integer>
+  let before = p;
+  p := p + 100;
+  before
+end;
+
+define function count-down(n :: <integer>) => <integer>
+  let ticks = 0;
+  let tick = method () => () n := n - 1; ticks := ticks + 1 end;
+  while (n > 0) tick() end;
+  ticks
+end;
+
+define function scaled(x :: <integer>, #key by :: <integer> = 2) => <integer>
+  by := by * 10;
+  x + by
+end;
+
+define function main() => <integer>
+  let passed = 0;
+  let check = method (test :: <boolean>) => ()
+    if (test) passed := passed + 1 end
+  end;
+  check(remainder-of(17, 5) = 2);
+  check(earlier(1) = 1);
+  check(count-down(4) = 4);
+  check(scaled(1) = 21);
+  check(scaled(1, by: 3) = 31);
+  let doubled = method (a :: <integer>) => <integer>
+    let read = method () => <integer> a end;
+    a := a * 2;
+    read()
+  end;
+  check(doubled(5) = 10);
+  if (passed = 6) 1 else 0 end
+end;
