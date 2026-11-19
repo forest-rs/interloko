@@ -1,0 +1,24 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// The `<type-error>` an inserted check signals is an ordinary condition,
+// which a handler can take like one from `as`.
+
+define class <circle> (<object>)
+end;
+
+define function area(shape :: <circle>) => <integer>
+  1
+end;
+
+define function measure(held :: <object>) => <integer>
+  handle
+    area(held)
+  with restart e :: <type-error>
+    if (e.type-error-code = "type-error.cast") 42 else 0 end
+  end
+end;
+
+define function main() => <integer>
+  measure("not a circle")
+end;

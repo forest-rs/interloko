@@ -1,0 +1,17 @@
+// expect: runtime code type-error.cast
+// expect: run reports 5 is not of type <string>
+// expect: diagnostics 0
+
+// Each of several results is checked against its own declared type, and
+// extra values are dropped first: the second `5` is no `<string>`.
+
+define generic pair(o :: <object>) => (<integer>, <string>);
+
+define method pair(o :: <object>)
+  values(o, o, o)
+end;
+
+define function main() => <integer>
+  let (a, b) = pair(5);
+  a + size(b)
+end;

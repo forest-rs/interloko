@@ -1,0 +1,20 @@
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-cast
+// expect: diagnostic contains function count is strict (declared), but typing cannot prove that <object> is <integer>
+// expect: dump typing contains cast checked rule=cast-narrowing
+// expect: dump typing contains origin=implicit strict=unproved
+
+// A strict definition must prove the checks the compiler inserts, the
+// cast where a table's `<object>` meets an `<integer>` binding among them;
+// `as(<integer>, ...)` would check it deliberately instead.
+
+define strict function count(env :: <table>) => <integer>
+  let n :: <integer> = env["n"];
+  n
+end;
+
+define function main() => <integer>
+  let env = make(<table>);
+  env["n"] := 1;
+  count(env)
+end;

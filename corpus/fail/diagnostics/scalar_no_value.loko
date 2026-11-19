@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.scalar-result-arity-mismatch
+// expect: diagnostic contains this expression needs a value, but it produces 0 values
+
+// A call that returns several values where one is expected keeps the
+// first, but one that returns none has no value to keep.
+
+define function note() => ()
+  #t
+end;
+
+define function main() => <integer>
+  note() + 1
+end;

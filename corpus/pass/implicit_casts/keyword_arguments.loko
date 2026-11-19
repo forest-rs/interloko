@@ -1,0 +1,29 @@
+// expect: run 2151
+// expect: diagnostics 0
+
+// A keyword argument whose type is a supertype of the keyword's declared
+// type is checked where it meets the keyword, as a positional argument is:
+// in source order or not, to a function or a generic, and before a later
+// keyword's default sees it.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2, plus :: <integer> = x) => <integer>
+  x * by + plus
+end;
+
+define generic weigh(s :: <string>, #key times :: <integer> = 1) => <integer>;
+
+define method weigh(s :: <string>, #key times :: <integer>) => <integer>
+  size(s) * times
+end;
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["x"] := 10;
+  t["by"] := 100;
+  t["plus"] := 1;
+  t["s"] := "ab";
+  t["times"] := 10;
+  // 1001 + 1100 + 30 (`plus` defaults to the checked `x`) + 20
+  scale(t["x"], by: t["by"], plus: t["plus"]) + scale(t["x"], plus: t["by"], by: t["by"])
+    + scale(t["x"]) + weigh(t["s"], times: t["times"])
+end;

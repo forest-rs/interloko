@@ -1,0 +1,36 @@
+// expect: run 3333333
+// expect: diagnostics 0
+
+// Where one value is expected, a call returning several keeps the first,
+// as in Dylan: a `select` arm, an argument, a `let` without a values
+// pattern, an assignment, a slot store and a declared result. Each value
+// is still computed.
+
+define class <cell> (<object>)
+  slot value :: <integer>, init-keyword: value:;
+end;
+
+define function apply-op(op :: <character>, a :: <integer>, b :: <integer>) => <integer>
+  select (op)
+    '+' => a + b;
+    '/' => truncate/(a, b);
+  end
+end;
+
+define function id(n :: <integer>) => <integer>
+  n
+end;
+
+define function quotient(a :: <integer>, b :: <integer>) => <integer>
+  floor/(a, b)
+end;
+
+define function main() => <integer>
+  let a = truncate/(7, 2);
+  let b = 0;
+  b := truncate/(10, 3);
+  let c = make(<cell>, value: truncate/(13, 4));
+  c.value := truncate/(6, 2);
+  apply-op('/', 7, 2) * 1000000 + id(truncate/(9, 3)) * 100000 + a * 10000
+    + b * 1000 + c.value * 100 + quotient(7, 2) * 10 + truncate/(3, 1)
+end;

@@ -1,0 +1,13 @@
+// expect: run 2
+// expect: diagnostics 0
+
+// A call that returns several values where one is expected keeps the
+// first, as in Dylan.
+
+define function split() => (<integer>, <integer>)
+  values(1, 2)
+end;
+
+define function main()
+  split() + 1
+end;

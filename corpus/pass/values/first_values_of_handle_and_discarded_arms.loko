@@ -1,0 +1,28 @@
+// expect: run 11
+// expect: diagnostics 0
+
+// A `handle` whose arms return more values than its position expects
+// keeps the first, as `if` and `select` arms do; arms whose values are
+// discarded may have any counts.
+
+define class <problem> (<error>)
+end;
+
+define function two() => (<integer>, <integer>)
+  values(1, 2)
+end;
+
+define function note(flag :: <boolean>) => ()
+  if (flag) values(1, 2) else 3 end
+end;
+
+define function main() => <integer>
+  note(#t);
+  let n :: <integer> = handle
+                         signal(make(<problem>)) + 100
+                       with restart e :: <problem>
+                         two()
+                       end;
+  let m :: <integer> = handle two() with restart e :: <problem> 0 end;
+  n * 10 + m
+end;

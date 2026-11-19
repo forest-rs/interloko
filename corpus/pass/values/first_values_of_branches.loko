@@ -1,0 +1,9 @@
+// expect: run 1
+// expect: diagnostics 0
+
+// Branches of different counts keep as many values as every branch has,
+// so here the first of the `then` branch's two.
+
+define function main()
+  if (#t) values(1, 2) else 3 end
+end;

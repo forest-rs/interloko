@@ -137,7 +137,8 @@ pub enum DiagnosticCode {
     ConstantTypeMismatch,
     /// A local `let` initializer does not satisfy its type annotation.
     LocalTypeMismatch,
-    /// A scalar expression context received zero or multiple values.
+    /// A scalar expression context received no value. Several values keep
+    /// the first, as in Dylan.
     ScalarResultArityMismatch,
     /// A generic method specializer does not satisfy the generic contract.
     GenericMethodSpecializerTypeMismatch,

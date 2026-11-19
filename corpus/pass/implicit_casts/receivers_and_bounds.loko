@@ -1,0 +1,26 @@
+// expect: run 2332
+// expect: diagnostics 0
+
+// An `<object>` receiver of a slot accessor only one class declares is
+// checked against that class, as a send of the accessor would find its only
+// method, and an `<object>` numeric `for` bound is checked as an
+// `<integer>`. A captured local narrows on assignment as any local does.
+
+define class <counter> (<object>)
+  slot hits :: <integer>, init-keyword: hits:;
+end;
+
+define function main() => <integer>
+  let held :: <object> = make(<counter>, hits: 1);
+  held.hits := held.hits + 1;
+  let limit :: <object> = 3;
+  let total = 0;
+  for (i :: <integer> from 0 below limit)
+    total := total + i
+  end;
+  let late :: <object> = 300;
+  let kept :: <integer> = 0;
+  let store = function () kept := late end;
+  store();
+  hits(held) * 1000 + kept + total * 10 + held.hits
+end;

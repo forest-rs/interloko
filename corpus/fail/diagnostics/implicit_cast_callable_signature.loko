@@ -1,0 +1,17 @@
+// expect: diagnostics 3
+// expect: diagnostic code sem.local-type-mismatch
+// expect: diagnostic code sem.local-assignment-type-mismatch
+
+// A run-time cast checks a value's class, not a callable's signature, so an
+// `<object>` is not checked into a binding that declares or infers one; it
+// is an error there, as before. `as(<function>, ...)` and a `<function>`
+// binding take it without a signature.
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["f"] := function (s :: <string>) => <string> s end;
+  let g :: callable(<integer>) => <integer> = t["f"];
+  let f = function (n :: <integer>) => <integer> n + 1 end;
+  f := t["f"];
+  f(1) + g(1)
+end;

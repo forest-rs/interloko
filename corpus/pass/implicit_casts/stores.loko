@@ -1,0 +1,26 @@
+// expect: run 1234
+// expect: diagnostics 0
+
+// A value whose type is a supertype of a slot's or a local's is checked
+// where it is stored: a `make` keyword, a slot assignment, a slot default,
+// a local assignment and a constant.
+
+define class <cell> (<object>)
+  slot value :: <integer>, init-keyword: value:;
+  slot other :: <integer>, init-value: $seed;
+end;
+
+define constant $seed :: <object> = 30;
+
+define constant $start :: <integer> = $seed;
+
+define function main() => <integer>
+  let held :: <object> = 4;
+  let more :: <object> = 200;
+  let bumped :: <object> = 1004;
+  let c = make(<cell>, value: held);
+  c.value := bumped;
+  let total = 0;
+  total := more;
+  c.value + total + c.other + $start - 30
+end;
