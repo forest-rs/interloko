@@ -7230,8 +7230,8 @@ impl Host for SharedFunctionCallHost<'_> {
             .borrow_mut()
             .call(symbol, sig_hash, args, rets, context)
     }
-    fn is_synchronous(&self, symbol: &str, _: SigHash) -> bool {
-        !interloko_runtime::control::is_control_symbol(symbol)
+    fn is_synchronous(&self, symbol: &str, sig_hash: SigHash) -> bool {
+        self.0.borrow().is_synchronous(symbol, sig_hash)
     }
 }
 
@@ -7307,8 +7307,9 @@ impl FunctionCallHost<'_> {
 }
 
 impl Host for FunctionCallHost<'_> {
-    fn is_synchronous(&self, symbol: &str, _: SigHash) -> bool {
-        !interloko_runtime::control::is_control_symbol(symbol)
+    /// Host functions run inline, and the runtime's imports as it says.
+    fn is_synchronous(&self, symbol: &str, sig_hash: SigHash) -> bool {
+        self.runtime.is_synchronous(symbol, sig_hash)
     }
     fn call(
         &mut self,
@@ -25364,9 +25365,11 @@ end;
         // the same argument classes, must reach the new method: 10 + 10 + 0
         // + 20. A cached choice from before the install would give 30.
         let mut asked = 0;
+        let mut caches = Vec::new();
         let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
             asked += 1;
             assert!(condition.refused.is_none());
+            caches.push(condition.runtime.send_cache());
             match asked {
                 1 => Choice::Install(heavier.code_unit().expect("tape")),
                 _ => Choice::UseValue(vec![Value::I64(0)]),
@@ -25375,6 +25378,271 @@ end;
         let value = call_with_chooser(&original, &mut chooser).expect("use-value resumes");
         assert_eq!(value, FunctionValue::Integer(40));
         assert_eq!(asked, 2);
+        // The host answered both sends inline, the second from its cache,
+        // and the install emptied the cache and moved it to the new unit.
+        let cache = |unit, entries| {
+            Some(interloko_runtime::SendCacheReport {
+                newest: execution_tape::value::UnitId(unit),
+                entries,
+                inline: true,
+                sends: 2,
+                hits: 1,
+            })
+        };
+        assert_eq!(caches, [cache(0, 1), cache(1, 0)]);
+    }
+
+    #[test]
+    fn a_cached_send_after_an_install_selects_the_new_method() {
+        // Two sends before the install and two after it: the second of each
+        // pair is a cache hit, and the one after the install answers with
+        // the new unit's method: 10 + 10 + 0 + 20 + 20.
+        let source = SEND_CACHE.replace(
+            "check(100) + weight(c)",
+            "check(100) + weight(c) + weight(c)",
+        );
+        let off = lower::CodegenPolicy::Off;
+        let original = compile_under(&source, off);
+        let heavier = compile_under(
+            &source.replace("<integer>\n  10\nend;", "<integer>\n  20\nend;"),
+            off,
+        );
+        let tape = original.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut asked = 0;
+        let outcome = driver::run(
+            &mut vm,
+            &tape.code,
+            tape.main.expect("main"),
+            &[],
+            TurnOptions::default(),
+            &mut Scripted(|_: &UnhandledCondition<'_>| {
+                asked += 1;
+                match asked {
+                    1 => Choice::Install(heavier.code_unit().expect("tape")),
+                    _ => Choice::UseValue(vec![Value::I64(0)]),
+                }
+            }),
+        )
+        .expect("use-value resumes");
+        assert_eq!(outcome.outputs, vec![Value::I64(10 + 10 + 20 + 20)]);
+        assert_eq!((outcome.stats.sends, outcome.stats.send_cache_hits), (4, 2));
+        assert_eq!(vm.host().send_cache(), None, "a run's sends end with it");
+    }
+
+    /// [`SEND_CACHE`] without the signal: `main` weighs a <circle> twice.
+    const WEIGH_TWICE: &str = "define class <shape> (<object>)\nend;\n\
+         define class <circle> (<shape>)\nend;\n\
+         define generic weight(s :: <shape>) => <integer>;\n\
+         define method weight(s :: <shape>) => <integer>\n  1\nend;\n\
+         define method weight(s :: <circle>) => <integer>\n  10\nend;\n\
+         define function main() => <integer>\n  let c = make(<circle>);\n  weight(c) + weight(c)\nend;";
+
+    #[test]
+    fn a_runtime_image_sends_to_the_code_each_call_runs() {
+        // One image runs a program, an edit of a method's body that keeps
+        // the layout, and the program again. Each call runs in a VM of its
+        // own whose unit has the same id, and its sends select from the code
+        // it runs, never from another call's choices.
+        let off = lower::CodegenPolicy::Off;
+        let original = compile_under(WEIGH_TWICE, off);
+        let heavier = compile_under(
+            &WEIGH_TWICE.replace("<integer>\n  10\nend;", "<integer>\n  20\nend;"),
+            off,
+        );
+        let mut image = original.runtime().expect("runnable");
+        let mut call = |artifacts: &SessionArtifacts| {
+            image
+                .call_function(artifacts, "main", &[], None)
+                .expect("main runs")
+                .value
+        };
+        assert_eq!(call(&original), FunctionValue::Integer(20));
+        assert_eq!(call(&heavier), FunctionValue::Integer(40));
+        assert_eq!(call(&original), FunctionValue::Integer(20));
+    }
+
+    #[test]
+    fn sends_after_add_method_or_rewind_select_from_the_new_code() {
+        // Only `weight(<shape>)` applies to a <circle> at first. Adding
+        // `weight(<circle>)` changes the layout, so an image made before
+        // refuses the new code rather than running it, and a new image sends
+        // to the new method. Rewinding the mutation restores the layout,
+        // and the old image's sends find `weight(<shape>)` again.
+        let source = WEIGH_TWICE.replace(
+            "define method weight(s :: <circle>) => <integer>\n  10\nend;\n",
+            "",
+        );
+        let mut artifacts = compile_under(&source, lower::CodegenPolicy::Off);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let mut image = artifacts.runtime().expect("runnable");
+        let main = |image: &mut SessionRuntime, artifacts: &SessionArtifacts| {
+            image
+                .call_function(artifacts, "main", &[], None)
+                .map(|outcome| outcome.value)
+        };
+        assert_eq!(
+            main(&mut image, &artifacts).ok(),
+            Some(FunctionValue::Integer(2))
+        );
+
+        artifacts
+            .apply_mutation(SessionMutation::AddMethod {
+                generic: generic_id(&artifacts, "weight"),
+                method_source: "define method weight(c :: <circle>) => <integer>\n  10\nend;"
+                    .into(),
+            })
+            .expect("adds the method");
+        assert!(
+            artifacts
+                .dump_stage(DumpStage::Lowered)
+                .contains("select-method g0("),
+            "the sends stay dynamic"
+        );
+        assert!(matches!(
+            main(&mut image, &artifacts),
+            Err(FunctionCallError::RuntimeLayoutChanged)
+        ));
+        let mut fresh = artifacts.runtime().expect("runnable");
+        assert_eq!(
+            main(&mut fresh, &artifacts).ok(),
+            Some(FunctionValue::Integer(20))
+        );
+
+        artifacts.rewind_to(None).expect("rewinds");
+        assert_eq!(
+            main(&mut image, &artifacts).ok(),
+            Some(FunctionValue::Integer(2))
+        );
+    }
+
+    #[test]
+    fn an_inline_send_that_finds_no_method_signals_and_takes_a_value() {
+        // Without typing facts `measure` sends `pick` and `area` dynamically,
+        // and the host answers both inline. Neither has a method for a
+        // <square>, so each answer is the generic's dispatcher, which
+        // signals `<no-applicable-method>`; use-value resumes each send.
+        let artifacts = compile_under(NO_METHOD, lower::CodegenPolicy::Off);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let mut seen = Vec::new();
+        let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+            let report = condition.no_applicable_method();
+            let generic = report.map(|report| report.generic);
+            seen.push((
+                generic.clone(),
+                condition.runtime.send_cache().map(|cache| cache.inline),
+            ));
+            if generic.as_deref() == Some("pick") {
+                Choice::UseValue(vec![register_of_class(condition, "<circle>")])
+            } else {
+                Choice::UseValue(vec![Value::I64(4)])
+            }
+        });
+        let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+        // pick's value is the spare <circle> of radius 5: 5 + 4 + 5.
+        assert_eq!(value, FunctionValue::Integer(14));
+        assert_eq!(
+            seen,
+            [
+                (Some(String::from("pick")), Some(true)),
+                (Some(String::from("area")), Some(true)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_a_chooser_panics_out_of_closes_its_sends() {
+        // `main` sends, then signals; the chooser panics while every frame
+        // is live. Unwinding out of the driver still closes the run's
+        // sends, so a later turn the driver does not run has its send
+        // refused instead of answered from the abandoned run's units.
+        let artifacts = compile_under(SEND_CACHE, lower::CodegenPolicy::Off);
+        let tape = artifacts.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut installed = driver::install(&mut vm, &tape.code).expect("installs");
+        let main = tape_function(&artifacts, "main");
+        let mut opened = None;
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            driver::run_installed(
+                &mut vm,
+                &mut installed,
+                main,
+                &[],
+                TurnOptions::default(),
+                &mut Scripted(|condition: &UnhandledCondition<'_>| -> Choice {
+                    opened = condition.runtime.send_cache();
+                    panic!("the chooser fails")
+                }),
+            )
+        }));
+        assert!(panicked.is_err(), "the panic leaves the run");
+        assert!(opened.is_some_and(|cache| cache.inline && cache.sends == 2));
+        assert_eq!(vm.host().send_cache(), None);
+        assert!(!vm.host().is_synchronous(
+            interloko_runtime::code::CODE_DISPATCH,
+            execution_tape::host::SigHash(0)
+        ));
+        let trap = vm
+            .run(
+                execution_tape::value::FuncRef::new(installed.unit(), main),
+                &[],
+                execution_tape::trace::TraceMask::NONE,
+                None,
+            )
+            .expect_err("nothing answers the send");
+        assert!(
+            matches!(
+                &trap.trap,
+                execution_tape::vm::Trap::HostCallFailed {
+                    symbol,
+                    error: HostError::UnknownSymbol,
+                    ..
+                } if &**symbol == interloko_runtime::code::CODE_DISPATCH
+            ),
+            "{trap:?}"
+        );
+    }
+
+    #[test]
+    fn sends_outside_a_driver_run_are_not_answered() {
+        // The host answers sends for an open run only. After the run, a
+        // send in a turn the driver does not run fails as an unknown import
+        // instead of selecting from the finished run's units.
+        let artifacts = compile_under(WEIGH_TWICE, lower::CodegenPolicy::Off);
+        let tape = artifacts.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut installed = driver::install(&mut vm, &tape.code).expect("installs");
+        let main = tape_function(&artifacts, "main");
+        let outputs = run_driver(&mut vm, &mut installed, main, &[], |_| Choice::Abort);
+        assert_eq!(outputs, vec![Value::I64(20)]);
+        let trap = vm
+            .run(
+                execution_tape::value::FuncRef::new(installed.unit(), main),
+                &[],
+                execution_tape::trace::TraceMask::NONE,
+                None,
+            )
+            .expect_err("nothing answers the send");
+        assert!(
+            matches!(
+                &trap.trap,
+                execution_tape::vm::Trap::HostCallFailed {
+                    symbol,
+                    error: HostError::UnknownSymbol,
+                    ..
+                } if &**symbol == interloko_runtime::code::CODE_DISPATCH
+            ),
+            "{trap:?}"
+        );
     }
 
     #[test]
@@ -25892,6 +26160,192 @@ end;
             }))
         );
         assert_eq!(outcomes[1], Ok(vec![Value::I64(1000)]));
+    }
+
+    #[test]
+    fn code_another_compile_put_in_the_vm_cannot_send_inline() {
+        // As above, but the second install is the same source compiled
+        // again, a program of its own: the run answers sends inline, and
+        // knows the first install's `probe` for foreign code by its program.
+        let source = RANGED.replace("let x = stop();\n  probe", "let x = 0;\n  probe");
+        let off = lower::CodegenPolicy::Off;
+        let (a, b) = (compile_under(&source, off), compile_under(&source, off));
+        let tape = a.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let mut first = driver::install(&mut vm, &tape.code).expect("installs");
+        let probe = run_driver(&mut vm, &mut first, tape_function(&a, "main"), &[], |_| {
+            Choice::Abort
+        });
+        let mut second =
+            driver::install(&mut vm, &b.tape.as_ref().expect("tape").code).expect("installs");
+        let fault = driver::run_installed(
+            &mut vm,
+            &mut second,
+            tape_function(&b, "apply-it"),
+            &probe,
+            TurnOptions::default(),
+            &mut Scripted(|_: &UnhandledCondition<'_>| Choice::Abort),
+        )
+        .map(|outcome| outcome.outputs)
+        .map_err(|failure| match failure {
+            RunFailure::Control { fault, .. } => Some(fault),
+            _ => None,
+        });
+        assert_eq!(
+            fault,
+            Err(Some(ControlFault::ForeignCode {
+                unit: execution_tape::value::UnitId(0)
+            }))
+        );
+        assert_eq!(vm.host().send_cache(), None, "a failed run's sends end too");
+    }
+
+    /// A host wrapper that runs every import but the control requests
+    /// inline instead of asking the runtime which ones may.
+    struct EagerHost(InterlokoHost);
+
+    impl Host for EagerHost {
+        fn call(
+            &mut self,
+            symbol: &str,
+            sig_hash: SigHash,
+            args: &[ValueRef<'_>],
+            rets: &mut [Value],
+            context: HostContext<'_, '_>,
+        ) -> Result<u64, HostError> {
+            self.0.call(symbol, sig_hash, args, rets, context)
+        }
+        fn is_synchronous(&self, symbol: &str, _: SigHash) -> bool {
+            !interloko_runtime::control::is_control_symbol(symbol)
+        }
+    }
+
+    impl RuntimeHost for EagerHost {
+        fn with_runtime<R>(&mut self, f: impl FnOnce(&mut InterlokoHost) -> R) -> R {
+            f(&mut self.0)
+        }
+    }
+
+    #[test]
+    fn a_wrapper_that_runs_sends_inline_cannot_let_foreign_code_send() {
+        // The same program installed twice, run through a wrapper that
+        // runs the send inline where the runtime would have the driver
+        // check it: the host still refuses the first install's `probe`.
+        let source = RANGED.replace("let x = stop();\n  probe", "let x = 0;\n  probe");
+        let artifacts = compile_under(&source, lower::CodegenPolicy::Off);
+        let tape = artifacts.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            EagerHost(InterlokoHost::new(tape.runtime().clone())),
+            Limits::default(),
+        );
+        let mut first = driver::install(&mut vm, &tape.code).expect("installs");
+        let mut abort = Scripted(|_: &UnhandledCondition<'_>| Choice::Abort);
+        let probe = driver::run_installed(
+            &mut vm,
+            &mut first,
+            tape_function(&artifacts, "main"),
+            &[],
+            TurnOptions::default(),
+            &mut abort,
+        )
+        .expect("main returns probe")
+        .outputs;
+        let mut second = driver::install(&mut vm, &tape.code).expect("installs");
+        let fault = driver::run_installed(
+            &mut vm,
+            &mut second,
+            tape_function(&artifacts, "apply-it"),
+            &probe,
+            TurnOptions::default(),
+            &mut abort,
+        )
+        .map(|outcome| outcome.outputs)
+        .map_err(|failure| match failure {
+            RunFailure::Control { fault, .. } => Some(fault),
+            _ => None,
+        });
+        assert_eq!(
+            fault,
+            Err(Some(ControlFault::ForeignCode {
+                unit: execution_tape::value::UnitId(0)
+            }))
+        );
+    }
+
+    #[test]
+    fn installing_a_program_another_install_runs_makes_sends_yield() {
+        // `x` is installed but never run; `z`, the same source compiled
+        // again, runs and signals, and the chooser installs `x`'s code. The
+        // VM now runs `x`'s program as a unit outside the run too, so the
+        // rest of the run's sends yield for the driver's check, and still
+        // select from the new unit: 10 + 10 + 0 + 10.
+        let off = lower::CodegenPolicy::Off;
+        let (x, z) = (
+            compile_under(SEND_CACHE, off),
+            compile_under(SEND_CACHE, off),
+        );
+        let tape = z.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        let x_code = x.code_unit().expect("tape");
+        driver::install(&mut vm, &x_code).expect("installs");
+        let mut installed = driver::install(&mut vm, &tape.code).expect("installs");
+        let mut asked = 0;
+        let mut caches = Vec::new();
+        let outputs = run_driver(
+            &mut vm,
+            &mut installed,
+            tape_function(&z, "main"),
+            &[],
+            |condition| {
+                asked += 1;
+                caches.push(
+                    condition
+                        .runtime
+                        .send_cache()
+                        .map(|cache| (cache.newest.0, cache.inline)),
+                );
+                match asked {
+                    1 => Choice::Install(Arc::clone(&x_code)),
+                    _ => Choice::UseValue(vec![Value::I64(0)]),
+                }
+            },
+        );
+        assert_eq!(outputs, vec![Value::I64(30)]);
+        assert_eq!(caches, [Some((1, true)), Some((2, false))]);
+    }
+
+    #[test]
+    fn a_run_of_a_program_installed_twice_checks_each_sender() {
+        // With the same program installed twice, a program no longer names
+        // its sender, so the second install's run has its sends yield to the
+        // driver, which checks the sender's unit before the host answers.
+        let artifacts = compile_under(SEND_CACHE, lower::CodegenPolicy::Off);
+        let tape = artifacts.tape.as_ref().expect("tape");
+        let mut vm = Vm::new(
+            InterlokoHost::new(tape.runtime().clone()),
+            Limits::default(),
+        );
+        driver::install(&mut vm, &tape.code).expect("installs");
+        let mut second = driver::install(&mut vm, &tape.code).expect("installs");
+        let mut inline = Vec::new();
+        let outputs = run_driver(
+            &mut vm,
+            &mut second,
+            tape_function(&artifacts, "main"),
+            &[],
+            |condition| {
+                inline.push(condition.runtime.send_cache().map(|cache| cache.inline));
+                Choice::UseValue(vec![Value::I64(0)])
+            },
+        );
+        assert_eq!(outputs, vec![Value::I64(30)], "10 + 10 + 0 + 10");
+        assert_eq!(inline, [Some(false)]);
     }
 
     #[test]

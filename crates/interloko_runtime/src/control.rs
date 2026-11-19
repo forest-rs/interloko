@@ -86,6 +86,10 @@ pub const CHECK_FAILED_TAG: &str = "interloko.check_failed";
 
 /// Whether `symbol` is a control request serviced by [`crate::driver`]
 /// rather than by a [`execution_tape::host::Host`].
+///
+/// [`crate::code::CODE_DISPATCH`] is not one: the host answers it, inline
+/// unless [`crate::InterlokoHost`]'s `is_synchronous` says otherwise, which
+/// a host wrapper should forward rather than derive from this.
 #[must_use]
 pub fn is_control_symbol(symbol: &str) -> bool {
     matches!(
@@ -100,7 +104,6 @@ pub fn is_control_symbol(symbol: &str) -> bool {
             | CONTROL_POP
             | CONTROL_PUSH_EXIT
             | CONTROL_CHECK_EXIT
-            | crate::code::CODE_DISPATCH
     )
 }
 
@@ -291,9 +294,11 @@ pub struct ControlStats {
     pub unhandled: u64,
     /// Bindings inspected while searching for handlers.
     pub bindings_searched: u64,
-    /// Generic sends the driver dispatched.
+    /// Generic sends the runtime selected a method for by their argument
+    /// classes, consulting its dispatch cache
+    /// ([`crate::InterlokoHost::send_cache`]).
     pub sends: u64,
-    /// Sends answered from the dispatch cache.
+    /// Those sends the dispatch cache answered.
     pub send_cache_hits: u64,
     /// Sends that found no applicable method and signalled
     /// `<no-applicable-method>`.
@@ -365,13 +370,6 @@ impl ControlState {
 
     pub(crate) fn note_unhandled(&mut self) {
         self.stats.unhandled = self.stats.unhandled.saturating_add(1);
-    }
-
-    pub(crate) fn note_send(&mut self, cache_hit: bool) {
-        self.stats.sends = self.stats.sends.saturating_add(1);
-        if cache_hit {
-            self.stats.send_cache_hits = self.stats.send_cache_hits.saturating_add(1);
-        }
     }
 
     pub(crate) fn note_failed_send(&mut self) {

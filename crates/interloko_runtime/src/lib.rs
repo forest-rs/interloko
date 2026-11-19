@@ -17,6 +17,7 @@ pub mod driver;
 mod evacuate;
 mod no_applicable_method;
 mod region;
+mod send;
 mod turn;
 mod type_error;
 mod type_object;
@@ -56,6 +57,7 @@ pub use boxed::{IMMEDIATE_INTEGER_MAX, IMMEDIATE_INTEGER_MIN};
 pub use census::{HeapStats, TurnStats};
 pub use no_applicable_method::NoApplicableMethodReport;
 use region::{NurserySerials, ObjectRef, OpenTurn, Region, Space};
+pub use send::SendCacheReport;
 pub use turn::ImageRootId;
 pub use type_error::TypeErrorReport;
 
@@ -1681,6 +1683,9 @@ pub struct InterlokoHost {
     turn: Option<OpenTurn>,
     /// Most evacuation work a turn may need to finish.
     evacuation_budget: u64,
+    /// The open driver run's generic sends, answered inline; see
+    /// [`InterlokoHost::send_cache`].
+    sends: send::RunSends,
 }
 
 impl InterlokoHost {
@@ -1697,6 +1702,7 @@ impl InterlokoHost {
             roots: Vec::new(),
             turn: None,
             evacuation_budget: u64::MAX,
+            sends: send::RunSends::default(),
         }
     }
 
@@ -2090,7 +2096,13 @@ impl InterlokoHost {
 }
 
 impl Host for InterlokoHost {
+    /// Every import but the driver's control requests runs inline, and so
+    /// does [`code::CODE_DISPATCH`] while the open run can tell its senders
+    /// apart (see [`InterlokoHost::send_cache`]).
     fn is_synchronous(&self, symbol: &str, _: SigHash) -> bool {
+        if symbol == code::CODE_DISPATCH {
+            return self.sends.inline();
+        }
         !crate::control::is_control_symbol(symbol)
     }
     fn call(
@@ -2101,6 +2113,14 @@ impl Host for InterlokoHost {
         rets: &mut [Value],
         mut ctx: HostContext<'_, '_>,
     ) -> Result<u64, HostError> {
+        if symbol == code::CODE_DISPATCH {
+            let target = self.dispatch_send(ctx.program(), args)?;
+            let [ret] = rets else {
+                return Err(HostError::Failed);
+            };
+            *ret = Value::Func(target);
+            return Ok(0);
+        }
         if let Some(function) = FloatFunction::from_symbol(symbol) {
             let mut operands = [0.0; 2];
             if args.len() != function.arity() {

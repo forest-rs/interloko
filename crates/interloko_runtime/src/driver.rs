@@ -17,12 +17,14 @@
 //! A run links [`CodeUnit`]s: it starts from an entry unit installed in the
 //! VM, either by [`run`] or once by [`install`] for any number of
 //! [`run_installed`] calls, and a chooser may install replacements while a
-//! condition is unhandled. Generic sends ask
-//! the driver which method to call ([`crate::code::CODE_DISPATCH`]) or, when
-//! typing selected the method, call it through a link that every install
-//! repoints ([`crate::code::CodeUnit::link_target`]),
-//! and a retried frame calls the newest version of its function, while every
-//! frame keeps running the unit it entered.
+//! condition is unhandled. Generic sends ask the runtime which method to
+//! call ([`crate::code::CODE_DISPATCH`]), which the host answers inline from
+//! the units the driver hands it at the start of the run and at every
+//! install ([`InterlokoHost::send_cache`]), or, when typing selected the
+//! method, call it through a link that every install repoints
+//! ([`crate::code::CodeUnit::link_target`]), and a retried frame calls the
+//! newest version of its function, while every frame keeps running the unit
+//! it entered.
 //!
 //! Code older than the newest unit may reach it only where the newest unit
 //! keeps what that code relies on ([`crate::code::CodeUnit::check_replaces`]):
@@ -32,7 +34,6 @@
 //! still call their code.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -44,7 +45,7 @@ use execution_tape::program::ValueType;
 use execution_tape::value::{FuncId, FuncRef, Obj, TagRef, UnitId, Value};
 use execution_tape::vm::{
     ActivationId, ComputationInspection, InstallError, PendingHostCall, PendingSuspension,
-    RelinkError, RunStatus, TagError, Trap, TrapInfo, TurnOptions, TurnOutcome, Units, Vm,
+    RelinkError, RunStatus, TagError, Trap, TrapInfo, Turn, TurnOptions, TurnOutcome, Units, Vm,
 };
 use interloko_model::{ClassId, GenericFunctionId};
 
@@ -61,9 +62,15 @@ use crate::control::{
     CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlState, ControlStats, RESTART_TAG,
     RETRY_TAG, RestartDescriptor, is_control_symbol, restart_payload, retry_payload,
 };
+use crate::send::senders_attributable;
 
 /// A [`Host`] backed by an [`InterlokoHost`], which the driver consults for
 /// condition classes and the class hierarchy.
+///
+/// A wrapper should forward [`Host::is_synchronous`] to the runtime's, so
+/// generic sends run inline when they can ([`InterlokoHost::send_cache`]).
+/// A wrapper that answers otherwise stays correct but may fail sends that
+/// the runtime would have left to the driver.
 pub trait RuntimeHost: Host {
     /// Runs `f` with the Interloko runtime behind this host.
     fn with_runtime<R>(&mut self, f: impl FnOnce(&mut InterlokoHost) -> R) -> R;
@@ -295,7 +302,8 @@ pub fn run<'a, H: RuntimeHost>(
 /// `options` may carry trace and access observers; the driver opts into
 /// yielded host calls and suspensions itself. Hard VM limits apply to the
 /// whole run. Nothing of the run's control state outlives it: handler and
-/// exit bindings, handler searches and selected sends start empty every run.
+/// exit bindings, handler searches and the host's selected sends
+/// ([`InterlokoHost::send_cache`]) start empty every run.
 ///
 /// A condition that no live handler accepts goes to `chooser` before anything
 /// unwinds. Code it installs stays in `vm` after the run, and `installed`
@@ -350,17 +358,20 @@ pub fn run_installed<'a, H: RuntimeHost>(
     )
     .map_err(RunFailure::Link)?;
     units.push(unit, Arc::clone(&installed.code));
-    let mut turn = vm
+    let turn = vm
         .start(
             FuncRef::new(unit, entry),
             args,
             options.yield_host_calls().yield_suspensions(),
         )
         .map_err(|trap| RunFailure::Trap(Box::new(trap)))?;
+    // The host answers the run's sends from here until the run ends,
+    // however it ends.
+    let mut open = OpenSends::open(turn, &units);
+    let turn = open.turn();
     let mut driver = Driver {
         units,
         linked: &mut installed.linked,
-        sends: BTreeMap::new(),
         tags,
         state: ControlState::default(),
         searches: Vec::new(),
@@ -368,24 +379,13 @@ pub fn run_installed<'a, H: RuntimeHost>(
         unhandled_check: None,
         fault: None,
     };
-    loop {
+    let ended = loop {
         let status = match turn.drive(u64::MAX) {
             Ok(status) => status,
-            Err(trap) => return Err(driver.failure(trap)),
+            Err(trap) => break Err(driver.failure(trap)),
         };
         let serviced = match status {
-            // Finishing publishes the outputs; a turn dropped without it
-            // discards them along with everything else it allocated.
-            RunStatus::Complete => {
-                let outputs = match turn.finish() {
-                    Ok(TurnOutcome::Returned(outputs)) => outputs,
-                    _ => unreachable!("a computation that reported Complete returned"),
-                };
-                return Ok(RunOutcome {
-                    outputs,
-                    stats: driver.state.stats(),
-                });
-            }
+            RunStatus::Complete => break Ok(()),
             RunStatus::Suspended => Ok(()),
             RunStatus::AwaitingHost | RunStatus::CallbackReturned => turn
                 .pending_host_call()
@@ -396,13 +396,72 @@ pub fn run_installed<'a, H: RuntimeHost>(
             // A status from a newer VM that this driver cannot service.
             // Returning drops the turn, which cancels and rolls it back.
             status => {
-                return Err(RunFailure::UnsupportedStatus {
+                break Err(RunFailure::UnsupportedStatus {
                     status: format!("{status:?}"),
                 });
             }
         };
         if let Err(trap) = serviced {
-            return Err(driver.failure(trap));
+            break Err(driver.failure(trap));
+        }
+    };
+    let (turn, (sends, send_cache_hits)) = open.close();
+    ended?;
+    // Finishing publishes the outputs; a turn dropped without it discards
+    // them along with everything else it allocated.
+    let outputs = match turn.finish() {
+        Ok(TurnOutcome::Returned(outputs)) => outputs,
+        _ => unreachable!("a computation that reported Complete returned"),
+    };
+    Ok(RunOutcome {
+        outputs,
+        stats: ControlStats {
+            sends,
+            send_cache_hits,
+            ..driver.state.stats()
+        },
+    })
+}
+
+/// A run's turn while the host answers the run's sends. Closing it, or
+/// dropping it on any other way out of the run, a panic included, closes
+/// them, so a host never answers a send for a run that has ended.
+struct OpenSends<'t, H: RuntimeHost> {
+    /// `None` once closed.
+    turn: Option<Turn<'t, H>>,
+}
+
+impl<'t, H: RuntimeHost> OpenSends<'t, H> {
+    /// Opens the host's sends over `units`, the run's, newest last.
+    fn open(mut turn: Turn<'t, H>, units: &UnitTable) -> Self {
+        let inline = senders_attributable(turn.units(), units);
+        turn.host_mut()
+            .with_runtime(|runtime| runtime.open_sends(units, inline));
+        Self { turn: Some(turn) }
+    }
+
+    fn turn(&mut self) -> &mut Turn<'t, H> {
+        self.turn
+            .as_mut()
+            .expect("the turn stays until the sends close")
+    }
+
+    /// Closes the sends, returning the turn and how many sends consulted
+    /// the cache and how many it answered.
+    fn close(mut self) -> (Turn<'t, H>, (u64, u64)) {
+        let mut turn = self
+            .turn
+            .take()
+            .expect("the turn stays until the sends close");
+        let stats = turn.host_mut().with_runtime(InterlokoHost::close_sends);
+        (turn, stats)
+    }
+}
+
+impl<H: RuntimeHost> Drop for OpenSends<'_, H> {
+    fn drop(&mut self) {
+        if let Some(turn) = self.turn.as_mut() {
+            turn.host_mut().with_runtime(InterlokoHost::close_sends);
         }
     }
 }
@@ -496,9 +555,6 @@ struct Driver<'a> {
     /// Every unit installed through the run's [`Installed`], this run's
     /// included, whose linked sends follow the run's newest code.
     linked: &'a mut UnitTable,
-    /// Functions sends selected, by generic and the classes of the argument
-    /// positions its methods specialize. Cleared by every install.
-    sends: BTreeMap<SendKey, FuncRef>,
     tags: VmTags,
     state: ControlState,
     searches: Vec<Search>,
@@ -534,35 +590,6 @@ struct Search {
     /// Whether a failed runtime check or send signalled the condition,
     /// rather than the program.
     failed_check: bool,
-}
-
-/// The classes that select a send, for up to [`SendKey::POSITIONS`]
-/// specialized positions; wider sends are not cached.
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct SendKey {
-    generic: u32,
-    classes: [u32; SendKey::POSITIONS],
-}
-
-impl SendKey {
-    const POSITIONS: usize = 4;
-
-    fn new(
-        generic: GenericFunctionId,
-        classes: impl ExactSizeIterator<Item = Option<ClassId>>,
-    ) -> Option<Self> {
-        if classes.len() > Self::POSITIONS {
-            return None;
-        }
-        let mut key = [u32::MAX; Self::POSITIONS];
-        for (slot, class) in key.iter_mut().zip(classes) {
-            *slot = class?.0;
-        }
-        Some(Self {
-            generic: generic.0,
-            classes: key,
-        })
-    }
 }
 
 /// A suspended signal that no handler accepted.
@@ -601,12 +628,27 @@ impl Driver<'_> {
                 trap: Box::new(trap),
             };
         }
-        match self.fault {
+        match self.fault.or_else(|| self.failed_send(&trap)) {
             Some(fault) => RunFailure::Control {
                 fault,
                 trap: Box::new(trap),
             },
             None => RunFailure::Trap(Box::new(trap)),
+        }
+    }
+
+    /// The fault behind a trap the host's answer to a send ended the run
+    /// with: code another install put in the VM sent, or the request was
+    /// malformed.
+    fn failed_send(&self, trap: &TrapInfo) -> Option<ControlFault> {
+        match &trap.trap {
+            Trap::HostCallFailed { symbol, .. } if &**symbol == CODE_DISPATCH => {
+                Some(match self.units.get(trap.unit) {
+                    Some(_) => ControlFault::MalformedRequest,
+                    None => ControlFault::ForeignCode { unit: trap.unit },
+                })
+            }
+            _ => None,
         }
     }
 
@@ -622,7 +664,7 @@ impl Driver<'_> {
         let action = if status == RunStatus::CallbackReturned {
             Action::Fail(ControlFault::MalformedRequest)
         } else if pending.symbol() == CODE_DISPATCH {
-            return self.dispatch(pending);
+            return self.attributed_send(pending);
         } else if !is_control_symbol(pending.symbol()) {
             return pending.dispatch();
         } else {
@@ -695,15 +737,10 @@ impl Driver<'_> {
         Some((condition, class))
     }
 
-    /// Answers a generic send with the function its arguments select from
-    /// the newest unit: a method, or the generic's dispatcher when the
-    /// unit's dispatch table cannot decide or selects nothing, so the
-    /// dispatcher's own checks apply and a send that finds no method
-    /// signals its `<no-applicable-method>` there.
-    ///
-    /// Only code the run's [`Installed`] knows may send: nothing compared
-    /// another install's code with the newest unit.
-    fn dispatch<H: RuntimeHost>(
+    /// Hands a generic send to the host once its sender is known to be the
+    /// run's code. Sends yield only when the run cannot tell its senders
+    /// apart by program ([`crate::send`]), so the sender's unit decides.
+    fn attributed_send<H: RuntimeHost>(
         &mut self,
         mut pending: PendingHostCall<'_, '_, H>,
     ) -> Result<(), TrapInfo> {
@@ -713,66 +750,10 @@ impl Driver<'_> {
                 .get_or_insert(ControlFault::ForeignCode { unit: sender });
             return pending.complete(&mut [], Err(HostError::Failed));
         }
-        let args = pending
-            .arguments()
-            .map(|value| value.to_value())
-            .collect::<Vec<_>>();
-        let generic = match args.first() {
-            Some(Value::U64(generic)) => u32::try_from(*generic).ok().map(GenericFunctionId),
-            _ => None,
-        };
-        let target = generic.and_then(|generic| {
-            self.select(&mut pending, generic, &args[1..])
-                .or_else(|| self.units.current(&Definition::Generic(generic)))
-        });
-        match target {
-            Some(target) => pending.complete(&mut [Value::Func(target)], Ok(0)),
-            None => {
-                self.fault.get_or_insert(ControlFault::MalformedRequest);
-                pending.complete(&mut [], Err(HostError::Failed))
-            }
-        }
-    }
-
-    /// Selects a directly callable method of the newest unit, consulting and
-    /// filling the dispatch cache.
-    fn select<H: RuntimeHost>(
-        &mut self,
-        pending: &mut PendingHostCall<'_, '_, H>,
-        generic: GenericFunctionId,
-        args: &[Value],
-    ) -> Option<FuncRef> {
-        let unit = self.units.newest_unit()?;
-        let code = Arc::clone(self.units.newest()?);
-        let plan = code.dispatch.get(generic.0 as usize)?.as_ref()?;
-        let mut classes = alloc::vec![None; args.len()];
-        let found = pending.host_mut().with_runtime(|runtime| {
-            for &position in &plan.positions {
-                let value = args.get(position)?;
-                classes[position] = Some(runtime.class_of_any(ValueRef::from_value(value)).ok()?);
-            }
-            Some(())
-        });
-        found?;
-        let key = SendKey::new(generic, plan.positions.iter().map(|&index| classes[index]));
-        if let Some(target) = key.and_then(|key| self.sends.get(&key)) {
-            self.state.note_send(true);
-            return Some(*target);
-        }
-        self.state.note_send(false);
-        let case = pending.host_mut().with_runtime(|runtime| {
-            plan.select(
-                |index| classes.get(index).copied().flatten(),
-                |class, specializer| runtime.layout().is_same_or_subclass(class, specializer),
-            )
-            .cloned()
-        })?;
-        let method = code.methods.get(case.method.0 as usize)?;
-        let target = case.direct.then(|| FuncRef::new(unit, *method))?;
-        if let Some(key) = key {
-            self.sends.insert(key, target);
-        }
-        Some(target)
+        pending
+            .host_mut()
+            .with_runtime(InterlokoHost::attribute_send);
+        pending.dispatch()
     }
 
     /// Decides a control request while it waits, with the requesting
@@ -1119,7 +1100,7 @@ impl Driver<'_> {
             .map_err(LinkError::Install)?;
         // Linked sends of every unit, suspended frames' and earlier runs'
         // included, now follow the new code, as dynamic sends do.
-        relink_all(
+        let relinked = relink_all(
             self.linked
                 .iter()
                 .map(|(owner, code)| (owner, &**code))
@@ -1127,11 +1108,23 @@ impl Driver<'_> {
             unit,
             &code,
             |owner, link, target| pending.relink(owner, link, target),
-        )?;
+        );
+        if let Err(error) = relinked {
+            // The unit stays in the VM though the run does not take it
+            // over, so its program may no longer name a sender.
+            let inline = senders_attributable(pending.units(), &self.units);
+            pending
+                .host_mut()
+                .with_runtime(|runtime| runtime.set_sends_inline(inline));
+            return Err(error);
+        }
         self.linked.push(unit, Arc::clone(&code));
-        self.units.push(unit, code);
-        // Selections name the previous newest unit's methods.
-        self.sends.clear();
+        self.units.push(unit, Arc::clone(&code));
+        // Sends now select from the new unit.
+        let inline = senders_attributable(pending.units(), &self.units);
+        pending
+            .host_mut()
+            .with_runtime(|runtime| runtime.install_send_unit(unit, code, inline));
         Ok(())
     }
 
