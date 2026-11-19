@@ -1,0 +1,15 @@
+// expect: run 10.0
+// expect: diagnostics 0
+
+// As in Dylan, `/` is a name character, so `truncate/` and `x/y` are names
+// and division is written with spaces. A `//` still starts a comment, even
+// right after a name.
+
+define function truncate/(a :: <integer>, b :: <integer>) => <integer>
+  a - b
+end;
+
+define function main() => <double-float>
+  let x/y = 3;// a comment
+  as(<double-float>, truncate/(7, 2) + x/y) + 8.0 / 4.0
+end;

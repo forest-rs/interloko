@@ -1067,13 +1067,20 @@ pub(crate) const fn is_name_continue(byte: u8) -> bool {
 
 /// Returns the end of the name whose first byte is at `start`.
 ///
+/// A name continues through [`is_name_continue`] bytes and, as in Dylan,
+/// through a `/` that does not start a `//` comment, so `truncate/` is one
+/// name and division is written with spaces, `a / b`.
+///
 /// The caller has checked that `bytes[start]` is a name start. Every name
 /// boundary in the lexer goes through here, so the lexer cannot split a name
 /// anywhere the grammar would not.
 fn name_end(bytes: &[u8], start: usize) -> usize {
     debug_assert!(is_name_start(bytes[start]));
     let mut pos = start + 1;
-    while pos < bytes.len() && is_name_continue(bytes[pos]) {
+    while pos < bytes.len()
+        && (is_name_continue(bytes[pos])
+            || (bytes[pos] == b'/' && bytes.get(pos + 1) != Some(&b'/')))
+    {
         pos += 1;
     }
     pos

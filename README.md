@@ -179,7 +179,9 @@ The current slices include:
   defines `size` and `element`; any other class defines its own method;
 - Dylan-style names, where a hyphen is always a name character: `x-1` and
   `a-b` are single names, so subtraction is spaced (`x - 1`, `a -% b`),
-  and `?` and `!` may end one (`digit?`, `add!`);
+  `?` and `!` may end one (`digit?`, `add!`), and a `/` that does not
+  start a `//` comment is one too (`truncate/`), so division is spaced
+  (`x / 2.0`);
 - `<integer>` arithmetic on 64-bit fixnums that signals a `<type-error>`
   (`type-error.overflow`) instead of wrapping when `+`, `-`, `*`, or
   negation leaves the 64-bit range (bignum promotion is planned);

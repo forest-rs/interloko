@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic contains `x/y`
+
+// `x/y` is one name, as in Dylan; division is `x / y`.
+
+define function main() => <double-float>
+  let x = 1.0;
+  let y = 2.0;
+  x/y
+end;
