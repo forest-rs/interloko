@@ -1,0 +1,7 @@
+// expect: diagnostic code sem.function-argument-type-mismatch
+// expect: diagnostics 1
+// A keyword argument is checked against its parameter's type like a
+// positional one.
+
+define function f(x :: <integer>, #key n :: <integer> = 1) => <integer> x + n end;
+define function main() => <integer> f(1, n: "two") end;

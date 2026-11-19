@@ -20662,6 +20662,58 @@ mod tests {
         assert!(!report(QueryArtifact::Bind).affected);
     }
 
+    /// A keyword's default runs in a hidden function of its own, which
+    /// callers that do not pass the keyword call, never inline: editing the
+    /// default changes only that function, while editing the keyword's type
+    /// changes the contracts its callers rely on.
+    #[test]
+    fn a_keyword_default_edit_changes_only_its_default_function() {
+        const SCALE: &str = "define function scale(x :: <integer>, #key by :: <integer> = 2) => <integer>\n  \
+            x * by\nend;\n\
+            define function main() => <integer>\n  scale(3)\nend;\n\
+            define function other() => <integer>\n  scale(3, by: 4)\nend;";
+        let edit = |edited: &str| {
+            let mut session = IncrementalCompilerSession::new();
+            let id = session.add_source("scale.loko", SCALE);
+            let first = session
+                .compile(id, RuntimeMode::CompileOnly)
+                .expect("source was just added");
+            assert!(first.artifacts.diagnostics.is_empty());
+            session
+                .edit_and_compile(id, edited, RuntimeMode::CompileOnly)
+                .expect("source exists")
+        };
+
+        let update = edit(&SCALE.replace("= 2)", "= 5)"));
+        assert!(!update.artifacts.has_errors());
+        let default = function_definition(&update.artifacts, "scale #key by");
+        let main = function_definition(&update.artifacts, "main");
+        let diff = update.diff.as_ref().expect("second compile has a diff");
+        let changed = diff
+            .changed
+            .iter()
+            .map(|change| change.definition.id)
+            .collect::<Vec<_>>();
+        assert_eq!(changed, vec![default]);
+        let report = |update: &IncrementalUpdate, artifact| {
+            cache_report(update, artifact)
+                .expect("artifact report")
+                .affected
+        };
+        assert!(report(&update, QueryArtifact::Contract(default)));
+        assert!(!report(&update, QueryArtifact::DefinitionTyping(main)));
+
+        let update = edit(&SCALE.replace(
+            "by :: <integer> = 2",
+            "by :: limited(<integer>, min: 0, max: 9) = 2",
+        ));
+        assert!(!update.artifacts.has_errors());
+        let main = function_definition(&update.artifacts, "main");
+        let other = function_definition(&update.artifacts, "other");
+        assert!(report(&update, QueryArtifact::DefinitionTyping(main)));
+        assert!(report(&update, QueryArtifact::DefinitionTyping(other)));
+    }
+
     #[test]
     fn a_range_only_edit_reports_what_assumed_the_range() {
         const RANGES: &str = "define class <dial> (<object>)\n  \

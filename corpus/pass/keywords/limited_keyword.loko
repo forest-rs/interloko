@@ -1,0 +1,12 @@
+// expect: run 300
+// expect: diagnostics 0
+// A keyword may have a limited type; its default is checked against it
+// like any value that reaches it.
+
+define function f(#key n :: limited(<integer>, min: 0, max: 255) = 100) => <integer>
+  n * 2
+end;
+
+define function main() => <integer>
+  f() + f(n: 50)
+end;

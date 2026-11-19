@@ -1,0 +1,13 @@
+// expect: run 57
+// expect: diagnostics 0
+// `default:` is a keyword parameter of `element`, so a send whose receiver
+// typing does not know passes it to whichever method dispatch selects: the
+// kernel vector method returns it for an index outside the vector.
+
+define function lookup(c :: <object>, i :: <integer>) => <integer>
+  as(<integer>, element(c, i, default: 50))
+end;
+
+define function main() => <integer>
+  lookup(#[7], 0) + lookup(#[7], 3)
+end;

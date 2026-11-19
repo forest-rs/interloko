@@ -1,0 +1,15 @@
+// expect: run 32
+// expect: diagnostics 0
+// expect: dump lowered contains %r4 = call l0(%r1, %r3, %r2)
+// A typed call passing every keyword is a direct call with each keyword in
+// its parameter's place: nothing parses keywords at run time. The keyword
+// arguments are evaluated in source order, `plus:` before `by:`, into the
+// registers the call then passes in declaration order.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2, plus :: <integer> = 0) => <integer>
+  x * by + plus
+end;
+
+define function main() => <integer>
+  scale(3, plus: 2, by: 10)
+end;

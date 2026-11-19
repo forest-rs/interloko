@@ -1,0 +1,12 @@
+// expect: runtime code type-error.range
+// expect: diagnostics 0
+// An index outside a vector signals a range `<type-error>` when the call
+// passes no `default:`, through dispatch as inline.
+
+define function g(v :: <object>) => <object>
+  element(v, 7)
+end;
+
+define function main() => <object>
+  g(#[1])
+end;

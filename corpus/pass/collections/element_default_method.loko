@@ -1,0 +1,18 @@
+// expect: run 108
+// expect: diagnostics 0
+// A program's `element` method takes the kernel generic's `default`
+// keyword, and tests it against `$unsupplied` to see whether a call
+// passed one.
+
+define class <bag> (<object>)
+  slot item :: <integer>, required-init-keyword: item:;
+end;
+
+define method element (b :: <bag>, k :: <integer>, #key default) => <object>
+  if (k = 0) b.item elseif (default == $unsupplied) -1 else default end
+end;
+
+define function main() => <integer>
+  let b = make(<bag>, item: 9);
+  as(<integer>, b[0]) + as(<integer>, element(b, 1, default: 100)) + as(<integer>, element(b, 1))
+end;

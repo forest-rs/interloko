@@ -43,8 +43,10 @@ pub struct Function {
     pub definition: DefinitionId,
     /// Function name.
     pub name: String,
-    /// Parameters in source order.
+    /// Required parameters in source order.
     pub params: Vec<FunctionParam>,
+    /// `#key` parameters, after the required ones, in source order.
+    pub keywords: Vec<KeywordParam>,
     /// Optional declared return value types.
     pub return_type: Option<ResultAnnotation>,
     /// Function body.
@@ -78,7 +80,23 @@ pub struct Constant {
     pub span: Span,
 }
 
-/// Direct function parameter.
+/// `#key` parameter of a function, method or generic: `name`,
+/// `name :: <type>` or `name :: <type> = default`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeywordParam {
+    /// Stable-ish AST node identity.
+    pub id: AstNodeId,
+    /// Parameter name, which is also its keyword: `name:` passes it.
+    pub name: String,
+    /// Optional declared type.
+    pub type_annotation: Option<TypeExpr>,
+    /// The value when a call does not pass the keyword, when written.
+    pub default: Option<Expr>,
+    /// Source span.
+    pub span: Span,
+}
+
+/// Required function parameter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FunctionParam {
     /// Stable-ish AST node identity.
@@ -345,8 +363,10 @@ pub struct Generic {
     pub definition: DefinitionId,
     /// Generic function name.
     pub name: String,
-    /// Parameters in source order.
+    /// Required parameters in source order.
     pub params: Vec<GenericParam>,
+    /// `#key` parameters every method accepts, after the required ones.
+    pub keywords: Vec<KeywordParam>,
     /// Optional declared result value types.
     pub return_type: Option<ResultAnnotation>,
     /// `define sealed generic` or the default `open`: whether the generic
@@ -383,6 +403,8 @@ pub struct Method {
     pub name: String,
     /// Specialized parameters in call order.
     pub params: Vec<MethodParam>,
+    /// `#key` parameters, a subset of its generic's, after the required ones.
+    pub keywords: Vec<KeywordParam>,
     /// Optional declared method result value types.
     pub return_type: Option<ResultAnnotation>,
     /// Method body.
@@ -1686,6 +1708,7 @@ impl<'tree> Lowering<'tree> {
         let mut name = String::new();
         let mut saw_generic_keyword = false;
         let mut params = Vec::new();
+        let mut keywords = Vec::new();
         let mut return_type = None;
         let mut saw_result_arrow = false;
 
@@ -1711,6 +1734,7 @@ impl<'tree> Lowering<'tree> {
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_generic_params(child_node);
+                    keywords = self.lower_keyword_params(child_node);
                 }
                 _ => {}
             }
@@ -1722,6 +1746,7 @@ impl<'tree> Lowering<'tree> {
             definition: self.definition(DefinitionKind::Generic, &name, ""),
             name,
             params,
+            keywords,
             return_type,
             sealing: adjectives.sealing,
             strict: adjectives.strict,
@@ -1735,6 +1760,10 @@ impl<'tree> Lowering<'tree> {
             .child_nodes(CstKind::ParameterList)
             .next()
             .map_or_else(Vec::new, |params| self.lower_method_params(params));
+        let keywords = node
+            .child_nodes(CstKind::ParameterList)
+            .next()
+            .map_or_else(Vec::new, |params| self.lower_keyword_params(params));
         for child in &node.children {
             if let CstElement::Token(index) = child
                 && self.tree.tokens[*index].kind == TokenKind::Arrow
@@ -1776,6 +1805,7 @@ impl<'tree> Lowering<'tree> {
             definition,
             name,
             params,
+            keywords,
             return_type,
             body,
             strict,
@@ -1787,6 +1817,7 @@ impl<'tree> Lowering<'tree> {
         let mut name = String::new();
         let mut saw_function_keyword = false;
         let mut params = Vec::new();
+        let mut keywords = Vec::new();
         let mut return_type = None;
         let mut saw_result_arrow = false;
         let mut body = None;
@@ -1816,6 +1847,7 @@ impl<'tree> Lowering<'tree> {
                 CstElement::Token(_) => {}
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_function_params(child_node);
+                    keywords = self.lower_keyword_params(child_node);
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::Body => {
                     body = Some(self.lower_block(child_node));
@@ -1840,6 +1872,7 @@ impl<'tree> Lowering<'tree> {
             definition: self.definition(DefinitionKind::Function, &name, ""),
             name,
             params,
+            keywords,
             return_type,
             body,
             strict,
@@ -1914,6 +1947,40 @@ impl<'tree> Lowering<'tree> {
             });
         }
         params
+    }
+
+    /// Lowers the `#key` parameters of the parameter list `node`.
+    fn lower_keyword_params(&mut self, node: &CstNode) -> Vec<KeywordParam> {
+        let mut keywords = Vec::new();
+        for keyword in node.child_nodes(CstKind::KeywordParameter) {
+            let name = keyword
+                .child_nodes(CstKind::KeywordParameterName)
+                .next()
+                .map(|name| self.tree.source[name.span.start..name.span.end].to_string())
+                .unwrap_or_default();
+            let tokens = self.node_token_indices(keyword);
+            let type_annotation = tokens
+                .iter()
+                .position(|index| self.tree.tokens[*index].kind == TokenKind::DoubleColon)
+                .and_then(|marker| self.type_annotation_from_tokens(&tokens, marker + 1))
+                .map(|(annotation, _)| annotation);
+            let default = keyword
+                .children
+                .iter()
+                .find_map(|child| match child {
+                    CstElement::Node(expr) if !expr.kind.is_role() => Some(expr),
+                    _ => None,
+                })
+                .map(|expr| self.lower_expr(expr));
+            keywords.push(KeywordParam {
+                id: AstNodeId::child(node.id, 3, &name),
+                name,
+                type_annotation,
+                default,
+                span: keyword.span,
+            });
+        }
+        keywords
     }
 
     fn lower_function_params(&self, node: &CstNode) -> Vec<FunctionParam> {
@@ -2233,6 +2300,14 @@ impl<'tree> Lowering<'tree> {
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_function_params(child_node);
+                    // An anonymous function is only called through a
+                    // callable value, which passes no keywords yet.
+                    for keyword in child_node.child_nodes(CstKind::KeywordParameter) {
+                        self.diagnostics.push(Diagnostic::error(
+                            keyword.span,
+                            DiagnosticCode::AstAnonymousKeywordParameter,
+                        ));
+                    }
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::Body => {
                     body = Some(self.lower_block(child_node));
@@ -4090,6 +4165,7 @@ impl FrontendFormLowering {
                 definition: self.definition(DefinitionKind::Function, &function.name, ""),
                 name: function.name.clone(),
                 params: Vec::new(),
+                keywords: Vec::new(),
                 return_type: None,
                 body: self.lower_function_body(form, region_slug, form_index),
                 strict: false,

@@ -101,12 +101,10 @@ impl CollectionFunction {
         }
     }
 
-    /// Returns the keyword arguments a call may pass, without colons.
-    ///
-    /// Loko has no keyword parameters yet, so a method cannot take one: a
-    /// call passing `default:` runs a kernel method's defaulting operation
-    /// ([`BuiltinMethod::with_default`]), and needs a receiver whose class
-    /// typing knows has one.
+    /// Returns the keyword parameters, without colons, in declaration
+    /// order. Each is an `<object>` declared without a default, so a call
+    /// that does not pass it passes `$unsupplied`; every method takes them
+    /// after the required parameters, and dispatch does not look at them.
     #[must_use]
     pub const fn keywords(self) -> &'static [&'static str] {
         match self {
@@ -126,10 +124,13 @@ pub struct BuiltinMethod {
     /// The key class it specializes on, for a generic that takes a key,
     /// and the element class, for `add!`.
     pub key: Option<MethodKey>,
-    /// The operation, taking the generic's arguments in order.
+    /// The operation, taking the generic's required arguments in order:
+    /// what the method does when every keyword is `$unsupplied`.
     pub operation: Intrinsic,
-    /// The operation that serves a call passing `default:`, taking the
-    /// arguments and then the default, for a generic that takes one.
+    /// For a generic that takes `default:`, the operation that serves a
+    /// call passing it, taking the required arguments and then the
+    /// default. The kernel method tests its `default` parameter for
+    /// `$unsupplied` to pick between the two.
     pub with_default: Option<Intrinsic>,
 }
 

@@ -1,0 +1,9 @@
+// expect: diagnostic code ast.anonymous-keyword-parameter
+// expect: diagnostics 1
+// An anonymous function is only called through a callable value, which
+// passes no keywords yet, so it cannot declare any.
+
+define function main() => <integer>
+  let g = function (x :: <integer>, #key by) => <integer> x end;
+  g(1)
+end;

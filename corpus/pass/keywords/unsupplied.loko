@@ -1,0 +1,13 @@
+// expect: run 3
+// expect: diagnostics 0
+// A keyword without a type is an `<object>`, and without a default it is
+// `$unsupplied` when a call does not pass it, which `==` tells apart from
+// any value a call passes.
+
+define function probe(#key x) => <integer>
+  if (x == $unsupplied) 1 else 2 end
+end;
+
+define function main() => <integer>
+  probe() + probe(x: 3)
+end;

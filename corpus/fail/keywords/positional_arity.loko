@@ -1,0 +1,7 @@
+// expect: diagnostic code sem.function-arity-mismatch
+// expect: diagnostics 1
+// Keyword parameters are passed by name only, so a call cannot pass one
+// positionally.
+
+define function f(x :: <integer>, #key n :: <integer> = 1) => <integer> x + n end;
+define function main() => <integer> f(1, 2) end;

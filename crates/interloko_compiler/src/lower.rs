@@ -9108,18 +9108,16 @@ impl<'module> BodyLowering<'module> {
         else {
             return Ok(None);
         };
-        let sem::Expr::IntrinsicCall {
-            intrinsic,
-            result_kind,
-            ..
-        } = &method.body.result
-        else {
+        let sem::MethodOrigin::Collection { function } = method.origin else {
             return Ok(None);
         };
-        if method.generic != generic.id
-            || !matches!(method.origin, sem::MethodOrigin::Collection { .. })
-            || method.params.len() != args.len()
-        {
+        let Some(row) = self.kernel_row(method, function) else {
+            return Ok(None);
+        };
+        let Some(result_kind) = method.result_kinds.first() else {
+            return Ok(None);
+        };
+        if method.generic != generic.id || method.params.len() != args.len() {
             return Ok(None);
         }
         for (param, arg) in method.params.iter().zip(args) {
@@ -9153,9 +9151,49 @@ impl<'module> BodyLowering<'module> {
                 return Ok(None);
             }
         }
-        let result = self.lower_intrinsic_call(*intrinsic, args, *result_kind, span)?;
+        // The kernel method tests its keyword for `$unsupplied`; a call
+        // whose keyword is known runs the operation that test would pick.
+        let (required, keywords) = args.split_at(function.arity().min(args.len()));
+        let result = match (keywords, row.with_default) {
+            ([], _) => self.lower_intrinsic_call(row.operation, args, *result_kind, span)?,
+            ([keyword], _) if keyword.is_unsupplied() => {
+                self.lower_intrinsic_call(row.operation, required, *result_kind, span)?
+            }
+            // A default boxes to the `<object>` a vector's or a table's
+            // defaulting operation takes; a string's takes a `<character>`,
+            // which only the method's check establishes.
+            ([_], Some(with_default)) if !matches!(with_default, sem::Intrinsic::Text(_)) => {
+                self.lower_intrinsic_call(with_default, args, *result_kind, span)?
+            }
+            _ => return Ok(None),
+        };
         self.record(site, CheckCodegen::Inlined);
         Ok(Some(result))
+    }
+
+    /// The row of [`sem::BUILTIN_METHODS`] the kernel method `method` of
+    /// `function` runs: the one for its collection and key classes.
+    fn kernel_row(
+        &self,
+        method: &sem::Method,
+        function: sem::CollectionFunction,
+    ) -> Option<&'static sem::BuiltinMethod> {
+        let key = method
+            .specializers
+            .get(function.collection_index() + 1)
+            .copied()
+            .flatten();
+        sem::BUILTIN_METHODS.iter().find(|row| {
+            row.function == function
+                && self.module.builtin_value_class(row.collection) == Some(method.specializer)
+                && match row.key {
+                    Some(sem::MethodKey::Class(class)) => {
+                        self.module.builtin_value_class(class) == key
+                    }
+                    Some(sem::MethodKey::Object) => key == Some(sem::OBJECT_CLASS_ID),
+                    None => true,
+                }
+        })
     }
 
     /// Lowers `expr` if it is a send typing proved runs a built-in numeric

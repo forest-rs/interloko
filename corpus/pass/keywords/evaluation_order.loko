@@ -1,0 +1,26 @@
+// expect: run 1234
+// expect: diagnostics 0
+// A call evaluates its positional and keyword arguments in source order,
+// whatever order the keywords are declared in, and then the defaults of
+// the keywords it does not pass, in declaration order.
+
+define class <log> (<object>)
+  slot n :: <integer>, init-keyword: n:;
+end;
+
+define function note(log :: <log>, digit :: <integer>) => <integer>
+  log.n := log.n * 10 + digit;
+  digit
+end;
+
+define function f(log :: <log>, x :: <integer>,
+                  #key a :: <integer> = 0, b :: <integer> = 0,
+                       c :: <integer> = note(log, 4)) => <integer>
+  x + a + b + c
+end;
+
+define function main() => <integer>
+  let log = make(<log>, n: 0);
+  f(log, note(log, 1), b: note(log, 2), a: note(log, 3));
+  log.n
+end;
