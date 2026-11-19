@@ -1,0 +1,24 @@
+// expect: run 55
+// expect: diagnostics 0
+
+// A `handle`'s body and its restart's are bodies, with their own `let`s,
+// whose last expression is the value; a guard's restart too.
+
+define class <oops> (<error>)
+  constant slot code :: <integer>, required-init-keyword: code:;
+end;
+
+define function check(n :: <integer>) => <integer>
+  if (n > 2) signal(make(<oops>, code: n)) else n end
+end;
+
+define function main() => <integer>
+  handle
+    let small = check(1);
+    let large = check(4);
+    small + large
+  with restart e :: <oops> when e.code > 3 =>
+    let code = e.code;
+    code * 10 + 15
+  end
+end;

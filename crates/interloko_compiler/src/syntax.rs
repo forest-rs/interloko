@@ -91,6 +91,8 @@ pub enum TokenKind {
     Begin = 62,
     /// `cleanup`.
     Cleanup = 49,
+    /// `exception`.
+    Exception = 71,
     /// `while`.
     While = 60,
     /// `until`.
@@ -250,6 +252,7 @@ impl TokenKind {
             | Self::Block
             | Self::Begin
             | Self::Cleanup
+            | Self::Exception
             | Self::While
             | Self::Until
             | Self::For
@@ -330,6 +333,7 @@ impl Token {
             | TokenKind::Block
             | TokenKind::Begin
             | TokenKind::Cleanup
+            | TokenKind::Exception
             | TokenKind::While
             | TokenKind::Until
             | TokenKind::For
@@ -1018,6 +1022,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "block" => TokenKind::Block,
                     "begin" => TokenKind::Begin,
                     "cleanup" => TokenKind::Cleanup,
+                    "exception" => TokenKind::Exception,
                     "while" => TokenKind::While,
                     "until" => TokenKind::Until,
                     "for" => TokenKind::For,

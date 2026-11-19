@@ -3548,8 +3548,8 @@ impl<'tree> Lowering<'tree> {
             };
             if child_node.kind == CstKind::RestartClause {
                 restart = Some(self.lower_restart(child_node));
-            } else {
-                body = Some(self.lower_expr(child_node));
+            } else if child_node.kind == CstKind::Body {
+                body = Some(self.lower_body_expr(child_node));
             }
         }
         Expr::Handle {
@@ -3742,10 +3742,35 @@ impl<'tree> Lowering<'tree> {
         })
     }
 
+    /// Lowers a body that stands as one expression, as a `handle`'s and a
+    /// restart's do: the expression itself when the body is only that, and
+    /// otherwise a block scoping its `let`s, as `begin … end` would.
+    fn lower_body_expr(&mut self, node: &CstNode) -> Expr {
+        let block = self.lower_block(node);
+        if block.statements.is_empty() {
+            return block.result;
+        }
+        Expr::Block {
+            id: self.ast_id(node),
+            exit: None,
+            span: block.span,
+            body: Box::new(block),
+            cleanup: None,
+        }
+    }
+
+    /// Lowers `block (exit) body cleanup cleanup-body exception (e :: <c>)
+    /// handler end`.
+    ///
+    /// Dylan's exception clause is a restart around the body and its
+    /// cleanup: a condition of class `<c>` signalled in the body unwinds it,
+    /// running the cleanup, and the handler's values are the block's. The
+    /// exit procedure is bound around both, so the handler may call it too.
     fn lower_block_expr(&mut self, node: &CstNode) -> Expr {
         let mut body = None;
         let mut cleanup = None;
         let mut exit = None;
+        let mut exception = None;
         for child in &node.children {
             let CstElement::Node(child_node) = child else {
                 continue;
@@ -3766,6 +3791,7 @@ impl<'tree> Lowering<'tree> {
                         .next()
                         .map(|cleanup| self.lower_block(cleanup));
                 }
+                CstKind::RestartClause => exception = Some(self.lower_restart(child_node)),
                 _ => {}
             }
         }
@@ -3778,11 +3804,41 @@ impl<'tree> Lowering<'tree> {
             },
             span: node.span,
         });
+        let Some(restart) = exception else {
+            return Expr::Block {
+                id: self.ast_id(node),
+                exit,
+                body: Box::new(body),
+                cleanup: cleanup.map(Box::new),
+                span: node.span,
+            };
+        };
+        let protected = Expr::Block {
+            id: self.ast_id(node),
+            exit: None,
+            body: Box::new(body),
+            cleanup: cleanup.map(Box::new),
+            span: node.span,
+        };
+        let handled = Expr::Handle {
+            id: self.ast_id(node),
+            body: Box::new(protected),
+            restart,
+            span: node.span,
+        };
+        if exit.is_none() {
+            return handled;
+        }
         Expr::Block {
             id: self.ast_id(node),
             exit,
-            body: Box::new(body),
-            cleanup: cleanup.map(Box::new),
+            body: Box::new(Block {
+                id: self.ast_id(node),
+                statements: Vec::new(),
+                result: handled,
+                span: node.span,
+            }),
+            cleanup: None,
             span: node.span,
         }
     }
@@ -3808,21 +3864,13 @@ impl<'tree> Lowering<'tree> {
                 .first_token_text(node, TokenKind::TypeName)
                 .map_or_else(String::new, |(_, text)| text.to_string()),
         };
-        let body = node
-            .children
-            .iter()
-            .find_map(|child| match child {
-                CstElement::Node(expr)
-                    if !expr.kind.is_role() && expr.kind != CstKind::RestartGuard =>
-                {
-                    Some(self.lower_expr(expr))
-                }
-                _ => None,
-            })
-            .unwrap_or(Expr::Error {
+        let body = match node.child_nodes(CstKind::Body).next() {
+            Some(body) => self.lower_body_expr(body),
+            None => Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
-            });
+            },
+        };
         let guard = node.child_nodes(CstKind::RestartGuard).next().map(|guard| {
             Box::new(
                 guard
@@ -4133,28 +4181,11 @@ impl<'tree> Lowering<'tree> {
         ))
     }
 
+    /// The name a restart or exception clause binds its condition to, as
+    /// in `restart e :: <c>` or `exception (e :: <c>)`.
     fn first_restart_condition_name(&self, node: &CstNode) -> Option<(Span, &'tree str)> {
-        let mut tokens = node.children.iter().filter_map(|child| match child {
-            CstElement::Token(index) => Some(*index),
-            CstElement::Node(_) => None,
-        });
-        while let Some(index) = tokens.next() {
-            let token = self.tree.tokens[index];
-            if token.kind != TokenKind::Restart {
-                continue;
-            }
-            let name_index = tokens.next()?;
-            let name = self.tree.tokens[name_index];
-            if name.kind != TokenKind::Ident {
-                return None;
-            }
-            let double_colon_index = tokens.next()?;
-            if self.tree.tokens[double_colon_index].kind != TokenKind::DoubleColon {
-                return None;
-            }
-            return Some((name.span, name.text(&self.tree.source)));
-        }
-        None
+        let name = node.child_nodes(CstKind::RestartName).next()?;
+        Some((name.span, &self.tree.source[name.span.start..name.span.end]))
     }
 
     fn definition_name_after(&self, node: &CstNode, keyword: TokenKind) -> String {

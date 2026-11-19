@@ -3151,12 +3151,12 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "handle-expression",
-            "`handle` expression `with` restart-clause `end`",
+            "`handle` body `with` restart-clause `end`",
             "syntax.rs:Parser::parse_handle",
         ),
         (
             "restart-clause",
-            "`restart` (restart-name type-annotation | restart-condition-type) restart-guard? expression",
+            "`restart` (restart-name type-annotation | restart-condition-type) restart-guard? body",
             "syntax.rs:Parser::parse_restart_clause",
         ),
         (
@@ -3176,7 +3176,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "block-expression",
-            "`block` `(` block-exit-name? `)` body cleanup-clause? `end`",
+            "`block` `(` block-exit-name? `)` body cleanup-clause? exception-clause? `end`",
             "base_loko_primary::BaseLokoCstBuilder::build_block",
         ),
         (
@@ -3193,6 +3193,11 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "cleanup-clause",
             "`cleanup` body",
             "base_loko_primary::BaseLokoCstBuilder::build_block",
+        ),
+        (
+            "exception-clause",
+            "`exception` `(` (restart-name type-annotation | restart-condition-type) `)` body",
+            "base_loko_primary::BaseLokoCstBuilder::build_restart",
         ),
         (
             "while-expression",
@@ -4492,7 +4497,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 90);
+        assert_eq!(grammar.effective_rules.len(), 91);
 
         assert!(
             !records
