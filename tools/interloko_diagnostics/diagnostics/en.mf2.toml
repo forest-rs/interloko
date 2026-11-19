@@ -79,6 +79,7 @@
 "sem.class-of-type-mismatch" = "class-of needs an instance of a known class, not { $actual }; convert an <object> with as(…) first"
 "sem.instance-of-impossible" = "instance? test is impossible: { $actual } is not { $expected }"
 "sem.cast-impossible" = "cast is impossible: { $actual } is not { $expected }"
+"sem.select-test-type-mismatch" = "a select `by` test must be a function of the target and a key that returns a <boolean>, not { $actual }"
 "sem.make-class-argument-type-mismatch" = "make needs a class, such as <circle>, not { $actual }"
 "sem.host-backed-make" = "host-backed class `{ $class }` cannot be constructed with make"
 "sem.builtin-value-make" = "built-in value class `{ $class }` cannot be constructed with make"

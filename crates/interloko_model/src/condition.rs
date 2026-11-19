@@ -12,6 +12,7 @@
 //!     <error>
 //!       <type-error>
 //!       <no-applicable-method>
+//!       <select-error>
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
@@ -19,7 +20,9 @@
 //! values against), where the check is, and a stable
 //! [`TypeErrorKind`] code. A `<no-applicable-method>` reports a generic
 //! send that found no method for its arguments: the generic, the arguments
-//! and the stable code [`NO_APPLICABLE_METHOD_CODE`]. Their slots are
+//! and the stable code [`NO_APPLICABLE_METHOD_CODE`]. A `<select-error>`
+//! reports a `select` without `otherwise` whose target matched no key: the
+//! target value. Their slots are
 //! read-only, so they add no setter generics to a program.
 //!
 //! A send never finds several equally specific methods: a module whose
@@ -40,6 +43,9 @@ pub enum ConditionClass {
     /// `<no-applicable-method>`: a generic send found no method for its
     /// arguments.
     NoApplicableMethod,
+    /// `<select-error>`: a `select` without `otherwise` found no key that
+    /// matched its target.
+    SelectError,
 }
 
 impl ConditionClass {
@@ -52,6 +58,7 @@ impl ConditionClass {
         Self::Error,
         Self::TypeError,
         Self::NoApplicableMethod,
+        Self::SelectError,
     ];
 
     /// Returns the Loko-visible class name.
@@ -62,6 +69,7 @@ impl ConditionClass {
             Self::Error => "<error>",
             Self::TypeError => "<type-error>",
             Self::NoApplicableMethod => "<no-applicable-method>",
+            Self::SelectError => "<select-error>",
         }
     }
 
@@ -73,6 +81,7 @@ impl ConditionClass {
             b"<error>" => Some(Self::Error),
             b"<type-error>" => Some(Self::TypeError),
             b"<no-applicable-method>" => Some(Self::NoApplicableMethod),
+            b"<select-error>" => Some(Self::SelectError),
             _ => None,
         }
     }
@@ -84,7 +93,7 @@ impl ConditionClass {
         match self {
             Self::Condition => None,
             Self::Error => Some(Self::Condition),
-            Self::TypeError | Self::NoApplicableMethod => Some(Self::Error),
+            Self::TypeError | Self::NoApplicableMethod | Self::SelectError => Some(Self::Error),
         }
     }
 
@@ -95,6 +104,7 @@ impl ConditionClass {
             Self::Condition | Self::Error => &[],
             Self::TypeError => &TYPE_ERROR_SLOTS,
             Self::NoApplicableMethod => &NO_APPLICABLE_METHOD_SLOTS,
+            Self::SelectError => &SELECT_ERROR_SLOTS,
         }
     }
 }
@@ -184,6 +194,14 @@ pub const NO_APPLICABLE_METHOD_SLOTS: [ConditionSlot; 3] = [
         init_keyword: "code",
     },
 ];
+
+/// The slot of `<select-error>`: the target value that matched no key, as
+/// an `<object>`.
+pub const SELECT_ERROR_SLOTS: [ConditionSlot; 1] = [ConditionSlot {
+    name: "select-error-value",
+    type_name: "<object>",
+    init_keyword: "value",
+}];
 
 /// One slot of `<no-applicable-method>`, by its position in
 /// [`NO_APPLICABLE_METHOD_SLOTS`].
@@ -319,6 +337,22 @@ mod tests {
             TypeErrorKind::ALL
                 .iter()
                 .all(|kind| kind.code() != NO_APPLICABLE_METHOD_CODE)
+        );
+    }
+
+    #[test]
+    fn select_error_holds_its_target() {
+        assert_eq!(
+            ConditionClass::SelectError.superclass(),
+            Some(ConditionClass::Error)
+        );
+        assert_eq!(
+            ConditionClass::SelectError.slots(),
+            [ConditionSlot {
+                name: "select-error-value",
+                type_name: "<object>",
+                init_keyword: "value",
+            }]
         );
     }
 

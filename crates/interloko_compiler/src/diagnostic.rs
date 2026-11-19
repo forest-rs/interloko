@@ -212,6 +212,8 @@ pub enum DiagnosticCode {
     InstanceOfImpossible,
     /// An `as` cast is statically impossible.
     CastImpossible,
+    /// A `select`'s `by` test is not a function.
+    SelectTestTypeMismatch,
     /// `make` was called with a non-class object argument.
     MakeClassArgumentTypeMismatch,
     /// A host-backed class was passed to `make`.
@@ -422,6 +424,7 @@ impl DiagnosticCode {
         Self::ClassOfTypeMismatch,
         Self::InstanceOfImpossible,
         Self::CastImpossible,
+        Self::SelectTestTypeMismatch,
         Self::MakeClassArgumentTypeMismatch,
         Self::HostBackedMake,
         Self::BuiltinValueMake,
@@ -566,6 +569,7 @@ impl DiagnosticCode {
             Self::ClassOfTypeMismatch => "sem.class-of-type-mismatch",
             Self::InstanceOfImpossible => "sem.instance-of-impossible",
             Self::CastImpossible => "sem.cast-impossible",
+            Self::SelectTestTypeMismatch => "sem.select-test-type-mismatch",
             Self::MakeClassArgumentTypeMismatch => "sem.make-class-argument-type-mismatch",
             Self::HostBackedMake => "sem.host-backed-make",
             Self::BuiltinValueMake => "sem.builtin-value-make",
@@ -711,6 +715,7 @@ impl DiagnosticCode {
             "sem.class-of-type-mismatch" => Self::ClassOfTypeMismatch,
             "sem.instance-of-impossible" => Self::InstanceOfImpossible,
             "sem.cast-impossible" => Self::CastImpossible,
+            "sem.select-test-type-mismatch" => Self::SelectTestTypeMismatch,
             "sem.make-class-argument-type-mismatch" => Self::MakeClassArgumentTypeMismatch,
             "sem.host-backed-make" => Self::HostBackedMake,
             "sem.builtin-value-make" => Self::BuiltinValueMake,

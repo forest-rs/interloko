@@ -488,6 +488,7 @@ impl BaseLokoCstProjector<'_> {
             "if-expression" => self.build_if(node),
             "unless-expression" => self.build_unless(node),
             "case-expression" => self.build_case(node),
+            "select-expression" => self.build_select(node),
             "assignment-expression" => self.build_assignment(node),
             "assignment-target" => self.unwrap_first_expr(node),
             "comparison-expression" => self.build_comparison(node),
@@ -669,6 +670,29 @@ impl BaseLokoCstProjector<'_> {
             }
         }
         self.node_with_nested(CstKind::CaseExpr, node, nested)
+    }
+
+    /// Builds `select (target select-test?) select-clause* otherwise-clause?
+    /// end`: the target, a [`CstKind::SelectTest`] for `by test`, one
+    /// [`CstKind::SelectClause`] per `key, key => body`, and an
+    /// [`CstKind::OtherwiseClause`] for the `otherwise`.
+    fn build_select(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let mut nested = Vec::new();
+        for child in &node.children {
+            if child.is_rule("expression") {
+                nested.push(self.build_expr(child));
+            } else if child.is_rule("select-test") {
+                let test = self.test_and_body(child);
+                nested.push(self.node_with_nested(CstKind::SelectTest, child, test));
+            } else if child.is_rule("select-clause") {
+                let clause = self.test_and_body(child);
+                nested.push(self.node_with_nested(CstKind::SelectClause, child, clause));
+            } else if child.is_rule("otherwise-clause") {
+                let body = self.bodies(child);
+                nested.push(self.node_with_nested(CstKind::OtherwiseClause, child, body));
+            }
+        }
+        self.node_with_nested(CstKind::SelectExpr, node, nested)
     }
 
     /// The test expression and the body directly under a conditional rule
@@ -1135,6 +1159,7 @@ impl BaseLokoCstProjector<'_> {
                 | "if-expression"
                 | "unless-expression"
                 | "case-expression"
+                | "select-expression"
                 | "assignment-expression"
                 | "assignment-target"
                 | "comparison-expression"

@@ -8121,6 +8121,39 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             let _ = writeln!(out, "{id} case");
             dump_ast_arms(out, arms, otherwise.as_deref(), "otherwise", indent);
         }
+        ast::Expr::Select {
+            id,
+            target,
+            test,
+            arms,
+            otherwise,
+            ..
+        } => {
+            let _ = writeln!(out, "{id} select");
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "target");
+            dump_ast_expr(out, target, indent + 4);
+            if let Some(test) = test {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "by");
+                dump_ast_expr(out, test, indent + 4);
+            }
+            for arm in arms {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "keys");
+                for key in &arm.keys {
+                    dump_ast_expr(out, key, indent + 4);
+                }
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "body");
+                dump_ast_block(out, &arm.body, indent + 4);
+            }
+            if let Some(otherwise) = otherwise {
+                indent_line(out, indent + 2);
+                let _ = writeln!(out, "otherwise");
+                dump_ast_block(out, otherwise, indent + 4);
+            }
+        }
         ast::Expr::Handle {
             id, body, restart, ..
         } => {

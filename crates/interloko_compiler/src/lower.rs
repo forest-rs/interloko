@@ -6211,6 +6211,22 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::Identical { lhs, rhs, span } => {
                 let lhs = self.lower_expr(lhs)?;
+                if lhs.kind == ValueKind::Bool {
+                    let rhs = self.lower_expr(rhs)?;
+                    if rhs.kind == ValueKind::Bool {
+                        return Ok(self.booleans_identical(lhs, rhs, *span));
+                    }
+                    let lhs = self.box_any(lhs, *span)?;
+                    let rhs = self.box_any(rhs, *span)?;
+                    let result = self.alloc(ValueKind::Bool);
+                    self.instructions.push(Instr::Identical {
+                        dst: result.reg,
+                        lhs: lhs.reg,
+                        rhs: rhs.reg,
+                        span: *span,
+                    });
+                    return Ok(result);
+                }
                 let lhs = self.box_any(lhs, *span)?;
                 let rhs = self.lower_expr(rhs)?;
                 let rhs = self.box_any(rhs, *span)?;
@@ -6251,6 +6267,48 @@ impl<'module> BodyLowering<'module> {
             }
             sem::Expr::Error { .. } => Err(invalid_semantic("semantic expression is invalid")),
         }
+    }
+
+    /// `lhs == rhs` for two unboxed booleans, without boxing either: it is
+    /// `rhs` where `lhs` is true and the negation of `rhs` where it is false.
+    fn booleans_identical(&mut self, lhs: Value, rhs: Value, span: Span) -> Value {
+        let result = self.alloc(ValueKind::Bool);
+        let lhs_true = self.alloc_label();
+        let lhs_false = self.alloc_label();
+        let rhs_true = self.alloc_label();
+        let rhs_false = self.alloc_label();
+        let join = self.alloc_label();
+        self.instructions.push(Instr::Branch {
+            cond: lhs.reg,
+            then_label: lhs_true,
+            else_label: lhs_false,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: lhs_true });
+        self.instructions.push(Instr::Move {
+            dst: result.reg,
+            src: rhs.reg,
+            span,
+        });
+        self.instructions.push(Instr::Jump { label: join, span });
+        self.instructions.push(Instr::Label { label: lhs_false });
+        self.instructions.push(Instr::Branch {
+            cond: rhs.reg,
+            then_label: rhs_true,
+            else_label: rhs_false,
+            span,
+        });
+        for (label, value) in [(rhs_true, false), (rhs_false, true)] {
+            self.instructions.push(Instr::Label { label });
+            self.instructions.push(Instr::ConstBool {
+                dst: result.reg,
+                value,
+                span,
+            });
+            self.instructions.push(Instr::Jump { label: join, span });
+        }
+        self.instructions.push(Instr::Label { label: join });
+        result
     }
 
     fn lower_results_expr(&mut self, expr: &sem::Expr) -> Result<Vec<Value>, LowerError> {

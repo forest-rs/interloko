@@ -1,0 +1,32 @@
+// expect: run 2
+// expect: diagnostics 0
+
+// A `by` test that is not a name is evaluated once, after the target and
+// before any key: here its closure is made once, however many keys are
+// tried. Selects work inside closures too.
+
+define class <counter> (<object>)
+  slot count :: <integer>, init-value: 0;
+end;
+
+define function tick(c :: <counter>) => <integer>
+  c.count := c.count + 1
+end;
+
+define function equal-test(c :: <counter>) => callable(<integer>, <integer>) => <boolean>
+  let made = tick(c);
+  function (a :: <integer>, b :: <integer>) => <boolean> a = b end
+end;
+
+define function main() => <integer>
+  let c = make(<counter>);
+  let run = function (n :: <integer>) => <integer>
+    select (n by equal-test(c))
+      1 => 0;
+      2 => 0;
+      3 => 1;
+      otherwise => 0;
+    end
+  end;
+  run(3) + c.count
+end;

@@ -1,0 +1,9 @@
+// expect: diagnostic code syntax.expected-token
+
+define function main(n :: <integer>) => <integer>
+  select (n)
+    1 => 1
+    2 => 2;
+    otherwise => 0;
+  end
+end;

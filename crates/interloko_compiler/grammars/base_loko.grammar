@@ -50,7 +50,7 @@ rule let-binding = let-name-binding | let-values-binding
 rule let-name-binding = let-name type-annotation?
 rule let-name = name
 rule let-values-binding = `(` trailing-list-of<let-name-binding, `,`> `)`
-rule expression = handle-expression | block-expression | while-expression | until-expression | if-expression | unless-expression | case-expression | assignment-expression
+rule expression = handle-expression | block-expression | while-expression | until-expression | if-expression | unless-expression | case-expression | select-expression | assignment-expression
 rule handle-expression = `handle` expression `with` restart-clause `end`
 rule restart-clause = `restart` restart-condition restart-guard? expression
 rule restart-guard = `when` expression `=>`
@@ -70,8 +70,11 @@ rule unless-expression = `unless` `(` expression `)` body `end`
 rule case-expression = `case` case-clause* otherwise-clause? `end`
 rule case-clause = expression `=>` body case-clause-end
 rule case-clause-end = `;` | &`end`
-rule case-label = expression `=>` | `otherwise` `=>`
+rule case-label = list-of<expression, `,`> `=>` | `otherwise` `=>`
 rule otherwise-clause = `otherwise` `=>` body `;`?
+rule select-expression = `select` `(` expression select-test? `)` select-clause* otherwise-clause? `end`
+rule select-test = `by` expression
+rule select-clause = list-of<expression, `,`> `=>` body case-clause-end
 rule assignment-expression = assignment-target `:=` expression | comparison-expression
 rule assignment-target = postfix-expression
 rule comparison-expression = additive-expression comparison-tail?

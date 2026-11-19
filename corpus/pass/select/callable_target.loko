@@ -1,0 +1,27 @@
+// expect: run 1011
+// expect: diagnostics 0
+
+// A `by` test decides what a key matches: here a function target matches
+// the key it maps to its successor. A `<select-error>` holds the function
+// itself.
+
+define function takes?(f :: callable(<integer>) => <integer>, n :: <integer>) => <boolean>
+  f(n) = n + 1
+end;
+
+define function pick(f :: callable(<integer>) => <integer>) => <integer>
+  select (f by takes?)
+    1 => 10;
+    2 => 20;
+  end
+end;
+
+define function main() => <integer>
+  let inc = function (a :: <integer>) => <integer> a + 1 end;
+  let dec = function (a :: <integer>) => <integer> a - 1 end;
+  let missed = handle pick(dec)
+    with restart e :: <select-error>
+      if (e.select-error-value == dec) 11 else 0 end
+    end;
+  pick(inc) * 100 + missed
+end;

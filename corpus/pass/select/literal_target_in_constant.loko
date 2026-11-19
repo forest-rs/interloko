@@ -1,0 +1,14 @@
+// expect: run 5
+// expect: diagnostics 0
+
+// A literal or name target is read where it is written, with no hidden
+// binding, so a `select` over one can initialize a constant.
+
+define constant $five = select (2)
+  2 => 5;
+  otherwise => 0;
+end;
+
+define function main() => <integer>
+  $five
+end;

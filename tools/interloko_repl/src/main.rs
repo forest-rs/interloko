@@ -2241,6 +2241,7 @@ fn block_definition_boundary(tokens: &[syntax::Token]) -> Option<PendingDefiniti
             | TokenKind::If
             | TokenKind::Unless
             | TokenKind::Case
+            | TokenKind::Select
             | TokenKind::Handle
             | TokenKind::Block => {
                 depth += 1;
@@ -3602,6 +3603,7 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::Else
         | TokenKind::Unless
         | TokenKind::Case
+        | TokenKind::Select
         | TokenKind::Otherwise
         | TokenKind::Handle
         | TokenKind::With

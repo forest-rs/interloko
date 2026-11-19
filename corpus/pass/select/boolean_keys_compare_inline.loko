@@ -1,0 +1,20 @@
+// codegen: proved
+// expect: run 34
+// expect: diagnostics 0
+// expect: dump lowered lacks identical
+// expect: dump lowered lacks box
+
+// Boolean keys against a `<boolean>` target compare without boxing either
+// or calling the runtime: `b == k` is `k` where `b` is true and its
+// negation where `b` is false.
+
+define function flag(b :: <boolean>) => <integer>
+  select (b)
+    #t => 3;
+    otherwise => 4;
+  end
+end;
+
+define function main() => <integer>
+  flag(#t) * 10 + flag(#f)
+end;

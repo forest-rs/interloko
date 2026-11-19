@@ -126,6 +126,15 @@ The current slices include:
   iteration, so its decisions (and a strict definition's proofs) hold on
   each one, and an assignment ends any narrowing of the local it assigns.
   A session call may run 100 million tape instructions;
+- `select (target) key, key => …; otherwise => … end`, and `select (target
+  by test) …` to match with `test(target, key)` instead of `==`. The target
+  is evaluated once, and a `by` test once after it. Integer keys against an
+  integer target compare inline and boolean keys against a `<boolean>`
+  without boxing; matching with `==` never dispatches. An arm whose keys
+  are all integer literals, or all boolean ones, sees a local target as one
+  of them. Without `otherwise`, a target that matches no key signals a
+  `<select-error>` holding it, so unlike `if` and `case` the arms keep
+  their values;
 - Dylan-style names, where a hyphen is always a name character: `x-1` and
   `a-b` are single names, so subtraction is spaced (`x - 1`, `a -% b`);
 - `<integer>` arithmetic on 64-bit fixnums that signals a `<type-error>`
@@ -275,7 +284,8 @@ The current slices include:
   not dispatch on ranges, so a send's range check is the only one;
 - simple strings, symbols, keywords, and immutable vectors;
 - recoverable condition/restart forms, with `<condition>`, `<error>`,
-  `<type-error>` and `<no-applicable-method>` defined by the kernel: a
+  `<type-error>`, `<no-applicable-method>` and `<select-error>` defined by
+  the kernel: a
   runtime check that fails (a cast, a callable value's argument or result,
   a range, an overflow) signals a `<type-error>` naming the value, the
   expected type (a type object: a class, a `<limited-integer>` or a

@@ -1,0 +1,23 @@
+// expect: run 1234
+// expect: diagnostics 0
+
+// Symbol keys match by name, and boolean keys by value.
+
+define function colour(c :: <symbol>) => <integer>
+  select (c)
+    #red => 1;
+    #green => 2;
+    otherwise => 0;
+  end
+end;
+
+define function flag(b :: <boolean>) => <integer>
+  select (b)
+    #t => 3;
+    #f => 4;
+  end
+end;
+
+define function main() => <integer>
+  colour(#red) * 1000 + colour(#green) * 100 + flag(#t) * 10 + flag(#f)
+end;

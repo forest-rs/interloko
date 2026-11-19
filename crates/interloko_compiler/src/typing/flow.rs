@@ -1753,8 +1753,39 @@ impl<'a> Analysis<'a> {
                     self.narrow_compare(when_true, when_false, var, op.reversed(), other, *span);
                 }
             }
+            // `x == k` for a literal `k` with exactly one value: where it is
+            // true, `x` is that value; where false, it is not.
+            sem::Expr::Identical { lhs, rhs, span } => {
+                for (var, key) in [(lhs, rhs), (rhs, lhs)] {
+                    if let (Some(var), Some(value)) = (var_of(var), self.literal_singleton(key)) {
+                        self.narrow_by(when_true, when_false, var, &value, None, *span);
+                    }
+                }
+            }
             _ => {}
         }
+    }
+
+    /// The type holding exactly the value of the literal `expr`, when
+    /// types can name it: an integer or a boolean.
+    fn literal_singleton(&self, expr: &sem::Expr) -> Option<Type> {
+        let module = self.module;
+        let value = match expr {
+            sem::Expr::ConstI64 { value, .. } => *value,
+            sem::Expr::Const32 {
+                value: Number32::I32(value),
+                ..
+            } => i64::from(*value),
+            sem::Expr::Const32 {
+                value: Number32::U32(value),
+                ..
+            } => i64::from(*value),
+            sem::Expr::ConstBool { value, .. } => {
+                return Some(Type::of(Atom::Boolean(*value), module));
+            }
+            _ => return None,
+        };
+        Some(range_type(module, IntRange::singleton(value)))
     }
 
     /// Narrows `var` to `var ⊓ target` when the test is true and to

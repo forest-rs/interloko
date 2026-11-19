@@ -1,0 +1,18 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.select-test-type-mismatch
+// expect: diagnostic contains not callable(<integer>, <integer>) => <integer>
+
+// A `by` test's signature is checked once, where it is written, not at
+// each key it is called with.
+
+define function plus(a :: <integer>, b :: <integer>) => <integer>
+  a + b
+end;
+
+define function main(n :: <integer>) => <integer>
+  select (n by plus)
+    1, 2 => 1;
+    3 => 2;
+    otherwise => 0;
+  end
+end;

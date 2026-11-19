@@ -1,0 +1,21 @@
+// codegen: proved
+// expect: run 20
+// expect: diagnostics 0
+// expect: dump lowered contains i64.eq %r1
+// expect: dump lowered lacks identical
+// expect: dump lowered lacks select-method
+
+// Integer keys against an integer target compare inline: `==` on two
+// integers is `=`, so a `select` over them neither boxes nor sends.
+
+define function code(n :: <integer>) => <integer>
+  select (n)
+    1 => 10;
+    2, 3 => 20;
+    otherwise => 0;
+  end
+end;
+
+define function main() => <integer>
+  code(3)
+end;

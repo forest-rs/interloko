@@ -652,6 +652,24 @@ fn multiline_definitions_wait_for_every_end_closed_form() {
 }
 
 #[test]
+fn multiline_definitions_wait_for_select_end() {
+    let (stdout, stderr) = run_repl(
+        "define function main()\n\
+           select (3)\n\
+             1, 2 => 0;\n\
+             3 => if (#t) 7 else 8 end;\n\
+             otherwise => 0;\n\
+           end\n\
+         end\n\
+         :run main\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.lines().any(|line| line == "7"), "{stdout}");
+}
+
+#[test]
 fn quit_discards_pending_definition_and_exits() {
     let (stdout, stderr) = run_repl("define function broken()\n:quit\n");
 

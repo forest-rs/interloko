@@ -599,6 +599,27 @@ fn collect_expr(expr: &ast::Expr, binders: &mut Vec<Binder>) {
             collect_expr(condition, binders);
             collect_block(body, binders);
         }
+        Expr::Select {
+            target,
+            test,
+            arms,
+            otherwise,
+            ..
+        } => {
+            collect_expr(target, binders);
+            if let Some(test) = test {
+                collect_expr(test, binders);
+            }
+            for arm in arms {
+                for key in &arm.keys {
+                    collect_expr(key, binders);
+                }
+                collect_block(&arm.body, binders);
+            }
+            if let Some(otherwise) = otherwise {
+                collect_block(otherwise, binders);
+            }
+        }
         Expr::Handle { body, restart, .. } => {
             collect_expr(body, binders);
             if let Some(guard) = &restart.guard {

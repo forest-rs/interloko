@@ -1,0 +1,17 @@
+// expect: run 8
+// expect: diagnostics 0
+
+// Without `otherwise`, a target that matches no key signals a
+// `<select-error>` holding the target. It is an ordinary `<error>`: a
+// handler can take it and a restart supply the value.
+
+define function size(n :: <integer>) => <integer>
+  select (n)
+    1 => 100;
+    2 => 200;
+  end
+end;
+
+define function main() => <integer>
+  handle size(7) with restart e :: <select-error> as(<integer>, e.select-error-value) + 1 end
+end;
