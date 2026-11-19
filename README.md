@@ -191,9 +191,9 @@ The current slices include:
   boxed callable ABI, so they cost nothing more. A typed callable type may
   declare keywords too, as in
   `callable(<integer>, #key by :: <integer>) => <integer>`, and only a
-  value with exactly those keywords has it. `apply` passes no keywords. Statically, a keyword its
-  callee does not take, or one passed twice, is an error. Anonymous
-  functions cannot declare keywords yet;
+  value with exactly those keywords has it. `apply` passes no keywords.
+  Statically, a keyword its callee does not take, or one passed twice, is
+  an error. Anonymous functions cannot declare keywords yet;
 - Dylan's class and generic adjectives: `define abstract class` (no direct
   instances, so `make` refuses it), `define sealed class` and `define
   sealed generic`, with `open` and `concrete` as the explicit defaults.
