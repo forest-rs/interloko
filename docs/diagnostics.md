@@ -271,16 +271,16 @@ unhandled condition <no-applicable-method>: dispatch.no-applicable-method: no me
 
 Some sends fail for every value of an argument's type, and those are
 compile errors. A parameter whose methods all specialize on object classes
-carries runtime objects, which a number or boolean is not (only a boxed
-`<object>` parameter, one some method specializes on `<object>`, a number
-class or `<boolean>`, carries those), so passing one names the language-level
-reason rather than how the parameter is carried:
+carries runtime objects, which a number, boolean or callable is not (only a
+boxed `<object>` parameter, one some method specializes on `<object>`, a
+number class, `<boolean>` or `<function>`, carries those), so passing one
+names the language-level reason rather than how the parameter is carried:
 
 | Code | When |
 | --- | --- |
-| `sem.no-applicable-method` | no method of the generic accepts the argument's type there (args `generic`, `argument_index`, `actual`, `specializers`, the classes its methods specialize that argument on, and `class`, the one a new method would need: the number's class, or `<boolean>`) |
+| `sem.no-applicable-method` | no method of the generic accepts the argument's type there (args `generic`, `argument_index`, `actual`, `specializers`, the classes its methods specialize that argument on, and `class`, the one a new method would need: the number's class, `<boolean>` or `<function>`) |
 | `sem.generic-without-methods` | the same, for a generic with no methods yet (no `specializers`) |
-| `sem.generic-argument-type-mismatch` | the argument is not of the parameter's declared class, such as a `<square>` for `<circle>`, or a callable, which is not an `<object>` |
+| `sem.generic-argument-type-mismatch` | the argument is not of the parameter's declared class, such as a `<square>` for `<circle>` |
 
 There is no code for an ambiguous send: methods that could be equally
 specific for some arguments are rejected when the module compiles

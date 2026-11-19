@@ -1,0 +1,25 @@
+// expect: run 1123
+// expect: diagnostics 0
+
+// Methods may specialize on `<function>`. A callable reaches that method
+// whether it is passed as itself or boxed in an `<object>`; other values
+// reach the `<object>` method.
+
+define generic run-it(f, x :: <integer>) => <integer>;
+
+define method run-it(f :: <function>, x :: <integer>) => <integer>
+  apply(f, x)
+end;
+
+define method run-it(f :: <object>, x :: <integer>) => <integer>
+  x
+end;
+
+define function twice(x :: <integer>) => <integer>
+  x * 2
+end;
+
+define function main() => <integer>
+  let boxed :: <object> = function (x :: <integer>) => <integer> x * 100 end;
+  run-it(boxed, 10) + run-it(twice, 6) * 10 + run-it("text", 1) + run-it(1, 2)
+end;

@@ -1,0 +1,29 @@
+// expect: run 11100
+// expect: diagnostics 0
+
+// A callable is `==` itself, boxed or not, and every mention of a function
+// is the same `<function>`. Two closures over different environments are
+// different objects even when they run the same code.
+
+define function twice(x :: <integer>) => <integer>
+  x * 2
+end;
+
+define function adder(n :: <integer>) => <callable>
+  function (x :: <integer>) => <integer> x + n end
+end;
+
+define function bit(b :: <boolean>) => <integer>
+  if (b) 1 else 0 end
+end;
+
+define function main() => <integer>
+  let held :: <object> = twice;
+  let add-one = adder(1);
+  let boxed :: <object> = add-one;
+  bit(twice == twice) * 10000
+    + bit(held == twice) * 1000
+    + bit(boxed == add-one) * 100
+    + bit(adder(1) == adder(1)) * 10
+    + bit(add-one == twice)
+end;

@@ -896,10 +896,11 @@ the parameter stay static and sound. `use-value` continues all of these
 checks like any other, so code after an entry, a call or an adapter only
 sees values that passed them.
 
-Two mismatches still trap: a callable passed where a value is expected, or
-a value where a callable is (a callable is not an `<object>`, so it has no
-boxed form), and a call through a callable value with the wrong number of
-arguments or results.
+Under the boxed callable ABI a callable crosses boxed like any other value:
+it is a `<function>`, so a callable passed where a number is expected, or a
+value that is no callable where one is, signals `type-error.entry` at the
+callee's entry like any other mismatch. One mismatch still traps: a call
+through a callable value with the wrong number of arguments or results.
 
 ## Failed Sends
 
@@ -917,9 +918,8 @@ end
 
 Its slots are `no-applicable-method-generic` (the generic's
 `<generic-function>` metaobject), `no-applicable-method-arguments` (a
-`<vector>` of the arguments in order; a callable argument, which is not an
-`<object>` and never selects a method, appears as the symbol `#<callable>`)
-and `no-applicable-method-code` (`dispatch.no-applicable-method`).
+`<vector>` of the arguments in order, a callable among them as the
+`<function>` it is) and `no-applicable-method-code` (`dispatch.no-applicable-method`).
 
 Every send that can fail reaches the generic's dispatcher, which signals:
 a dynamic send asks the runtime, which answers with the dispatcher when its

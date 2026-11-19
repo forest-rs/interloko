@@ -23197,6 +23197,48 @@ end;
     }
 
     #[test]
+    fn a_non_function_signals_at_a_function_callable_entry_and_takes_a_callable() {
+        // `take` wants a `<function>`; the `<integer>` 3 arrives boxed, and
+        // its entry signals. The replacement is a callable value, the
+        // register's kind: `main`'s first, `inc`. An `<integer>` is an
+        // invalid choice.
+        let source = "define function inc(x :: <integer>) => <integer>\n  x + 1\nend;\n\
+             define function take(f :: <function>) => <integer>\n  \
+             let r :: <integer> = apply(f, 41);\n  r\nend;\n\
+             define function call(g :: <callable>, x :: <object>) => <integer>\n  \
+             apply(g, x)\nend;\n\
+             define function main() => <integer>\n  \
+             let spare :: <function> = inc;\n  call(take, 3)\nend;";
+        let artifacts =
+            CompilerSession::compile_source("callable.loko", source, RuntimeMode::CompileOnly);
+        let runs = breaks_under_each_policy(source, |_, condition| {
+            assert_eq!(use_value_types(condition), [ValueType::Agg]);
+            let main = condition.frames.last().expect("main's frame");
+            let spare = main
+                .registers
+                .iter()
+                .filter(|register| matches!(register.value, Value::Agg(_)))
+                .min_by_key(|register| register.register)
+                .expect("a callable in main");
+            Choice::UseValue(vec![spare.value.clone()])
+        });
+        for (reports, value) in runs {
+            assert_eq!(value, FunctionValue::Integer(42));
+            let [report] = reports.as_slice() else {
+                panic!("{reports:?}");
+            };
+            assert_eq!(report.kind(), Some(TypeErrorKind::Entry));
+            assert_eq!(report.value, "3");
+        }
+        let mut chooser =
+            Scripted(|_: &UnhandledCondition<'_>| Choice::UseValue(vec![Value::I64(1)]));
+        let Err(FunctionCallError::Trap { .. }) = call_with_chooser(&artifacts, &mut chooser)
+        else {
+            panic!("an integer cannot stand in for a <function>");
+        };
+    }
+
+    #[test]
     fn values_of_the_parameter_class_cross_a_callable_unchanged() {
         for (parameter, argument, result, value) in [
             ("<i32>", "41", "<i32>", FunctionValue::I32(41)),

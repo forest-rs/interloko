@@ -1,0 +1,15 @@
+// expect: runtime code type-error.cast
+// expect: diagnostics 0
+
+// Casting an `<object>` that holds no callable to `<function>` signals a
+// `<type-error>`.
+
+define function pick(x :: <object>) => <function>
+  as(<function>, x)
+end;
+
+define function main() => <integer>
+  let f = pick(5);
+  let result :: <integer> = apply(f, 1);
+  result
+end;

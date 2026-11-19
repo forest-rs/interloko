@@ -1,20 +1,18 @@
-// expect: run 21
-// expect: diagnostics 0
-// expect: dump lowered contains = literal.symbol #<callable>: <symbol>
-// expect: dump lowered contains = literal.vector <vector>(
+// expect: runtime code dispatch.no-applicable-method
+// expect: run reports called with ({<callable>})
+// expect: dump lowered lacks literal.symbol
 
-// A callable is not an `<object>`, so no `<vector>` can hold it. The
-// dispatcher of a generic that takes one, such as the setter of a
-// `<callable>` slot, builds its failed send's arguments with the symbol
-// `#<callable>` in its place; a callable never selects a method anyway.
-// (Sem's argument checks keep such a setter's sends from failing, so this
-// case checks the lowering and that the program still runs.)
+// A callable is a `<function>`, so a failed send's arguments vector holds
+// it like any other argument. Here the only method takes an `<integer>`,
+// so the parameter carries boxed values and a callable reaches dispatch,
+// which finds no method for it.
 
-define class <stash> (<object>)
-  slot fn :: <callable>;
+define generic scale(x) => <integer>;
+
+define method scale(x :: <integer>) => <integer>
+  x * 2
 end;
 
 define function main() => <integer>
-  let stash = make(<stash>, fn: function (x :: <integer>) => <integer> x + 1 end);
-  apply(stash.fn, 20)
+  scale(function (x :: <integer>) => <integer> x + 1 end)
 end;

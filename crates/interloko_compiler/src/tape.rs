@@ -538,6 +538,7 @@ fn fixed_condition_results() -> Vec<Vec<ValueType>> {
         runtime::any_type(),
         ValueType::Bool,
         ValueType::Closure,
+        ValueType::Agg,
     ]
     .into_iter()
     .map(|result| vec![result])
@@ -1651,6 +1652,12 @@ impl<'a> FunctionEmitter<'a> {
                     lower::ValueKind::F64 => self.abi.box_f64,
                     lower::ValueKind::F32 => self.abi.box_f32,
                     lower::ValueKind::Bool => self.abi.box_bool,
+                    // Declared at its first use, as callables box only
+                    // where they cross `<object>`.
+                    lower::ValueKind::Closure(_) => self.builder.host_sig_for(
+                        runtime::BOX_VALUE,
+                        runtime::box_value_signature(ValueType::Agg),
+                    ),
                     lower::ValueKind::Object(_)
                     | lower::ValueKind::ClassObject(_)
                     | lower::ValueKind::GenericFunctionObject(_)
@@ -1663,7 +1670,6 @@ impl<'a> FunctionEmitter<'a> {
                     | lower::ValueKind::U32
                     | lower::ValueKind::U64
                     | lower::ValueKind::Function(_)
-                    | lower::ValueKind::Closure(_)
                     | lower::ValueKind::Entry
                     | lower::ValueKind::Aggregate
                     | lower::ValueKind::Exn => {
@@ -2065,10 +2071,15 @@ impl<'a> FunctionEmitter<'a> {
                     lower::ValueKind::F64 => self.abi.unbox_f64,
                     lower::ValueKind::F32 => self.abi.unbox_f32,
                     lower::ValueKind::Bool => self.abi.unbox_bool,
-                    _ => return Err(invalid_lowered("unbox result kind is not a scalar")),
+                    lower::ValueKind::Closure(None) => self.builder.host_sig_for(
+                        runtime::UNBOX_VALUE,
+                        runtime::unbox_value_signature(ValueType::Agg),
+                    ),
+                    _ => return Err(invalid_lowered("unbox result kind is not unboxable")),
                 };
                 // Every value of the result's register type is an instance
-                // of the scalar class, so a replacement needs no check.
+                // of the class, a scalar's or `<function>`, so a
+                // replacement needs no check.
                 let check = CheckedCall {
                     sig,
                     recheck: None,

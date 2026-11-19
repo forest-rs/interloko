@@ -100,6 +100,12 @@ pub enum BuiltinValueClass {
     /// The concrete built-in `<boolean>` class of `#t` and `#f`. It comes
     /// last so that adding it moved no other built-in class's id.
     Boolean,
+    /// The concrete built-in `<function>` class of callable values:
+    /// functions, closures, and the generic functions and accessors used as
+    /// values. A callable type, with or without a signature, is a subset of
+    /// it. It comes after `<boolean>` so that no other built-in class's id
+    /// moved.
+    Function,
 }
 
 impl BuiltinValueClass {
@@ -123,6 +129,7 @@ impl BuiltinValueClass {
         (Self::LimitedIntegerType, "<limited-integer>"),
         (Self::SubclassType, "<subclass-type>"),
         (Self::Boolean, "<boolean>"),
+        (Self::Function, "<function>"),
     ];
 
     /// Returns the Loko-visible class name for this built-in value class.
@@ -147,6 +154,7 @@ impl BuiltinValueClass {
             Self::LimitedIntegerType => "<limited-integer>",
             Self::SubclassType => "<subclass-type>",
             Self::Boolean => "<boolean>",
+            Self::Function => "<function>",
         }
     }
 
@@ -172,6 +180,7 @@ impl BuiltinValueClass {
             b"<limited-integer>" => Some(Self::LimitedIntegerType),
             b"<subclass-type>" => Some(Self::SubclassType),
             b"<boolean>" => Some(Self::Boolean),
+            b"<function>" => Some(Self::Function),
             _ => None,
         }
     }
@@ -198,6 +207,7 @@ impl BuiltinValueClass {
             Self::LimitedIntegerType => 15,
             Self::SubclassType => 16,
             Self::Boolean => 17,
+            Self::Function => 18,
         }
     }
 
@@ -238,6 +248,14 @@ impl BuiltinValueClass {
     #[must_use]
     pub const fn is_scalar(self) -> bool {
         matches!(self, Self::Boolean) || self.is_numeric()
+    }
+
+    /// Returns whether this class's instances are unboxed values rather than
+    /// runtime objects: scalars, and `<function>`'s callables, which are
+    /// execution closures. Each is boxed when it travels as `<object>`.
+    #[must_use]
+    pub const fn is_unboxed(self) -> bool {
+        matches!(self, Self::Function) || self.is_scalar()
     }
 
     /// Returns whether this class is `<number>` or one of its subclasses.
@@ -529,6 +547,16 @@ mod tests {
         assert!(!BuiltinValueClass::Boolean.is_numeric());
         assert_eq!(
             BuiltinValueClass::Boolean.index(),
+            BuiltinValueClass::ALL.len() - 2
+        );
+        assert_eq!(chain(BuiltinValueClass::Function), ["<function>"]);
+        assert!(!BuiltinValueClass::Function.is_abstract());
+        assert!(!BuiltinValueClass::Function.is_scalar());
+        assert!(BuiltinValueClass::Function.is_unboxed());
+        assert!(BuiltinValueClass::Boolean.is_unboxed());
+        assert!(!BuiltinValueClass::String.is_unboxed());
+        assert_eq!(
+            BuiltinValueClass::Function.index(),
             BuiltinValueClass::ALL.len() - 1
         );
     }
