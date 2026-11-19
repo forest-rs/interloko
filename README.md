@@ -254,6 +254,11 @@ The current slices include:
   older frames keep theirs;
 - `begin body end`, a body as an expression, whose `let`s are its own and
   whose last expression is its value;
+- statements as operands, as in Dylan: an `if`, `unless`, `case`,
+  `select`, loop, `begin`, `block` or `handle` may appear wherever any
+  other operand may, so `x + if (c) 1 else 2 end`, `f(select (k) … end)`
+  and `begin … end[0]` work. One that produces no values, such as an `if`
+  without `else`, has no value to give an operator or argument;
 - nominal classes with typed slots, init keywords, inherited slots, and slot
   assignment through setter generics. A slot's `init-value:` default may be
   any expression, a `begin … end` body with its own `let`s, loops and

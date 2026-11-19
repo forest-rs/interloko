@@ -565,7 +565,7 @@ impl BaseLokoCstProjector<'_> {
             "negative-expression" => self.build_unary(node, TokenKind::Minus),
             "not-expression" => self.build_unary(node, TokenKind::Tilde),
             "postfix-expression" => self.build_postfix(node),
-            "primary-expression" => self.unwrap_first_expr(node),
+            "primary-expression" | "statement" => self.unwrap_first_expr(node),
             "parenthesized-expression" => node
                 .children
                 .iter()
@@ -1440,6 +1440,7 @@ impl BaseLokoCstProjector<'_> {
                 | "not-expression"
                 | "postfix-expression"
                 | "primary-expression"
+                | "statement"
                 | "method-expression"
                 | "parenthesized-expression"
                 | "vector-expression"

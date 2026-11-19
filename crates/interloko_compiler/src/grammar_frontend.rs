@@ -3146,7 +3146,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "expression",
-            "handle-expression | block-expression | begin-expression | while-expression | until-expression | for-expression | if-expression | unless-expression | case-expression | select-expression | assignment-expression",
+            "assignment-expression",
             "syntax.rs:Parser::parse_expr",
         ),
         (
@@ -3360,8 +3360,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "base_loko_primary::BaseLokoCstBuilder::build_postfix",
         ),
         (
+            "statement",
+            "handle-expression | block-expression | begin-expression | while-expression | until-expression | for-expression | if-expression | unless-expression | case-expression | select-expression",
+            "base_loko_primary::BaseLokoCstBuilder::build_expr",
+        ),
+        (
             "primary-expression",
-            "method-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | name-expression",
+            "statement | method-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | name-expression",
             "syntax.rs:Parser::parse_primary",
         ),
         (
@@ -4487,7 +4492,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 89);
+        assert_eq!(grammar.effective_rules.len(), 90);
 
         assert!(
             !records
