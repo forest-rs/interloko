@@ -1,0 +1,19 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.method-overrides-slot-getter
+
+// A `<string>` slot named `size` does not join the kernel's `size`, but it
+// still serves its own class, read directly, so a method of `size` for
+// that class is refused as for any other getter.
+
+define class <thing> (<object>)
+  slot size :: <string>, init-value: "slot";
+end;
+define method size (x :: <thing>) => <integer> 7 end;
+define function main() => <integer>
+  let t = make(<thing>);
+  let o :: <object> = t;
+  let s :: <string> = t.size;
+  let s2 :: <string> = size(t);
+  let n :: <integer> = size(o);
+  n
+end;

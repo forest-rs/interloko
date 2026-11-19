@@ -12599,30 +12599,53 @@ fn project_environment_function(
         })
         .collect::<Vec<_>>()
         .join(", ");
+    // A kernel function, the value a built-in is, has no source to edit
+    // and is no entry point.
+    let (origin, storage, affordances) = if function.kernel {
+        (
+            EnvironmentOrigin::CompilerGenerated,
+            EnvironmentStorage::CachedArtifact,
+            Vec::from([
+                Aff::Inspect,
+                Aff::DumpSem,
+                Aff::DumpLowered,
+                Aff::DumpTape,
+                Aff::DumpEop,
+                Aff::ShowDependencies,
+                Aff::ShowTypes,
+            ]),
+        )
+    } else {
+        (
+            EnvironmentOrigin::SourceAuthored,
+            EnvironmentStorage::SourceDefined,
+            Vec::from([
+                Aff::Inspect,
+                Aff::DumpSem,
+                Aff::DumpLowered,
+                Aff::DumpTape,
+                Aff::DumpEop,
+                Aff::Run,
+                Aff::ShowDependencies,
+                Aff::ShowTypes,
+                Aff::EditBody,
+                Aff::PreviewStrict,
+                Aff::ShowClaims,
+            ]),
+        )
+    };
     sink.emit(environment_object(EnvironmentObjectParts {
         id: format!("function:f{}", function.id.0),
         kind: EnvironmentKind::Function,
         meta_class: "<function>",
-        origin: EnvironmentOrigin::SourceAuthored,
-        storage: EnvironmentStorage::SourceDefined,
+        origin,
+        storage,
         title: format!(
             "{}({params}) -> {}",
             function.name,
             sem_kind_list_label(module, &function.result_kinds)
         ),
-        affordances: Vec::from([
-            Aff::Inspect,
-            Aff::DumpSem,
-            Aff::DumpLowered,
-            Aff::DumpTape,
-            Aff::DumpEop,
-            Aff::Run,
-            Aff::ShowDependencies,
-            Aff::ShowTypes,
-            Aff::EditBody,
-            Aff::PreviewStrict,
-            Aff::ShowClaims,
-        ]),
+        affordances,
         execution: Some(format!("callable=direct arity={}", function.params.len())),
         inspection: format!(
             "definition={} function-id=f{}{}",

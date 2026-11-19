@@ -71,8 +71,6 @@ pub enum DiagnosticCode {
     /// A method, generic or restart parameter, which must name a class, is
     /// annotated with a class object or callable type.
     AstAnnotationNotClass,
-    /// `instance?` has the wrong syntactic argument shape.
-    AstInvalidInstanceOf,
     /// `as` has the wrong syntactic argument shape.
     AstInvalidCast,
     /// `limited(...)` written as an expression writes no type.
@@ -126,8 +124,6 @@ pub enum DiagnosticCode {
     BuiltInFormValue,
     /// A parameter, local, or restart binding duplicates an existing local.
     DuplicateLocal,
-    /// A callable value is ambiguous.
-    AmbiguousCallable,
     /// A function or callable was called with the wrong number of arguments.
     FunctionArityMismatch,
     /// A direct function argument has the wrong type.
@@ -278,6 +274,10 @@ pub enum DiagnosticCode {
     /// A method of a slot's getter generic specializes on a class declaring
     /// the slot, or a subclass, so it would override the slot's getter.
     MethodOverridesSlotGetter,
+    /// A method of the generic a built-in function with several overloads
+    /// is specializes only on the kernel's classes, which the built-in's
+    /// own overloads serve.
+    BuiltInMethodOnKernelClass,
     /// A numeric `for` clause's start, bound or step is not an `<integer>`.
     ForClauseTypeMismatch,
     /// A slot default `init-value:` has the wrong type.
@@ -406,7 +406,6 @@ impl DiagnosticCode {
         Self::AstUnsupportedSlotOption,
         Self::AstInvalidMethodSpecializer,
         Self::AstAnnotationNotClass,
-        Self::AstInvalidInstanceOf,
         Self::AstInvalidCast,
         Self::AstInvalidTypeLiteral,
         Self::AstInvalidSignal,
@@ -431,7 +430,6 @@ impl DiagnosticCode {
         Self::UnresolvedHyphenatedLocal,
         Self::BuiltInFormValue,
         Self::DuplicateLocal,
-        Self::AmbiguousCallable,
         Self::FunctionArityMismatch,
         Self::FunctionArgumentTypeMismatch,
         Self::FunctionReturnTypeMismatch,
@@ -499,6 +497,7 @@ impl DiagnosticCode {
         Self::MethodKeywordTypeMismatch,
         Self::CollectionMethodOverridesKernel,
         Self::MethodOverridesSlotGetter,
+        Self::BuiltInMethodOnKernelClass,
         Self::ForClauseTypeMismatch,
         Self::SlotDefaultTypeMismatch,
         Self::ConstantInitializerCycle,
@@ -566,7 +565,6 @@ impl DiagnosticCode {
             Self::AstUnsupportedSlotOption => "ast.unsupported-slot-option",
             Self::AstInvalidMethodSpecializer => "ast.invalid-method-specializer",
             Self::AstAnnotationNotClass => "ast.annotation-not-class",
-            Self::AstInvalidInstanceOf => "ast.invalid-instance-of",
             Self::AstInvalidCast => "ast.invalid-cast",
             Self::AstInvalidTypeLiteral => "ast.invalid-type-literal",
             Self::AstInvalidSignal => "ast.invalid-signal",
@@ -591,7 +589,6 @@ impl DiagnosticCode {
             Self::UnresolvedHyphenatedLocal => "sem.unresolved-hyphenated-local",
             Self::BuiltInFormValue => "sem.built-in-form-value",
             Self::DuplicateLocal => "sem.duplicate-local",
-            Self::AmbiguousCallable => "sem.ambiguous-callable",
             Self::FunctionArityMismatch => "sem.function-arity-mismatch",
             Self::FunctionArgumentTypeMismatch => "sem.function-argument-type-mismatch",
             Self::FunctionReturnTypeMismatch => "sem.function-return-type-mismatch",
@@ -661,6 +658,7 @@ impl DiagnosticCode {
             Self::MethodKeywordTypeMismatch => "sem.method-keyword-type-mismatch",
             Self::CollectionMethodOverridesKernel => "sem.collection-method-overrides-kernel",
             Self::MethodOverridesSlotGetter => "sem.method-overrides-slot-getter",
+            Self::BuiltInMethodOnKernelClass => "sem.built-in-method-on-kernel-class",
             Self::ForClauseTypeMismatch => "sem.for-clause-type-mismatch",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
             Self::ConstantInitializerCycle => "sem.constant-initializer-cycle",
@@ -729,7 +727,6 @@ impl DiagnosticCode {
             "ast.unsupported-slot-option" => Self::AstUnsupportedSlotOption,
             "ast.invalid-method-specializer" => Self::AstInvalidMethodSpecializer,
             "ast.annotation-not-class" => Self::AstAnnotationNotClass,
-            "ast.invalid-instance-of" => Self::AstInvalidInstanceOf,
             "ast.invalid-cast" => Self::AstInvalidCast,
             "ast.invalid-type-literal" => Self::AstInvalidTypeLiteral,
             "ast.invalid-signal" => Self::AstInvalidSignal,
@@ -754,7 +751,6 @@ impl DiagnosticCode {
             "sem.unresolved-hyphenated-local" => Self::UnresolvedHyphenatedLocal,
             "sem.built-in-form-value" => Self::BuiltInFormValue,
             "sem.duplicate-local" => Self::DuplicateLocal,
-            "sem.ambiguous-callable" => Self::AmbiguousCallable,
             "sem.function-arity-mismatch" => Self::FunctionArityMismatch,
             "sem.function-argument-type-mismatch" => Self::FunctionArgumentTypeMismatch,
             "sem.function-return-type-mismatch" => Self::FunctionReturnTypeMismatch,
@@ -824,6 +820,7 @@ impl DiagnosticCode {
             "sem.method-keyword-type-mismatch" => Self::MethodKeywordTypeMismatch,
             "sem.collection-method-overrides-kernel" => Self::CollectionMethodOverridesKernel,
             "sem.method-overrides-slot-getter" => Self::MethodOverridesSlotGetter,
+            "sem.built-in-method-on-kernel-class" => Self::BuiltInMethodOnKernelClass,
             "sem.for-clause-type-mismatch" => Self::ForClauseTypeMismatch,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,
             "sem.constant-initializer-cycle" => Self::ConstantInitializerCycle,

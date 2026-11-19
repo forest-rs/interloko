@@ -285,10 +285,14 @@ The current slices include:
   `sealed slot` is, so a method for one of them or a subclass is refused
   (`sem.method-overrides-slot-getter`), while a method for another class
   joins it. A program's own generic of the name takes the getters as
-  methods, and a function or constant of the name leaves the getter to
+  methods if it takes one receiver and admits the slot's class and what
+  it holds, and a function or constant of the name leaves the getter to
   receivers of the slot's classes. An `<integer>` slot named `size` joins
   the kernel's `size`; a slot named for another collection generic, such
-  as `element`, serves its own classes only;
+  as `element`, serves its own classes only, and is sealed the same way.
+  A slot named like a built-in, such as `apply` or `make`, serves a call
+  of one receiver of its class, and every other call of the name is the
+  built-in's;
 - generic functions and multi-argument method dispatch over nominal classes;
 - Dylan's keyword parameters: `define function scale (x, #key by :: <integer>
   = 2, plus = 0)`, called as `scale(3)`, `scale(3, by: 10)` or `scale(3,
@@ -448,7 +452,8 @@ The current slices include:
   `node.operator.apply(x)` and `table[k](x)` evaluate the operand, then
   the arguments, and call its value, typed when its signature is known.
   An `<object>` operand is checked to be a `<function>` as a declaration
-  would check it (`type-error.cast`) and called through its boxed entry,
+  would check it (`type-error.cast`), as it is evaluated and so before the
+  arguments, and called through its boxed entry,
   and an operand whose type can never be a function is an error.
   Built-in functions are values as well: one with a single overload, such
   as `digit?`, `floor/` or `class-name`, is a hidden kernel function made
@@ -457,7 +462,8 @@ The current slices include:
   `as-uppercase` (a `<character>` or a `<string>`), is a built-in generic
   whose kernel methods are its overloads. That generic is sealed over its
   methods' classes as `size` is, so a program's `define method sqrt` joins
-  it for a class of its own, and a call no overload takes as typing sees
+  it for a class of its own, never for a kernel class
+  (`sem.built-in-method-on-kernel-class`), and a call no overload takes as typing sees
   it, an `<object>` or such a class among its arguments, sends to it.
   `shift-left` and `shift-right` as values shift a `<u32>`. A typed call
   of a built-in's name, or of a binding that holds one, still runs it

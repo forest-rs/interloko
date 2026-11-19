@@ -1,0 +1,15 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.generic-method-specializer-type-mismatch
+
+// A slot's getter joins the program's generic of its name only when the
+// generic's parameter admits the slot's class.
+
+define class <a> (<object>) end;
+define generic power (x :: <a>) => <integer>;
+define class <b> (<object>)
+  slot power :: <integer>, init-value: 3;
+end;
+define function main() => <integer>
+  let b = make(<b>);
+  b.power
+end;

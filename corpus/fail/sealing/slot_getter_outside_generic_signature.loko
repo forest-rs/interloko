@@ -1,0 +1,17 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.generic-method-result-type-mismatch
+// expect: diagnostic contains does not satisfy generic return callable(<integer>) => <integer>
+
+// A slot's getter joins the program's generic of its name only when the
+// slot's callable signature is the one the generic declares it returns.
+
+define generic op (x) => callable(<integer>) => <integer>;
+define class <a> (<object>)
+  constant slot op :: callable(<string>) => <integer>, required-init-keyword: op:;
+end;
+define function main() => <integer>
+  let a = make(<a>, op: method (s :: <string>) => <integer> size(s) end);
+  let o :: <object> = a;
+  let f = op(o);
+  f(12345)
+end;

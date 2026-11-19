@@ -45,6 +45,12 @@ pub const FORMS: &[&str] = &[
     "starts-with?",
 ];
 
+/// Whether `name` names a built-in a call can reach, a form or a function.
+#[must_use]
+pub fn names_built_in(name: &str) -> bool {
+    FORMS.contains(&name) || overloads(name).is_some()
+}
+
 /// The overloads a value of the built-in function `name` covers, each as
 /// its parameters' type names in order, or `None` when `name` names no
 /// built-in function that is a value. A `%` name is the kernel's own and

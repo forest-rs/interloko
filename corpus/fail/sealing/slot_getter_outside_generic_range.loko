@@ -1,0 +1,18 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.generic-method-result-type-mismatch
+// expect: diagnostic contains does not satisfy generic return limited(<integer>, min: 0)
+
+// A slot's getter joins the program's generic of its name only when the
+// generic's declared result admits whatever the slot holds, its range
+// included, as a source method's result must.
+
+define generic power (x) => limited(<integer>, min: 0);
+define class <a> (<object>)
+  slot power :: <integer>, init-value: -5;
+end;
+define function main() => <integer>
+  let a = make(<a>);
+  let o :: <object> = a;
+  let n :: limited(<integer>, min: 0) = power(o);
+  n
+end;
