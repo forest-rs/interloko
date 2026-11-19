@@ -85,6 +85,11 @@ fn for_each_read(instr: &Instr, mut f: impl FnMut(Reg)) {
         Instr::Num32Binary { lhs, rhs, .. }
         | Instr::Num32Checked { lhs, rhs, .. }
         | Instr::I64Binary { lhs, rhs, .. }
+        | Instr::IntegerPower {
+            base: lhs,
+            exponent: rhs,
+            ..
+        }
         | Instr::I64Unchecked { lhs, rhs, .. }
         | Instr::I64Bitwise { lhs, rhs, .. }
         | Instr::F64Binary { lhs, rhs, .. }
@@ -240,7 +245,9 @@ fn for_each_write(instr: &Instr, mut f: impl FnMut(Reg)) {
         | Instr::UnboxObject { dst, .. }
         | Instr::NoApplicableMethod { dst, .. }
         | Instr::PushExit { dst, .. } => all(&[*dst]),
-        Instr::Num32Checked { dst, overflow, .. } | Instr::I64Binary { dst, overflow, .. } => {
+        Instr::Num32Checked { dst, overflow, .. }
+        | Instr::I64Binary { dst, overflow, .. }
+        | Instr::IntegerPower { dst, overflow, .. } => {
             all(&[*dst, *overflow]);
         }
         Instr::ConvertChecked { dst, inexact, .. } => all(&[*dst, *inexact]),
@@ -319,6 +326,7 @@ fn for_each_label_ref(instr: &Instr, mut f: impl FnMut(LabelId)) {
         | Instr::CellSet { .. }
         | Instr::BoxValue { .. }
         | Instr::I64Binary { .. }
+        | Instr::IntegerPower { .. }
         | Instr::I64Unchecked { .. }
         | Instr::I64Bitwise { .. }
         | Instr::F64Binary { .. }

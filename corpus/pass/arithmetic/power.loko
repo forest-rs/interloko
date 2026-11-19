@@ -1,0 +1,32 @@
+// expect: run 9
+// expect: diagnostics 0
+// expect: dump lowered contains integer.power
+// expect: dump lowered contains float.call interloko.float.pow
+
+// `^` is Dylan's exponentiation: right-associative, tighter than `*`, and
+// looser than a unary operator, so `-2 ^ 2` is `(-2) ^ 2`. Integer powers
+// are exact; with a float operand it computes `pow` in the widest float
+// present. Typed operands compute inline; others send the built-in `^`
+// generic, as `+` does.
+
+define function power(base :: <object>, exponent :: <object>) => <object>
+  base ^ exponent
+end;
+
+define function main() => <integer>
+  let passed = 0;
+  let check = method (test :: <boolean>) => ()
+    if (test) passed := passed + 1 end
+  end;
+  let two = 2;
+  check(two ^ 10 = 1024);
+  check(two ^ 3 ^ 2 = 512);                 // 2 ^ (3 ^ 2)
+  check(-2 ^ 2 = 4);
+  check(3 * two ^ 2 = 12);
+  check((-2) ^ 63 = -9223372036854775807 - 1);
+  check(0 ^ 0 = 1);
+  check(two ^ 0.5 > 1.414 & two ^ 0.5 < 1.415);
+  check(power(3, 4) = 81);
+  check(power(2.0, 3) = 8.0);
+  passed
+end;

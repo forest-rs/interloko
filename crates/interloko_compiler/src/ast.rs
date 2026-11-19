@@ -639,6 +639,8 @@ pub enum BinaryOp {
     WrappingSub,
     /// Wrapping multiplication, `*%`.
     WrappingMul,
+    /// Exponentiation, `^`.
+    Pow,
 }
 
 /// Integer comparison operator.
@@ -2357,12 +2359,46 @@ impl<'tree> Lowering<'tree> {
                 span: node.span,
             };
         };
+        let operator = node.children.iter().find_map(|child| match child {
+            CstElement::Token(index) => Some(self.tree.tokens[*index].kind),
+            CstElement::Node(_) => None,
+        });
+        if operator == Some(TokenKind::Tilde) {
+            let operand = self.lower_expr(child);
+            return self.negation(node, operand);
+        }
         if child.kind == CstKind::NumberExpr {
             return self.lower_negative_number(node, child);
         }
         Expr::UnaryMinus {
             id: self.ast_id(node),
             expr: Box::new(self.lower_expr(child)),
+            span: node.span,
+        }
+    }
+
+    /// `~test`, Dylan's logical negation: `if (test) #f else #t end`, so
+    /// it takes the `<boolean>` an `if` test takes. `a ~= b` and `a ~== b`
+    /// negate `a = b` and `a == b` the same way.
+    fn negation(&self, node: &CstNode, test: Expr) -> Expr {
+        let constant = |value: bool| Block {
+            id: self.ast_id(node),
+            statements: Vec::new(),
+            result: Expr::Bool {
+                id: self.ast_id(node),
+                value,
+                span: node.span,
+            },
+            span: node.span,
+        };
+        Expr::If {
+            id: self.ast_id(node),
+            arms: vec![CondArm {
+                span: node.span,
+                test,
+                body: constant(false),
+            }],
+            else_body: Some(Box::new(constant(true))),
             span: node.span,
         }
     }
@@ -3268,6 +3304,13 @@ impl<'tree> Lowering<'tree> {
                 rhs: Box::new(rhs),
                 span: node.span,
             },
+            Some(TokenKind::Caret) => Expr::Binary {
+                id: self.ast_id(node),
+                op: BinaryOp::Pow,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                span: node.span,
+            },
             Some(TokenKind::Equal) => Expr::Compare {
                 id: self.ast_id(node),
                 op: CompareOp::Eq,
@@ -3275,6 +3318,25 @@ impl<'tree> Lowering<'tree> {
                 rhs: Box::new(rhs),
                 span: node.span,
             },
+            Some(TokenKind::TildeEqual) => {
+                let equal = Expr::Compare {
+                    id: self.ast_id(node),
+                    op: CompareOp::Eq,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span: node.span,
+                };
+                self.negation(node, equal)
+            }
+            Some(TokenKind::TildeEqualEqual) => {
+                let identical = Expr::Identical {
+                    id: self.ast_id(node),
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    span: node.span,
+                };
+                self.negation(node, identical)
+            }
             Some(TokenKind::EqualEqual) => Expr::Identical {
                 id: self.ast_id(node),
                 lhs: Box::new(lhs),

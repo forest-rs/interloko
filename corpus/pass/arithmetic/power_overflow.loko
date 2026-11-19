@@ -1,0 +1,12 @@
+// expect: runtime code type-error.overflow
+// expect: diagnostics 0
+// expect: dump lowered contains integer.power
+
+// An `<integer>` power is checked as `*` is: one that leaves the fixnum
+// range signals `type-error.overflow` rather than wrapping.
+
+define function main() => <integer>
+  let two = 2;
+  let exponent = 63;
+  two ^ exponent
+end;

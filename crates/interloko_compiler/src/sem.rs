@@ -3669,6 +3669,9 @@ pub enum BinaryOp {
     WrappingSub,
     /// `*%`: multiplication modulo 2^32, like [`Self::WrappingAdd`].
     WrappingMul,
+    /// `x ^ n`: exponentiation. Exact on integers, for a non-negative
+    /// exponent; floats compute `pow`.
+    Pow,
     /// `logand(x, y)`: bitwise and, exact on integers of any type.
     LogAnd,
     /// `logior(x, y)`: bitwise inclusive or, exact on integers of any type.
@@ -3734,6 +3737,7 @@ impl BinaryOp {
             Self::WrappingAdd => "+%",
             Self::WrappingSub => "-%",
             Self::WrappingMul => "*%",
+            Self::Pow => "^",
             Self::LogAnd => "logand",
             Self::LogIor => "logior",
             Self::LogXor => "logxor",
@@ -3753,6 +3757,7 @@ impl From<ast::BinaryOp> for BinaryOp {
             ast::BinaryOp::WrappingAdd => Self::WrappingAdd,
             ast::BinaryOp::WrappingSub => Self::WrappingSub,
             ast::BinaryOp::WrappingMul => Self::WrappingMul,
+            ast::BinaryOp::Pow => Self::Pow,
         }
     }
 }

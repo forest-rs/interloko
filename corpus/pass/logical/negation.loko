@@ -1,0 +1,21 @@
+// expect: run 6
+// expect: diagnostics 0
+
+// Dylan's `~` negates a `<boolean>`, `~=` is `~(a = b)` and `~==` is
+// `~(a == b)`. `~` binds tighter than any binary operator; `~=` and `~==`
+// share the comparisons' precedence.
+
+define function main() => <integer>
+  let passed = 0;
+  let check = method (test :: <boolean>) => ()
+    if (test) passed := passed + 1 end
+  end;
+  let one = 1;
+  check(one ~= 2);
+  check(~(one ~= 1));
+  check(~ #f);
+  check(#a ~== #b);
+  check(~(#a ~== #a));
+  check(~ #f == #t);                         // (~ #f) == #t
+  passed
+end;

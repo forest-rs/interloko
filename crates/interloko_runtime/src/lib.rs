@@ -78,7 +78,9 @@ pub use constant::{
     CONSTANT_ABANDON, CONSTANT_CLAIM, CONSTANT_GET, CONSTANT_READ, CONSTANT_SET, ConstantCellError,
     ConstantCycleReport, constant_abandon_signature, constant_claim_signature,
 };
-pub use integer::{IntegerDivision, Rounding};
+pub use integer::{
+    INTEGER_POWER, IntegerDivision, Rounding, integer_power, integer_power_signature,
+};
 pub use no_applicable_method::NoApplicableMethodReport;
 use region::{NurserySerials, ObjectRef, OpenTurn, Region, Space};
 pub use send::SendCacheReport;
@@ -2491,6 +2493,20 @@ impl Host for InterlokoHost {
                     .apply(*dividend, *divisor)
                     .ok_or(HostError::Failed)?,
             );
+            return Ok(0);
+        }
+        if symbol == INTEGER_POWER {
+            let ([ValueRef::I64(base), ValueRef::I64(exponent)], [power, overflowed]) =
+                (args, rets)
+            else {
+                return Err(HostError::Failed);
+            };
+            if *exponent < 0 {
+                return Err(HostError::Failed);
+            }
+            let result = integer_power(*base, *exponent);
+            *power = Value::I64(result.unwrap_or(0));
+            *overflowed = Value::Bool(result.is_none());
             return Ok(0);
         }
         if let Some(function) = TextFunction::from_symbol(symbol) {

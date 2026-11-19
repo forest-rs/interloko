@@ -3331,12 +3331,17 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "multiplicative-expression",
-            "unary-expression ((`*%` | `*` | `/`) unary-expression)*",
+            "power-expression ((`*%` | `*` | `/`) power-expression)*",
             "syntax.rs:Parser::parse_mul",
         ),
         (
+            "power-expression",
+            "unary-expression (`^` power-expression)?",
+            "base_loko_primary::BaseLokoCstBuilder::build_power",
+        ),
+        (
             "unary-expression",
-            "`-` unary-expression | postfix-expression",
+            "`-` unary-expression | `~` unary-expression | postfix-expression",
             "syntax.rs:Parser::parse_unary",
         ),
         (
@@ -4482,7 +4487,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 88);
+        assert_eq!(grammar.effective_rules.len(), 89);
 
         assert!(
             !records

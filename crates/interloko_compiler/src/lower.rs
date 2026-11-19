@@ -1602,6 +1602,21 @@ pub enum Instr {
         /// Source span.
         span: Span,
     },
+    /// `base ^ exponent` on `<integer>`s, which the runtime host computes
+    /// ([`interloko_runtime::INTEGER_POWER`]) from an exponent that is not
+    /// negative, writing the power and whether it overflowed `i64`.
+    IntegerPower {
+        /// Destination register for the power.
+        dst: Reg,
+        /// Destination `bool` register set when the power overflowed.
+        overflow: Reg,
+        /// Base register, an `i64`.
+        base: Reg,
+        /// Exponent register, an `i64` that is not negative.
+        exponent: Reg,
+        /// Source span.
+        span: Span,
+    },
     /// Call of a text operation the runtime host serves
     /// ([`sem::TextFunction`]), such as `digit?`.
     ///
@@ -7850,6 +7865,9 @@ impl<'module> BodyLowering<'module> {
                     return self.lower_bit_operation(*op, *kind, lhs, rhs.reg, *span);
                 }
                 let not_arithmetic = || invalid_semantic("integer division has no lowering");
+                if *op == sem::BinaryOp::Pow {
+                    return self.lower_power(*kind, lhs, rhs, unchecked, *site, *span);
+                }
                 match kind {
                     sem::NumericKind::Integer => {
                         let op = match op {
@@ -12204,6 +12222,120 @@ impl<'module> BodyLowering<'module> {
         result
     }
 
+    /// Lowers `base ^ exponent` computing in `kind`. A float power is the
+    /// `pow` library function, a `<single-float>` one through binary64
+    /// rounded once back. An `<integer>` power is exact: a negative
+    /// exponent signals `type-error.range` (`limited(<integer>, min: 0)`)
+    /// and a power outside `i64` signals `type-error.overflow`, as `*`
+    /// does; a `use-value` restart supplies the power either way. Where
+    /// typing proved `site`, the exponent is known not to be negative and
+    /// the power to fit, so neither check is emitted.
+    fn lower_power(
+        &mut self,
+        kind: sem::NumericKind,
+        base: Value,
+        exponent: Value,
+        unchecked: Option<sem::SiteId>,
+        site: Option<sem::SiteId>,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let pow = sem::FloatBuiltin::Library(sem::FloatFunction::Pow);
+        match kind {
+            sem::NumericKind::Float => {
+                let result = self.alloc(ValueKind::F64);
+                self.instructions.push(Instr::FloatCall {
+                    dst: result.reg,
+                    function: sem::FloatFunction::Pow,
+                    args: vec![base.reg, exponent.reg],
+                    span,
+                });
+                return Ok(result);
+            }
+            sem::NumericKind::SingleFloat => {
+                return self.lower_single_float_call(pow, &[base, exponent], span);
+            }
+            sem::NumericKind::Integer => {}
+            sem::NumericKind::I32 | sem::NumericKind::U32 => {
+                return Err(invalid_semantic(
+                    "a power of integers computes as <integer>",
+                ));
+            }
+        }
+        let result = self.alloc(ValueKind::I64);
+        let overflow = self.alloc(ValueKind::Bool);
+        let power = Instr::IntegerPower {
+            dst: result.reg,
+            overflow: overflow.reg,
+            base: base.reg,
+            exponent: exponent.reg,
+            span,
+        };
+        if let Some(site) = unchecked {
+            self.record(site, CheckCodegen::Specialized);
+            self.instructions.push(power);
+            return Ok(result);
+        }
+        let zero = self.alloc(ValueKind::I64);
+        let negative = self.alloc(ValueKind::Bool);
+        let [outside, compute, signal, done] = core::array::from_fn(|_| self.alloc_label());
+        let range_error = self.type_error(
+            TypeErrorKind::Range,
+            range_expected(IntRange {
+                min: Some(0),
+                max: None,
+            }),
+            site,
+            span,
+        );
+        let overflow_error = self.overflow_error(ValueKind::I64, site, span);
+        self.instructions.extend([
+            Instr::ConstI64 {
+                dst: zero.reg,
+                value: 0,
+                span,
+            },
+            Instr::I64Compare {
+                dst: negative.reg,
+                op: sem::CompareOp::Lt,
+                lhs: exponent.reg,
+                rhs: zero.reg,
+                span,
+            },
+            Instr::Branch {
+                cond: negative.reg,
+                then_label: outside,
+                else_label: compute,
+                span,
+            },
+            Instr::Label { label: outside },
+            Instr::SignalTypeError {
+                dst: result.reg,
+                values: vec![exponent.reg],
+                type_error: range_error,
+                resume: done,
+                span,
+            },
+            Instr::Label { label: compute },
+            power,
+            Instr::Branch {
+                cond: overflow.reg,
+                then_label: signal,
+                else_label: done,
+                span,
+            },
+            Instr::Label { label: signal },
+            Instr::SignalTypeError {
+                dst: result.reg,
+                values: vec![base.reg, exponent.reg],
+                type_error: overflow_error,
+                resume: done,
+                span,
+            },
+            Instr::Label { label: done },
+        ]);
+        Ok(result)
+    }
+
     /// Lowers fixnum `lhs op rhs`: the overflow-reporting tape instruction,
     /// then [`Self::signal_if`], reporting `operands`.
     fn lower_checked_integer_arith(
@@ -14041,6 +14173,19 @@ impl Module {
             } => {
                 write!(f, "  %{dst} = integer.call {}", function.symbol())?;
                 self.fmt_arg_list(f, args)?;
+                fmt_span(f, *span)
+            }
+            Instr::IntegerPower {
+                dst,
+                overflow,
+                base,
+                exponent,
+                span,
+            } => {
+                write!(
+                    f,
+                    "  %{dst}, %{overflow} = integer.power %{base}, %{exponent}"
+                )?;
                 fmt_span(f, *span)
             }
             Instr::StringStep {

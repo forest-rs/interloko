@@ -95,13 +95,17 @@ rule logical-op = `&` | `|`
 rule assignment-target = postfix-expression
 rule comparison-expression = additive-expression comparison-tail?
 rule comparison-tail = comparison-op additive-expression
-rule comparison-op = `==` | `=` | `<=` | `<` | `>=` | `>`
+rule comparison-op = `==` | `=` | `~==` | `~=` | `<=` | `<` | `>=` | `>`
 rule additive-expression = multiplicative-expression (add-op multiplicative-expression)*
 rule add-op = `+%` | `-%` | `+` | `-`
-rule multiplicative-expression = unary-expression (mul-op unary-expression)*
+rule multiplicative-expression = power-expression (mul-op power-expression)*
 rule mul-op = `*%` | `*` | `/`
-rule unary-expression = negative-expression | postfix-expression
+// `^` associates to the right, and as in Dylan a unary operator binds
+// tighter than any binary one: `-2 ^ 2` is `(-2) ^ 2`.
+rule power-expression = unary-expression (`^` power-expression)?
+rule unary-expression = negative-expression | not-expression | postfix-expression
 rule negative-expression = `-` unary-expression
+rule not-expression = `~` unary-expression
 rule postfix-expression = primary-expression (`.` member-name | index-access)*
 rule member-name = name
 rule index-access = `[` expression `]`

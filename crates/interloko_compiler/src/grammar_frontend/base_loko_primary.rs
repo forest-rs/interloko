@@ -560,8 +560,10 @@ impl BaseLokoCstProjector<'_> {
             "comparison-expression" => self.build_comparison(node),
             "additive-expression" => self.build_additive(node),
             "multiplicative-expression" => self.build_multiplicative(node),
+            "power-expression" => self.build_power(node),
             "unary-expression" => self.unwrap_first_expr(node),
-            "negative-expression" => self.build_unary(node),
+            "negative-expression" => self.build_unary(node, TokenKind::Minus),
+            "not-expression" => self.build_unary(node, TokenKind::Tilde),
             "postfix-expression" => self.build_postfix(node),
             "primary-expression" => self.unwrap_first_expr(node),
             "parenthesized-expression" => node
@@ -1006,7 +1008,7 @@ impl BaseLokoCstProjector<'_> {
         let operands = node
             .children
             .iter()
-            .filter(|child| child.is_rule("unary-expression"))
+            .filter(|child| child.is_rule("power-expression"))
             .collect::<Vec<_>>();
         let Some(first) = operands.first() else {
             return self.error_node(node.span);
@@ -1032,7 +1034,39 @@ impl BaseLokoCstProjector<'_> {
         folded
     }
 
-    fn build_unary(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+    /// Builds `base ^ exponent`, whose exponent is itself a power, so `^`
+    /// associates to the right.
+    fn build_power(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let base = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("unary-expression"))
+            .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
+        let Some(exponent) = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("power-expression"))
+        else {
+            return base;
+        };
+        let exponent = self.build_expr(exponent);
+        let op = self.first_token_index(
+            Span::new(base.span.end, exponent.span.start),
+            TokenKind::Caret,
+        );
+        self.node(
+            CstKind::BinaryExpr,
+            vec![
+                CstElement::Node(base),
+                CstElement::Token(op),
+                CstElement::Node(exponent),
+            ],
+            node.span,
+        )
+    }
+
+    /// Builds a prefix `-` or `~` applied to a unary expression.
+    fn build_unary(&self, node: &InterpretedRuleNode<'_>, operator: TokenKind) -> CstNode {
         let expr = node
             .children
             .iter()
@@ -1041,7 +1075,7 @@ impl BaseLokoCstProjector<'_> {
         self.node(
             CstKind::UnaryExpr,
             vec![
-                CstElement::Token(self.first_token_index(node.span, TokenKind::Minus)),
+                CstElement::Token(self.first_token_index(node.span, operator)),
                 CstElement::Node(expr),
             ],
             node.span,
@@ -1400,8 +1434,10 @@ impl BaseLokoCstProjector<'_> {
                 | "comparison-expression"
                 | "additive-expression"
                 | "multiplicative-expression"
+                | "power-expression"
                 | "unary-expression"
                 | "negative-expression"
+                | "not-expression"
                 | "postfix-expression"
                 | "primary-expression"
                 | "method-expression"
