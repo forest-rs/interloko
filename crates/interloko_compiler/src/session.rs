@@ -18725,12 +18725,46 @@ mod tests {
     }
 
     #[test]
-    fn unboxing_checks_the_boxed_class() {
+    fn a_boxed_conversion_resumes_with_use_value_where_it_fails() {
+        // A boxed `2.5` fails its conversion to `<integer>` in the
+        // conversion's own branch, and a boxed string the cast every other
+        // value takes; `use-value` continues each with a replacement.
+        let artifacts = CompilerSession::compile_source(
+            "convert.loko",
+            "define function whole(x :: <object>) => <integer>\n  as(<integer>, x)\nend;\n\
+             define function real(x :: <object>) => <double-float>\n  as(<double-float>, x)\nend;\n\
+             define function main() => <integer>\n  \
+             whole(2.5) + as(<integer>, real(\"text\"))\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut codes = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                let report = condition.type_error().expect("a type error");
+                let replacement = if report.code == "type-error.range" {
+                    Value::I64(40)
+                } else {
+                    Value::F64(2.0)
+                };
+                codes.push(report.code);
+                Choice::UseValue(vec![replacement])
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+            assert_eq!(value, FunctionValue::Integer(42), "{policy:?}");
+            assert_eq!(codes, ["type-error.range", "type-error.cast"], "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn as_converts_a_boxed_number_and_checks_anything_else() {
         let artifacts = CompilerSession::compile_source(
             "unbox.loko",
             "define function as-float(x :: <object>) => <double-float>\n  as(<double-float>, x)\nend;\n\
              define function from-integer() => <double-float>\n  as-float(as(<object>, 7))\nend;\n\
-             define function from-float() => <double-float>\n  as-float(as(<object>, 7.5))\nend;",
+             define function from-float() => <double-float>\n  as-float(as(<object>, 7.5))\nend;\n\
+             define function from-text() => <double-float>\n  as-float(as(<object>, \"7\"))\nend;",
             RuntimeMode::CompileOnly,
         );
         assert_eq!(artifacts.diagnostics, Vec::new());
@@ -18738,16 +18772,20 @@ mod tests {
             run_scalar(&artifacts, "from-float").ok(),
             Some(FunctionValue::Float(7.5))
         );
+        assert_eq!(
+            run_scalar(&artifacts, "from-integer").ok(),
+            Some(FunctionValue::Float(7.0))
+        );
         let Err(FunctionCallError::UnhandledCondition {
             type_error: Some(report),
             ..
-        }) = run_scalar(&artifacts, "from-integer")
+        }) = run_scalar(&artifacts, "from-text")
         else {
-            panic!("unboxing an integer as a float signals a type error");
+            panic!("casting text to a float signals a type error");
         };
         assert_eq!(report.code, "type-error.cast");
         assert_eq!(report.expected, "<double-float>");
-        assert_eq!(report.value, "7");
+        assert_eq!(report.value, "\"7\"");
         assert!(report.site.starts_with("typing:def"), "{}", report.site);
     }
 

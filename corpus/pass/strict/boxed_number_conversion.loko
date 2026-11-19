@@ -1,0 +1,17 @@
+// typing: strict
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump typing contains origin=conversion
+
+// The class tests an `as` of a boxed number makes are part of the `as`:
+// strict code need not prove them, and none is reported, whichever way
+// typing decides it.
+
+define function to-integer(x :: <object>) => <integer>
+  as(<integer>, x)
+end;
+
+define function main() => <integer>
+  let known :: <object> = 2.0;
+  to-integer(1) + as(<integer>, known)
+end;

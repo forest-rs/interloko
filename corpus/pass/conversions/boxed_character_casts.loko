@@ -1,0 +1,15 @@
+// expect: runtime code type-error.cast
+// expect: run reports 'a' is not of type <integer>
+// expect: diagnostics 0
+
+// A boxed value converts by its class only between numbers. `as` between
+// `<character>` and `<integer>` converts when the classes are known, but a
+// character held as an `<object>` is cast, which fails.
+
+define function to-integer(x :: <object>) => <integer>
+  as(<integer>, x)
+end;
+
+define function main() => <integer>
+  to-integer('a')
+end;

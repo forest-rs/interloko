@@ -1769,7 +1769,7 @@ fn claims_report_what_typing_established_and_why_checks_stay() {
     assert!(
         stdout.contains(
             "  strict (declared): every check the compiler inserts is proved (send dispatch, implicit casts, range checks); \
-             explicit as(...) casts, instance? tests, indirect-entry guards and integer overflow (strict.overflow=runtime) stay runtime checks; \
+             explicit as(...) casts and conversions, instance? tests, indirect-entry guards and integer overflow (strict.overflow=runtime) stay runtime checks; \
              unmet=2 exempt-runtime=1\n"
         ),
         "{stdout}"

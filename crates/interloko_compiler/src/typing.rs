@@ -306,6 +306,11 @@ pub enum CheckOrigin {
     /// An `instance?` test, of a class or a limited integer type, which
     /// answers a question rather than failing.
     Test,
+    /// The class test an `as(...)` of a boxed `<object>` to a number type
+    /// makes to pick the conversion the value's class takes, as Dylan's
+    /// `as` converts by class. Like a test it never fails, and whichever
+    /// way typing decides it, it only selects code.
+    Conversion,
     /// The check a function, closure, or exit procedure reached through a
     /// callable value makes on what it is passed ([`sem::EntryCheck`]): it
     /// guards the body against callers typing cannot see.
@@ -314,7 +319,13 @@ pub enum CheckOrigin {
 
 impl CheckOrigin {
     /// Every origin in canonical order.
-    pub const ALL: &'static [Self] = &[Self::Implicit, Self::Explicit, Self::Test, Self::Entry];
+    pub const ALL: &'static [Self] = &[
+        Self::Implicit,
+        Self::Explicit,
+        Self::Test,
+        Self::Conversion,
+        Self::Entry,
+    ];
 
     /// Returns the stable label used in dumps and EOP records.
     #[must_use]
@@ -323,6 +334,7 @@ impl CheckOrigin {
             Self::Implicit => "implicit",
             Self::Explicit => "explicit",
             Self::Test => "test",
+            Self::Conversion => "conversion",
             Self::Entry => "entry",
         }
     }
@@ -1371,7 +1383,11 @@ impl TypingArtifact {
     /// ([`Self::strict_violation`]), and otherwise its check's policy.
     #[must_use]
     pub fn severity(&self, decision: &TypingDecision) -> TypingSeverity {
-        if matches!(decision.rule, TypingRule::Unreachable) {
+        // An `as` picking a boxed number's conversion asks no question of
+        // the program's, so how typing decides it is never news.
+        if matches!(decision.rule, TypingRule::Unreachable)
+            || decision.origin == CheckOrigin::Conversion
+        {
             return TypingSeverity::Silent;
         }
         if self.strict_violation(decision).is_some() {
@@ -1867,7 +1883,9 @@ fn decision_diagnostic(
     typed: &DefinitionTyping,
     decision: &TypingDecision,
 ) -> Option<Diagnostic> {
-    if matches!(decision.rule, TypingRule::Unreachable) {
+    if matches!(decision.rule, TypingRule::Unreachable)
+        || decision.origin == CheckOrigin::Conversion
+    {
         return None;
     }
     let severity = config

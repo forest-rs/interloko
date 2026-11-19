@@ -1,0 +1,25 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// The north-star calculator's `sqrt` builtin: its arguments arrive in a
+// `<stretchy-vector>` as `<object>`s, and `as(<double-float>, xs[0])`
+// converts the boxed `<integer>` there.
+
+define constant $builtins :: <table> = begin
+  let t = make(<table>);
+  t["sqrt"] := function (xs :: <stretchy-vector>) => <integer>
+                 as(<integer>, floor(sqrt(as(<double-float>, xs[0]))))
+               end;
+  t
+end;
+
+define function call(name :: <string>, arg :: <integer>) => <integer>
+  let f :: <function> = $builtins[name];
+  let args = make(<stretchy-vector>);
+  add!(args, arg);
+  f(args)
+end;
+
+define function main() => <integer>
+  call("sqrt", 42 * 42)
+end;

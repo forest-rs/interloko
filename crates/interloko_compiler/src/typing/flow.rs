@@ -1200,6 +1200,7 @@ impl<'a> Analysis<'a> {
                 value,
                 class,
                 site,
+                conversion,
                 span,
             } => {
                 let value = self.eval(env, value);
@@ -1208,9 +1209,16 @@ impl<'a> Analysis<'a> {
                 let (decided, sealed) =
                     decide_sealed(module, env, &value.ty, &target, INSTANCE_RULES);
                 assumes.extend(self.sealed_assumptions(&sealed));
+                // The class test an `as` makes to pick a boxed number's
+                // conversion is part of that `as`.
+                let origin = if *conversion {
+                    CheckOrigin::Conversion
+                } else {
+                    CheckOrigin::Test
+                };
                 self.record(
                     *site,
-                    (TypingCheck::Instance, CheckOrigin::Test),
+                    (TypingCheck::Instance, origin),
                     decided,
                     *span,
                     TypingExpectation::Class(*class),
@@ -1822,6 +1830,7 @@ impl<'a> Analysis<'a> {
                 class,
                 site,
                 span,
+                ..
             } => {
                 if let Some(var) = var_of(value) {
                     let target = Type::of(Atom::Cone(*class), module);

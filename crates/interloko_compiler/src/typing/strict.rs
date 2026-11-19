@@ -122,7 +122,9 @@ impl StrictPolicy {
         match decision.verdict {
             TypingVerdict::Checked if self.requires(decision) => Some(StrictViolation::Unproved),
             // A test that is always false is dead code, not a failure.
-            TypingVerdict::Refuted if !matches!(decision.origin, CheckOrigin::Test) => {
+            TypingVerdict::Refuted
+                if !matches!(decision.origin, CheckOrigin::Test | CheckOrigin::Conversion) =>
+            {
                 Some(StrictViolation::Refuted)
             }
             _ => None,

@@ -435,3 +435,49 @@ fn a_join_that_only_adds_citations_keeps_the_cause_it_explains() {
         pick.render()
     );
 }
+
+#[test]
+fn a_boxed_number_conversion_is_reported_as_the_conversion_it_is() {
+    // The class tests an `as` of a boxed number makes to pick its
+    // conversion are the `as`'s own, reported as such, not as `instance?`
+    // questions the program asked.
+    let artifacts = compile(
+        "define function to-double(x :: <object>) => <double-float>\n  \
+         as(<double-float>, x)\nend;\n\
+         define function main() => <integer>\n  as(<integer>, to-double(3))\nend;",
+    );
+    assert_eq!(artifacts.diagnostics, Vec::new());
+    let convert = report(&artifacts, "to-double", ClaimDetail::Summary);
+    assert_eq!(
+        cause(&convert, TypingCheck::Instance),
+        ResidualCause::Requested(CheckOrigin::Conversion)
+    );
+    assert!(
+        convert
+            .render()
+            .contains("as(...) converts a boxed number by its class, tested at run time"),
+        "{}",
+        convert.render()
+    );
+    assert_eq!(
+        cause(&convert, TypingCheck::Cast),
+        ResidualCause::Requested(CheckOrigin::Explicit)
+    );
+
+    // When typing knows the class, the `as` is resolved: its tests pick the
+    // conversion, whichever way they are decided, and none is left to run.
+    let artifacts = compile(
+        "define function known() => <integer>\n  \
+         let held :: <object> = 2.0;\n  as(<integer>, held)\nend;\n\
+         define function main() => <integer>\n  known()\nend;",
+    );
+    assert_eq!(artifacts.diagnostics, Vec::new());
+    let known = report(&artifacts, "known", ClaimDetail::Summary);
+    assert!(
+        known
+            .residual_sites()
+            .all(|site| site.origin != CheckOrigin::Conversion),
+        "{}",
+        known.render()
+    );
+}

@@ -1,0 +1,13 @@
+// expect: runtime code type-error.range
+// expect: run reports 2.5 is not of type <integer>
+// expect: diagnostics 0
+
+// A boxed float converts to an `<integer>` only when it is one exactly.
+
+define function to-integer(x :: <object>) => <integer>
+  as(<integer>, x)
+end;
+
+define function main() => <integer>
+  to-integer(2.5)
+end;

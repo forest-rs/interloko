@@ -480,7 +480,8 @@ to what it reports and to what could fix it:
 - A typing finding's `diagnostic:d<n>` object names its decision
   (`decision=typing:def…:s<n>` in its inspection, `TypingFacet::Finding`
   typed) and offers `show-typing`, which explains that decision. The
-  decision object's inspection ends `origin=<implicit|explicit|test|entry>
+  decision object's inspection ends
+  `origin=<implicit|explicit|test|conversion|entry>
   strict=<unproved|refuted|none>`, and its `show-typing` says whether the
   check must be proved and lists the fixes.
 - A strict error lists its fixes, in order, as `fix<n>="..."` in the
@@ -584,7 +585,7 @@ cargo run -p interloko_lab -- invoke-affordance tools/interloko_lab/fixtures/str
 claims claims:def… function twice
   revision=none basis=e6fd5d1656dff75b typing=checked codegen=proved detail=summary
   contract contract:def…: params=(n: <integer>) results=(<integer>) relied-on-by=0
-  strict (declared): every check the compiler inserts is proved (send dispatch, implicit casts, range checks); explicit as(...) casts, instance? tests, indirect-entry guards and integer overflow (strict.overflow=runtime) stay runtime checks; unmet=2 exempt-runtime=1
+  strict (declared): every check the compiler inserts is proved (send dispatch, implicit casts, range checks); explicit as(...) casts and conversions, instance? tests, indirect-entry guards and integer overflow (strict.overflow=runtime) stay runtime checks; unmet=2 exempt-runtime=1
   established: sites=3 proved=0 checked=3 refuted=0 unreachable=0
   generated code: relies-on-proof=0 (elided=0 specialized=0 inlined=0 linked=0) proved-but-kept=0 runtime-checks=3 errors=2
   supported-by:
@@ -632,7 +633,7 @@ types genuinely leave open, from lost precision:
 
 | cause | meaning |
 |-------|---------|
-| `requested(explicit)`, `requested(test)`, `requested(entry)` | an `as(...)`, an `instance?` test, or an indirect entry's guard: the program's own check |
+| `requested(explicit)`, `requested(test)`, `requested(conversion)`, `requested(entry)` | an `as(...)`, an `instance?` test, the class test an `as(...)` of a boxed number makes to pick its conversion, or an indirect entry's guard: the program's own check |
 | `always-fails` | the check fails whenever it is reached |
 | `declared` | the written types admit values the check rejects |
 | `unannotated-input` | an operand comes from a parameter or a callee's result with no written type; `input` names the annotation target |

@@ -4367,6 +4367,10 @@ pub enum Expr {
         class: ClassId,
         /// Instance test site.
         site: SiteId,
+        /// Whether an `as` makes the test, to pick the conversion a boxed
+        /// number takes by its class, rather than source asking with
+        /// `instance?`. Typing reports it as part of the `as`.
+        conversion: bool,
         /// Source span.
         span: Span,
     },
@@ -5331,6 +5335,21 @@ fn default_inlines(value: &Expr) -> bool {
         | Expr::Compare { lhs, rhs, .. } => default_inlines(lhs) && default_inlines(rhs),
         _ => false,
     }
+}
+
+/// The hidden local `as` binds a boxed value to while it tests the value's
+/// number class. Its name has a space, so source cannot name it.
+const AS_VALUE_LOCAL: &str = "as value";
+
+/// The type an `as` converts or casts its value to.
+#[derive(Copy, Clone, Debug)]
+enum AsTarget {
+    /// A class, as `as(<double-float>, x)` names.
+    Class(ClassId),
+    /// `<i32>` or `<u32>`.
+    Limited(LimitedInteger),
+    /// `limited(<integer>, ...)`, or every `<integer>` for `None`.
+    Range(Option<IntRange>),
 }
 
 /// The hidden local a `select` binds its target to when the target is not
@@ -13746,6 +13765,7 @@ impl Lowering {
             site: SiteId::PENDING,
             value: Box::new(value),
             class: class_id,
+            conversion: false,
             span,
         }
     }
@@ -13765,12 +13785,12 @@ impl Lowering {
                 if resolved.kind != ValueKind::I64 {
                     return Expr::Error { span };
                 }
-                return self.cast_to_range(ctx, value, resolved.range, span);
+                return self.cast_boxed(ctx, value, AsTarget::Range(resolved.range), span);
             }
         };
         if let Some(limited) = LimitedInteger::from_name(class_name) {
             let value = self.lower_expr(ctx, value);
-            return self.cast_to_limited(ctx, value, limited, span);
+            return self.cast_boxed(ctx, value, AsTarget::Limited(limited), span);
         }
         let Some(class) = self.resolve_class(class_name) else {
             ctx.diagnostics.push(
@@ -13781,7 +13801,120 @@ impl Lowering {
         };
         let class_id = class.id;
         let value = self.lower_expr(ctx, value);
-        self.cast_to_class(ctx, value, class_id, span)
+        self.cast_boxed(ctx, value, AsTarget::Class(class_id), span)
+    }
+
+    /// Lowers `as(target, value)`. A number's conversion depends on its
+    /// class, as Dylan's `as` does, so when `value` is a boxed `<object>`
+    /// and `target` is a number type, `as` tests the value's class at run
+    /// time and converts it from there by the rules it applies when the
+    /// class is known: an `<integer>`, a `<double-float>` and a
+    /// `<single-float>` each convert, and any other value is cast, which
+    /// signals `type-error.cast`. The tests are ordinary `instance?` tests
+    /// on a hidden local, so typing decides the ones it can, and lowering
+    /// keeps only the conversion that can run.
+    fn cast_boxed(
+        &mut self,
+        ctx: &mut FunctionContext,
+        value: Expr,
+        target: AsTarget,
+        span: Span,
+    ) -> Expr {
+        let numeric_target = match target {
+            AsTarget::Class(class) => self
+                .kind_for_builtin_class(class)
+                .and_then(NumericKind::of)
+                .is_some(),
+            AsTarget::Limited(_) | AsTarget::Range(_) => true,
+        };
+        if !numeric_target || self.expr_kind(&value) != ValueKind::Any {
+            return self.cast_to(ctx, value, target, span);
+        }
+        let scope = ctx.scope_start();
+        let local = ctx.add_local(
+            DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Local,
+                AS_VALUE_LOCAL,
+                &format!("as:{}:{}", span.start, span.end),
+            ),
+            AS_VALUE_LOCAL.into(),
+            ValueKind::Any,
+            None,
+            span,
+        );
+        ctx.hide_locals_from(scope);
+        let boxed = Expr::Local {
+            local,
+            result_kind: ValueKind::Any,
+            callable_signature: None,
+            span,
+        };
+        // Anything but a number is cast, and fails unless it is one.
+        let mut chain = self.cast_to(ctx, boxed.clone(), target, span);
+        for kind in [
+            BuiltinValueClass::SingleFloat,
+            BuiltinValueClass::DoubleFloat,
+            BuiltinValueClass::Integer,
+        ] {
+            let Some(class) = self.builtin_value_class(kind) else {
+                continue;
+            };
+            let condition = Expr::InstanceOf {
+                site: SiteId::PENDING,
+                value: Box::new(boxed.clone()),
+                class,
+                conversion: true,
+                span,
+            };
+            let Some(refinement) = self.true_branch_refinement(&condition) else {
+                continue;
+            };
+            let number = Expr::Local {
+                local,
+                result_kind: refinement.kind,
+                callable_signature: None,
+                span,
+            };
+            let converted = self.cast_to(ctx, number, target, span);
+            chain = Expr::If {
+                condition: Box::new(condition),
+                refinement: Some(refinement),
+                then_branch: Box::new(converted),
+                else_branch: Box::new(chain),
+                span,
+            };
+        }
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements: vec![Statement::Let(Let {
+                    local,
+                    locals: vec![local],
+                    value,
+                    span,
+                })],
+                result: chain,
+                span,
+            }),
+            cleanup: None,
+            span,
+        }
+    }
+
+    /// Lowers `as(target, value)` by `value`'s static kind.
+    fn cast_to(
+        &mut self,
+        ctx: &mut FunctionContext,
+        value: Expr,
+        target: AsTarget,
+        span: Span,
+    ) -> Expr {
+        match target {
+            AsTarget::Class(class) => self.cast_to_class(ctx, value, class, span),
+            AsTarget::Limited(limited) => self.cast_to_limited(ctx, value, limited, span),
+            AsTarget::Range(range) => self.cast_to_range(ctx, value, range, span),
+        }
     }
 
     /// Lowers `as(<i32>, x)` or `as(<u32>, x)`: a checked conversion from
