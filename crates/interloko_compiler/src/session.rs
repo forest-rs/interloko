@@ -44,10 +44,6 @@ use crate::{ast, lower, sem, tape, typing};
 /// values, host and final outcomes, instruction outcomes and replay.
 pub use execution_tape::recording;
 use interloko_model::contract::Contract;
-/// What an unhandled `<no-applicable-method>` reports, in
-/// [`RuntimeResult::UnhandledCondition`] and
-/// [`FunctionCallError::UnhandledCondition`].
-pub use interloko_runtime::NoApplicableMethodReport;
 /// What an unhandled `<type-error>` reports, in
 /// [`RuntimeResult::UnhandledCondition`] and
 /// [`FunctionCallError::UnhandledCondition`].
@@ -59,6 +55,10 @@ use interloko_runtime::driver::{self, Installed, RunFailure, RuntimeHost};
 use interloko_runtime::{
     self as runtime, HostObjectKind, InterlokoHost, RuntimeLayout, RuntimeLayoutError,
 };
+/// What an unhandled `<no-applicable-method>` reports, in
+/// [`RuntimeResult::UnhandledCondition`] and
+/// [`FunctionCallError::UnhandledCondition`].
+pub use interloko_runtime::{ConstantCycleReport, NoApplicableMethodReport};
 /// Runtime heap accounting reported by [`FunctionCallOutcome::turn`].
 pub use interloko_runtime::{HeapStats, TurnStats};
 
@@ -181,6 +181,9 @@ pub enum RuntimeResult {
         /// What the condition reports when a send that found no applicable
         /// method signalled it. Its code is the outcome's code.
         no_applicable_method: Option<alloc::boxed::Box<NoApplicableMethodReport>>,
+        /// What the condition reports when it is a `<constant-cycle-error>`.
+        /// Its code is the outcome's code.
+        constant_cycle: Option<alloc::boxed::Box<ConstantCycleReport>>,
     },
     /// A block exit procedure was called after its block had returned.
     ExpiredExit,
@@ -210,17 +213,25 @@ impl RuntimeResult {
             Self::UnhandledCondition {
                 type_error,
                 no_applicable_method,
+                constant_cycle,
                 ..
             } => Some(
                 match (
                     type_error.as_ref().and_then(|report| report.kind()),
                     no_applicable_method,
+                    constant_cycle,
                 ) {
-                    (Some(kind), _) => DiagnosticCode::from(kind),
-                    (None, Some(report))
+                    (Some(kind), _, _) => DiagnosticCode::from(kind),
+                    (None, Some(report), _)
                         if report.code == DiagnosticCode::DispatchNoApplicableMethod.as_str() =>
                     {
                         DiagnosticCode::DispatchNoApplicableMethod
+                    }
+                    (None, _, Some(report))
+                        if report.code
+                            == DiagnosticCode::ConstantReadDuringInitialization.as_str() =>
+                    {
+                        DiagnosticCode::ConstantReadDuringInitialization
                     }
                     _ => DiagnosticCode::RuntimeUnhandledCondition,
                 },
@@ -261,9 +272,10 @@ impl fmt::Display for RuntimeResult {
                 class,
                 type_error,
                 no_applicable_method,
+                constant_cycle,
             } => {
                 write!(formatter, "unhandled condition {class}")?;
-                write_condition_report(formatter, type_error, no_applicable_method)
+                write_condition_report(formatter, type_error, no_applicable_method, constant_cycle)
             }
             Self::ExpiredExit => formatter.write_str("block exit called after its block returned"),
             Self::Aborted => formatter.write_str("aborted by the condition chooser"),
@@ -273,16 +285,19 @@ impl fmt::Display for RuntimeResult {
 }
 
 /// Writes `: <report>` after an unhandled condition's class when the
-/// runtime signalled it for a failed check or send.
+/// runtime signalled it for a failed check or send, or it reports a
+/// constant read during its own initialization.
 fn write_condition_report(
     formatter: &mut fmt::Formatter<'_>,
     type_error: &Option<alloc::boxed::Box<TypeErrorReport>>,
     no_applicable_method: &Option<alloc::boxed::Box<NoApplicableMethodReport>>,
+    constant_cycle: &Option<alloc::boxed::Box<ConstantCycleReport>>,
 ) -> fmt::Result {
-    match (type_error, no_applicable_method) {
-        (Some(report), _) => write!(formatter, ": {report}"),
-        (None, Some(report)) => write!(formatter, ": {report}"),
-        (None, None) => Ok(()),
+    match (type_error, no_applicable_method, constant_cycle) {
+        (Some(report), _, _) => write!(formatter, ": {report}"),
+        (None, Some(report), _) => write!(formatter, ": {report}"),
+        (None, None, Some(report)) => write!(formatter, ": {report}"),
+        (None, None, None) => Ok(()),
     }
 }
 
@@ -686,6 +701,8 @@ pub enum FunctionCallError {
         /// What the condition reports when a send that found no applicable
         /// method signalled it.
         no_applicable_method: Option<alloc::boxed::Box<NoApplicableMethodReport>>,
+        /// What the condition reports when it is a `<constant-cycle-error>`.
+        constant_cycle: Option<alloc::boxed::Box<ConstantCycleReport>>,
         /// Partial trace captured up to the signal, when requested.
         trace: Option<ExecutionTrace>,
     },
@@ -775,10 +792,11 @@ impl fmt::Display for FunctionCallError {
                 class,
                 type_error,
                 no_applicable_method,
+                constant_cycle,
                 ..
             } => {
                 write!(formatter, "unhandled condition {class}")?;
-                write_condition_report(formatter, type_error, no_applicable_method)
+                write_condition_report(formatter, type_error, no_applicable_method, constant_cycle)
             }
             Self::ExpiredExit { .. } => {
                 formatter.write_str("block exit called after its block returned")
@@ -6808,12 +6826,14 @@ fn runtime_result_for_main_error(
             class,
             type_error,
             no_applicable_method,
+            constant_cycle,
             trace,
         } => (
             RuntimeResult::UnhandledCondition {
                 class,
                 type_error,
                 no_applicable_method,
+                constant_cycle,
             },
             trace,
         ),
@@ -7072,6 +7092,11 @@ fn run_turn_body<'a>(
                         .then(|| host.no_applicable_method_report(condition))
                         .flatten()
                         .map(alloc::boxed::Box::new),
+                    // Compiled code signals it, as a program signals its
+                    // own conditions, so it is read whoever signalled it.
+                    constant_cycle: host
+                        .constant_cycle_report(condition)
+                        .map(alloc::boxed::Box::new),
                     trace,
                 },
                 RunFailure::Control {
@@ -7234,6 +7259,13 @@ impl<'a> SharedFunctionCallHost<'a> {
             .borrow()
             .runtime
             .no_applicable_method_report(condition)
+    }
+
+    fn constant_cycle_report(
+        &self,
+        condition: execution_tape::value::Obj,
+    ) -> Option<ConstantCycleReport> {
+        self.0.borrow().runtime.constant_cycle_report(condition)
     }
 }
 
@@ -10784,6 +10816,7 @@ fn lowered_function_kind_label(kind: lower::FunctionKind) -> String {
         lower::FunctionKind::ExitThunk { signature } => format!("exit-thunk sig{}", signature.0),
         lower::FunctionKind::BoxedEntry { typed } => format!("boxed-entry l{}", typed.0),
         lower::FunctionKind::CallableParts => String::from("callable-parts"),
+        lower::FunctionKind::ConstantInitializer(id) => format!("constant-initializer:k{}", id.0),
         lower::FunctionKind::Adapter { signature } => format!("adapter sig{}", signature.0),
     }
 }
@@ -25526,6 +25559,26 @@ end;
             )
         );
         assert_eq!(seen.value, None, "the refused retry is an invalid choice");
+    }
+
+    #[test]
+    fn installed_code_initializes_its_own_constants() {
+        // `bump` reads `$box` under the old code, which initializes it and
+        // counts once. The retried `bump` is the new code's, which reads
+        // a `$box` of its own, initialized afresh: so 10, not 11.
+        let old = "define class <box> (<object>)\n  slot n :: <integer>, init-value: 0;\nend;\n\
+                   define class <oops> (<error>)\nend;\n\
+                   define constant $box = make(<box>);\n\
+                   define function bump() => <integer>\n  \
+                   $box.n := $box.n + 1;\n  signal(make(<oops>));\n  $box.n\nend;\n\
+                   define function main() => <integer>\n  bump()\nend;";
+        let new = old.replace(
+            "$box.n := $box.n + 1;\n  signal(make(<oops>));\n  $box.n",
+            "$box.n := $box.n + 10;\n  $box.n",
+        );
+        let seen = run_across_an_edit(old, &new, Then::Retry("bump"));
+        assert_eq!((seen.refused, seen.retry_refused), (None, None));
+        assert_eq!(seen.value, Some(FunctionValue::Integer(10)));
     }
 
     #[test]

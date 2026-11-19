@@ -1,0 +1,28 @@
+// expect: run 41
+// expect: diagnostics 0
+
+// An initializer that does not return, here because a handler unwinds
+// past it, leaves its constant unset: the next read runs it again.
+
+define class <counter> (<object>)
+  slot n :: <integer>, init-value: 0;
+end;
+
+define class <oops> (<error>)
+end;
+
+define constant $tries = make(<counter>);
+
+define constant $x :: <integer> = begin
+  $tries.n := $tries.n + 1;
+  if ($tries.n < 2) signal(make(<oops>)) end;
+  $tries.n * 10
+end;
+
+define function main() => <integer>
+  let first = handle $x with restart e :: <oops> -1 end;
+  let second = $x;
+  let third = $x;
+  // -1, then 20 twice from the second initialization, and 2 tries.
+  first + second + third + $tries.n
+end;

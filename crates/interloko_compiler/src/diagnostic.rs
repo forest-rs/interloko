@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::syntax::Span;
-use interloko_model::condition::{NO_APPLICABLE_METHOD_CODE, TypeErrorKind};
+use interloko_model::condition::{CONSTANT_CYCLE_CODE, NO_APPLICABLE_METHOD_CODE, TypeErrorKind};
 
 /// Diagnostic severity.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -255,6 +255,8 @@ pub enum DiagnosticCode {
     SlotDefaultTypeMismatch,
     /// A slot's `init-value` binds locals, which slot defaults cannot hold yet.
     SlotDefaultBindsLocals,
+    /// A constant's initializer reads the constant itself.
+    ConstantInitializerCycle,
     /// A required init keyword is missing.
     MissingRequiredInitKeyword,
     /// A non-defaulted slot is missing an initializer.
@@ -352,6 +354,10 @@ pub enum DiagnosticCode {
     /// unhandled `<no-applicable-method>` the runtime signalled ends the run
     /// with this code, [`NO_APPLICABLE_METHOD_CODE`].
     DispatchNoApplicableMethod,
+    /// A constant was read while its own initializer was running. An
+    /// unhandled `<constant-cycle-error>` ends the run with this code,
+    /// [`CONSTANT_CYCLE_CODE`].
+    ConstantReadDuringInitialization,
     /// A session source file id is unknown.
     SessionUnknownSource,
 }
@@ -459,6 +465,7 @@ impl DiagnosticCode {
         Self::ForClauseTypeMismatch,
         Self::SlotDefaultTypeMismatch,
         Self::SlotDefaultBindsLocals,
+        Self::ConstantInitializerCycle,
         Self::MissingRequiredInitKeyword,
         Self::MissingSlotInitializer,
         Self::UnknownSlot,
@@ -501,6 +508,7 @@ impl DiagnosticCode {
         Self::TypeErrorRange,
         Self::TypeErrorOverflow,
         Self::DispatchNoApplicableMethod,
+        Self::ConstantReadDuringInitialization,
         Self::SessionUnknownSource,
     ];
 
@@ -610,6 +618,7 @@ impl DiagnosticCode {
             Self::ForClauseTypeMismatch => "sem.for-clause-type-mismatch",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
             Self::SlotDefaultBindsLocals => "sem.slot-default-binds-locals",
+            Self::ConstantInitializerCycle => "sem.constant-initializer-cycle",
             Self::MissingRequiredInitKeyword => "sem.missing-required-init-keyword",
             Self::MissingSlotInitializer => "sem.missing-slot-initializer",
             Self::UnknownSlot => "sem.unknown-slot",
@@ -652,6 +661,7 @@ impl DiagnosticCode {
             Self::TypeErrorRange => TypeErrorKind::Range.code(),
             Self::TypeErrorOverflow => TypeErrorKind::Overflow.code(),
             Self::DispatchNoApplicableMethod => NO_APPLICABLE_METHOD_CODE,
+            Self::ConstantReadDuringInitialization => CONSTANT_CYCLE_CODE,
             Self::SessionUnknownSource => "session.unknown-source",
         }
     }
@@ -762,6 +772,7 @@ impl DiagnosticCode {
             "sem.for-clause-type-mismatch" => Self::ForClauseTypeMismatch,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,
             "sem.slot-default-binds-locals" => Self::SlotDefaultBindsLocals,
+            "sem.constant-initializer-cycle" => Self::ConstantInitializerCycle,
             "sem.missing-required-init-keyword" => Self::MissingRequiredInitKeyword,
             "sem.missing-slot-initializer" => Self::MissingSlotInitializer,
             "sem.unknown-slot" => Self::UnknownSlot,
@@ -804,6 +815,7 @@ impl DiagnosticCode {
             "type-error.range" => Self::TypeErrorRange,
             "type-error.overflow" => Self::TypeErrorOverflow,
             "dispatch.no-applicable-method" => Self::DispatchNoApplicableMethod,
+            "constant.read-during-initialization" => Self::ConstantReadDuringInitialization,
             "session.unknown-source" => Self::SessionUnknownSource,
             _ => return None,
         })
@@ -1148,6 +1160,7 @@ mod tests {
             class: "<type-error>".into(),
             type_error,
             no_applicable_method: None,
+            constant_cycle: None,
         };
         assert_eq!(
             unhandled(None).code(),
@@ -1179,6 +1192,7 @@ mod tests {
                     argument_classes: alloc::vec!["<square>".into()],
                 },
             )),
+            constant_cycle: None,
         };
         assert_eq!(
             failed_send.code(),
@@ -1188,6 +1202,27 @@ mod tests {
             alloc::string::ToString::to_string(&failed_send),
             "unhandled condition <no-applicable-method>: dispatch.no-applicable-method: \
              no method of area applies to (<square>), called with ({<square>})"
+        );
+        let cycle = crate::session::RuntimeResult::UnhandledCondition {
+            class: "<constant-cycle-error>".into(),
+            type_error: None,
+            no_applicable_method: None,
+            constant_cycle: Some(alloc::boxed::Box::new(
+                crate::session::ConstantCycleReport {
+                    code: "constant.read-during-initialization".into(),
+                    constant: "$x".into(),
+                    reader: "twice".into(),
+                },
+            )),
+        };
+        assert_eq!(
+            cycle.code(),
+            Some(DiagnosticCode::ConstantReadDuringInitialization)
+        );
+        assert_eq!(
+            alloc::string::ToString::to_string(&cycle),
+            "unhandled condition <constant-cycle-error>: constant.read-during-initialization: \
+             `$x` was read while its own initializer was running (via `twice`)"
         );
         assert_eq!(
             trap(execution_tape::vm::Trap::TrapCode(99)).code(),

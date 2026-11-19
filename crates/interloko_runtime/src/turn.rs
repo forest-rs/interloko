@@ -53,6 +53,9 @@ impl InterlokoHost {
             return Err(RuntimeError::TurnAlreadyOpen);
         }
         debug_assert!(self.nursery.objects.is_empty() && self.nursery.values.is_empty());
+        // A turn initializes its constants afresh: values kept from before
+        // may name nursery objects or callables of an earlier turn.
+        self.constants.clear();
         self.turn = Some(OpenTurn {
             image: self.image.mark(),
             symbols: self.symbols.len(),
@@ -101,6 +104,7 @@ impl InterlokoHost {
         };
         let mut stats = self.turn_stats_for(&turn, &[results, keep].concat());
         let ended = self.nursery.mark();
+        self.constants.clear();
         match self.evacuate(&turn, keep) {
             Ok(evacuation) => {
                 self.nursery_serials.advance(ended);
@@ -133,6 +137,7 @@ impl InterlokoHost {
             return Err(RuntimeError::NoOpenTurn);
         };
         let mut stats = self.turn_stats_for(&turn, &[]);
+        self.constants.clear();
         for store in turn.write_log.into_iter().rev() {
             let Some(storage) = self
                 .image

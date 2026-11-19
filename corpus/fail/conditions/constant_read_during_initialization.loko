@@ -1,0 +1,17 @@
+// expect: runtime code constant.read-during-initialization
+// expect: run reports `$x` was read while its own initializer was running (via `twice`)
+// expect: diagnostics 0
+
+// An initializer that reads its own constant through a function, which the
+// compiler does not follow, signals a `<constant-cycle-error>` naming the
+// constant and the definition that read it.
+
+define function twice() => <integer>
+  $x * 2
+end;
+
+define constant $x :: <integer> = twice();
+
+define function main() => <integer>
+  $x
+end;

@@ -1,0 +1,19 @@
+// expect: run 47
+// expect: diagnostics 0
+// expect: dump lowered lacks constant.claim
+
+// A constant whose value is a number, a boolean, a symbol, a metaobject,
+// or float arithmetic over them, folds: each read computes it in place,
+// as cheaply as a literal, with no cell to consult. (Integer arithmetic,
+// which can overflow, is checked once, in an initializer.)
+
+define constant $base = 40;
+define constant $half = 0.5;
+define constant $more = $half * 4.0;
+define constant $on? = #t;
+define constant $tag = #ready;
+
+define function main() => <integer>
+  $base + (if ($more = 2.0) 2 else 0 end)
+    + (if ($on?) (if ($tag == #ready) 5 else 0 end) else 0 end)
+end;

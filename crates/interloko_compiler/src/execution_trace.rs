@@ -192,6 +192,9 @@ impl<'a> TracedFunction<'a> {
                 "generic:g{}",
                 id.0
             ))),
+            lower::FunctionKind::ConstantInitializer(id) => Some(EnvironmentObjectId::new(
+                alloc::format!("constant:k{}", id.0),
+            )),
             lower::FunctionKind::SlotAccessor { .. }
             | lower::FunctionKind::CallableThunk { .. }
             | lower::FunctionKind::Closure(_)

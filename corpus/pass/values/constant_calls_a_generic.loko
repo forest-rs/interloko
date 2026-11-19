@@ -1,0 +1,17 @@
+// expect: run 6
+// expect: diagnostics 0
+
+// A constant's initializer may send a generic: methods are known before
+// any initializer is compiled.
+
+define generic doubled(x);
+
+define method doubled(x :: <integer>) => <integer>
+  x * 2
+end;
+
+define constant $six = doubled(3);
+
+define function main() => <integer>
+  $six
+end;

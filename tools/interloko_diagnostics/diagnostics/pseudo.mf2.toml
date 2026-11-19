@@ -99,6 +99,7 @@
 "sem.for-clause-type-mismatch" = "[ps] for { $word } got { $actual }, need { $expected }"
 "sem.slot-default-type-mismatch" = "[ps] slot { $slot } default got { $actual }, need { $expected }"
 "sem.slot-default-binds-locals" = "[ps] slot { $slot } default binds local { $local }"
+"sem.constant-initializer-cycle" = "[ps] constant { $constant } initializer cycle: { $cycle }"
 "sem.missing-required-init-keyword" = "[ps] slot { $slot } needs init keyword { $keyword }"
 "sem.missing-slot-initializer" = "[ps] slot { $slot } needs initializer"
 "sem.unknown-slot" = "[ps] slot { $slot } missing on { $class }"
@@ -141,4 +142,5 @@
 "type-error.range" = "[ps] range type error"
 "type-error.overflow" = "[ps] overflow type error"
 "dispatch.no-applicable-method" = "[ps] no applicable method"
+"constant.read-during-initialization" = "[ps] constant read during its initializer"
 "session.unknown-source" = "[ps] source file id unknown"

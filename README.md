@@ -186,8 +186,16 @@ The current slices include:
 - immutable top-level constants named in the Dylan style, such as
   `define constant $answer :: <integer> = 42;`. The initializer may be any
   expression, including a `begin … end` body with its own `let`s, loops and
-  closures. For now it is evaluated where the constant is read, rather than
-  once;
+  closures, and may call functions and send generics. A constant is
+  evaluated once, at its first read in a run, and every later read gets that
+  value, so `make` in an initializer makes one object; a number, boolean,
+  symbol or metaobject (and arithmetic over them) folds instead, read in
+  place like a literal. Constants whose initializers read one another in a
+  cycle are an error; a read the compiler cannot see, through a function
+  call, signals a `<constant-cycle-error>` naming the constant and the
+  definition that read it (`constant.read-during-initialization`). Each run (each session call) initializes its
+  constants again, and code a hot swap installs initializes its own while
+  older frames keep theirs;
 - `begin body end`, a body as an expression, whose `let`s are its own and
   whose last expression is its value;
 - nominal classes with typed slots, init keywords, inherited slots, and slot
@@ -431,9 +439,9 @@ The current slices include:
   a silent drop;
 - recoverable condition/restart forms, with `<condition>`, `<error>`,
   `<type-error>`, `<no-applicable-method>`, `<select-error>`,
-  `<not-found-error>`, `<immutable-collection-error>` and
-  `<collection-modified-error>` defined by the kernel: a
-  runtime check that fails (a cast, a callable value's argument or result,
+  `<not-found-error>`, `<immutable-collection-error>`,
+  `<collection-modified-error>` and `<constant-cycle-error>` defined by
+  the kernel: a runtime check that fails (a cast, a callable value's argument or result,
   a range, an overflow) signals a `<type-error>` naming the value, the
   expected type (a type object: a class, a `<limited-integer>` or a
   `<subclass-type>`, which `instance?` tests values against), the check's

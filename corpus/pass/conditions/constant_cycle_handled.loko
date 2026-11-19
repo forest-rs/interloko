@@ -1,0 +1,23 @@
+// expect: run 11
+// expect: diagnostics 0
+
+// A `<constant-cycle-error>` is an ordinary `<error>`: a handler can take
+// it and read which constant was read, and by whom. The initializer it
+// unwinds gives up its claim, so `$x` is still unset afterwards.
+
+define function twice() => <integer>
+  $x * 2
+end;
+
+define constant $x :: <integer> = twice();
+
+define function main() => <integer>
+  handle $x
+  with restart e :: <constant-cycle-error>
+    if (e.constant-cycle-error-constant = "$x")
+      if (e.constant-cycle-error-reader = "twice") 11 else 2 end
+    else
+      1
+    end
+  end
+end;
