@@ -1,0 +1,42 @@
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-dispatch
+
+// The `elseif` arm sees that `s` is not a `<circle>`, but that still
+// leaves `<square>` and `<triangle>`, and `area` has no method for
+// `<triangle>`: the strict function cannot prove that send.
+
+define sealed abstract class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+end;
+
+define class <triangle> (<shape>)
+end;
+
+define generic area(s :: <shape>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  1
+end;
+
+define method area(s :: <square>) => <integer>
+  2
+end;
+
+define strict function measure(s :: <shape>, big? :: <boolean>) => <integer>
+  if (instance?(s, <circle>))
+    area(s)
+  elseif (big?)
+    area(s)
+  else
+    0
+  end
+end;
+
+define function main() => <integer>
+  0
+end;

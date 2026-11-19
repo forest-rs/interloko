@@ -1,0 +1,7 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.if-condition-type-mismatch
+// expect: diagnostic contains unless test must be a <boolean>, not <integer>
+
+define function main(n :: <integer>) => ()
+  unless (n) n end
+end;

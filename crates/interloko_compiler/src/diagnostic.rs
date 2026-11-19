@@ -152,9 +152,9 @@ pub enum DiagnosticCode {
     /// A generic call passes a number to a generic that has no methods, so
     /// none can accept it.
     GenericWithoutMethods,
-    /// `if` condition is not boolean.
+    /// An `if`, `elseif`, `unless`, or `case` test is not boolean.
     IfConditionTypeMismatch,
-    /// `if` branch result kinds differ.
+    /// The arms of an `if` or `case` produce results that do not join.
     IfBranchTypeMismatch,
     /// An arithmetic operand is not a number.
     ArithmeticOperandTypeMismatch,

@@ -1,0 +1,22 @@
+// expect: run 1230
+// expect: diagnostics 0
+
+// `case` tries its tests in order and runs the first true one's body; the
+// `otherwise` body runs when none is true. Bodies are separated by `;`,
+// and a later true test does not run once an earlier one has.
+
+define function classify(n :: <integer>) => <integer>
+  case
+    n < 0 => 0;
+    n = 0 => 1;
+    n < 10 =>
+      let small = 2;
+      small;
+    n < 5 => 99;
+    otherwise => 3;
+  end
+end;
+
+define function main() => <integer>
+  classify(0) * 1000 + classify(3) * 100 + classify(50) * 10 + classify(-4)
+end;

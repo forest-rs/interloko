@@ -59,10 +59,16 @@ pub enum TokenKind {
     Let,
     /// `if`.
     If,
-    /// `then`.
-    Then,
+    /// `elseif`.
+    Elseif,
     /// `else`.
     Else,
+    /// `unless`.
+    Unless,
+    /// `case`.
+    Case,
+    /// `otherwise`.
+    Otherwise,
     /// `handle`.
     Handle,
     /// `with`.
@@ -187,8 +193,11 @@ impl TokenKind {
             | Self::Method
             | Self::Let
             | Self::If
-            | Self::Then
+            | Self::Elseif
             | Self::Else
+            | Self::Unless
+            | Self::Case
+            | Self::Otherwise
             | Self::Handle
             | Self::With
             | Self::Restart
@@ -257,8 +266,11 @@ impl Token {
             | TokenKind::Method
             | TokenKind::Let
             | TokenKind::If
-            | TokenKind::Then
+            | TokenKind::Elseif
             | TokenKind::Else
+            | TokenKind::Unless
+            | TokenKind::Case
+            | TokenKind::Otherwise
             | TokenKind::Handle
             | TokenKind::With
             | TokenKind::Restart
@@ -347,8 +359,20 @@ pub enum CstKind {
     KeywordExpr,
     /// Vector literal expression.
     VectorExpr,
-    /// Conditional expression.
+    /// `if (test) body … end` conditional expression.
     IfExpr,
+    /// `elseif (test) body` clause of an `if` expression.
+    ElseifClause,
+    /// `else body` clause of an `if` expression.
+    ElseClause,
+    /// `unless (test) body end` conditional expression.
+    UnlessExpr,
+    /// `case test => body; … end` conditional expression.
+    CaseExpr,
+    /// `test => body` clause of a `case` expression.
+    CaseClause,
+    /// `otherwise => body` clause of a `case` expression.
+    OtherwiseClause,
     /// Recoverable condition handler expression.
     HandleExpr,
     /// Anonymous function expression.
@@ -681,6 +705,12 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::CleanupClause => 48,
         CstKind::BlockExitName => 49,
         CstKind::RestartGuard => 50,
+        CstKind::ElseifClause => 51,
+        CstKind::ElseClause => 52,
+        CstKind::UnlessExpr => 53,
+        CstKind::CaseExpr => 54,
+        CstKind::CaseClause => 55,
+        CstKind::OtherwiseClause => 56,
     }
 }
 
@@ -719,7 +749,6 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::StarPercent => 53,
         TokenKind::Error => 26,
         TokenKind::If => 27,
-        TokenKind::Then => 28,
         TokenKind::Else => 29,
         TokenKind::Bool => 30,
         TokenKind::Less => 31,
@@ -739,6 +768,10 @@ const fn token_kind_tag(kind: TokenKind) -> u64 {
         TokenKind::Block => 48,
         TokenKind::Cleanup => 49,
         TokenKind::When => 50,
+        TokenKind::Elseif => 54,
+        TokenKind::Unless => 55,
+        TokenKind::Case => 56,
+        TokenKind::Otherwise => 57,
     }
 }
 
@@ -940,8 +973,11 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "method" => TokenKind::Method,
                     "let" => TokenKind::Let,
                     "if" => TokenKind::If,
-                    "then" => TokenKind::Then,
+                    "elseif" => TokenKind::Elseif,
                     "else" => TokenKind::Else,
+                    "unless" => TokenKind::Unless,
+                    "case" => TokenKind::Case,
+                    "otherwise" => TokenKind::Otherwise,
                     "handle" => TokenKind::Handle,
                     "with" => TokenKind::With,
                     "restart" => TokenKind::Restart,

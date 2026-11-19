@@ -420,6 +420,7 @@ fn visit_exprs(expr: &sem::Expr, visit: &mut impl FnMut(&sem::Expr)) {
             visit_exprs(then_branch, visit);
             visit_exprs(else_branch, visit);
         }
+        E::Discard { value, .. } => visit_exprs(value, visit),
         E::Handle { body, restart, .. } => {
             visit_exprs(body, visit);
             if let Some(guard) = &restart.guard {

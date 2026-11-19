@@ -1,0 +1,8 @@
+// expect: diagnostic code syntax.expected-token
+
+// Loko's conditionals are Dylan's: the test is parenthesized and there is
+// no `then`. `if c then a else b end` is not Loko.
+
+define function main(c :: <boolean>) => <integer>
+  if c then 1 else 2 end
+end;

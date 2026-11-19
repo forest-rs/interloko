@@ -48,7 +48,7 @@ rule let-binding = let-name-binding | let-values-binding
 rule let-name-binding = let-name type-annotation?
 rule let-name = name
 rule let-values-binding = `(` trailing-list-of<let-name-binding, `,`> `)`
-rule expression = handle-expression | block-expression | if-expression | assignment-expression
+rule expression = handle-expression | block-expression | if-expression | unless-expression | case-expression | assignment-expression
 rule handle-expression = `handle` expression `with` restart-clause `end`
 rule restart-clause = `restart` restart-condition restart-guard? expression
 rule restart-guard = `when` expression `=>`
@@ -59,7 +59,14 @@ rule restart-condition-type = type-name
 rule block-expression = `block` `(` block-exit-name? `)` body cleanup-clause? `end`
 rule block-exit-name = name
 rule cleanup-clause = `cleanup` body
-rule if-expression = `if` expression `then` expression `else` expression `end`
+rule if-expression = `if` `(` expression `)` body elseif-clause* else-clause? `end`
+rule elseif-clause = `elseif` `(` expression `)` body
+rule else-clause = `else` body
+rule unless-expression = `unless` `(` expression `)` body `end`
+rule case-expression = `case` case-clause* otherwise-clause? `end`
+rule case-clause = expression `=>` body case-clause-end
+rule case-clause-end = `;` | &`end`
+rule otherwise-clause = `otherwise` `=>` body `;`?
 rule assignment-expression = assignment-target `:=` expression | comparison-expression
 rule assignment-target = postfix-expression
 rule comparison-expression = additive-expression comparison-tail?

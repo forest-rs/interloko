@@ -1,0 +1,44 @@
+// expect: run 499136
+// expect: diagnostics 0
+
+// Arms that do not return: a `signal` or a block exit inside an arm. A
+// signalling arm takes the other arms' types, also when it is a body
+// ending in the signal after `let`s; one in a conditional without a
+// default body is discarded like any other arm.
+
+define class <oops> (<object>)
+  slot v :: <integer>, init-value: 9;
+end;
+
+define function f(c :: <boolean>) => <double-float>
+  let r = if (c) let a = 1; signal(make(<oops>)) else 1.5 end;
+  r
+end;
+
+define function g(c :: <boolean>) => <double-float>
+  let r = case c => let a = 1; signal(make(<oops>)); otherwise => 2.5 end;
+  r
+end;
+
+define function maybe-signal(c :: <boolean>) => ()
+  if (c) signal(make(<oops>)) end
+end;
+
+define function unless-signal(c :: <boolean>) => ()
+  unless (c) signal(make(<oops>)) end
+end;
+
+define function guarded(c :: <boolean>, early? :: <boolean>) => <integer>
+  handle
+    block () 1 cleanup if (early?) maybe-signal(c) else unless-signal(c) end end
+  with restart e :: <oops> e.v end
+end;
+
+define function exits(c :: <boolean>) => <integer>
+  block (return) if (c) return(3) else return(6) end end
+end;
+
+define function main() => <integer>
+  as(<integer>, f(#f) + g(#f)) * 100000 + guarded(#t, #t) * 10000
+    + guarded(#f, #f) * 1000 + guarded(#f, #t) * 100 + exits(#t) * 10 + exits(#f)
+end;

@@ -1,0 +1,26 @@
+// expect: run 7
+// expect: diagnostics 0
+// expect: dump sem contains discard
+
+// An `if` without `else` produces no values: its arms run for their
+// effects and their values are discarded. Here the arm's value, the slot
+// assignment's, is dropped, so `bump` can declare no results.
+
+define class <counter> (<object>)
+  slot count :: <integer>, init-value: 0;
+end;
+
+define function bump(c :: <counter>, by :: <integer>) => ()
+  if (by > 0)
+    c.count := c.count + by
+  elseif (by < -100)
+    c.count := 0
+  end
+end;
+
+define function main() => <integer>
+  let c = make(<counter>);
+  let up = block () #t cleanup bump(c, 7) end;
+  let still = block () #t cleanup bump(c, -3) end;
+  c.count
+end;

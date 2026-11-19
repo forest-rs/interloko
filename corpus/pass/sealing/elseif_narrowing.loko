@@ -1,0 +1,42 @@
+// typing: silent
+// expect: run 27
+// expect: diagnostics 0
+// expect: dump typing contains s1 instance checked rule=instance-sometimes
+// expect: dump typing contains expected=<square> actual=type-union(<square>, <triangle>)
+// expect: dump typing contains s2 cast proved rule=cast-upcast
+// expect: dump typing contains expected=<triangle> actual=<triangle> severity=silent origin=explicit because=narrowed(s1,else)
+
+// `elseif` arms narrow cumulatively, like nested `if`s: each later test
+// and arm sees what the earlier tests ruled out. Over a sealed hierarchy,
+// the `else` arm after two failed tests can only hold a `<triangle>`, so
+// its cast is proved.
+
+define sealed abstract class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define class <triangle> (<shape>)
+  slot base :: <integer>;
+end;
+
+define function size(s :: <shape>) => <integer>
+  if (instance?(s, <circle>))
+    1
+  elseif (instance?(s, <square>))
+    20
+  else
+    as(<triangle>, s).base
+  end
+end;
+
+define function main() => <integer>
+  size(make(<circle>, radius: 7)) + size(make(<square>, side: 2))
+    + size(make(<triangle>, base: 6))
+end;

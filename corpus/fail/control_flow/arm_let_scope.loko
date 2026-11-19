@@ -1,0 +1,9 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.unresolved-local
+
+// A `let` in an arm's body is scoped to that arm.
+
+define function main(flag :: <boolean>) => <integer>
+  let n = if (flag) let inner = 1; inner else 2 end;
+  inner + n
+end;

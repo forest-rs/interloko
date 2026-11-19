@@ -1,0 +1,29 @@
+// typing: silent
+// expect: run 9
+// expect: diagnostics 0
+// expect: dump typing contains s1 cast proved rule=cast-upcast
+// expect: dump typing contains expected=<square> actual=<square> severity=silent origin=explicit because=narrowed(s0,else)
+
+// An `unless` body runs when its test is false, so it sees the test's
+// false outcome: here `s` is not a `<circle>`, which over a sealed
+// hierarchy leaves only `<square>`.
+
+define sealed abstract class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>, init-value: 0;
+end;
+
+define function grow(s :: <shape>) => ()
+  unless (instance?(s, <circle>)) as(<square>, s).side := 9 end
+end;
+
+define function main() => <integer>
+  let sq = make(<square>);
+  let grown = block () #t cleanup grow(sq) end;
+  sq.side
+end;

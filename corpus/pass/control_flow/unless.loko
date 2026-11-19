@@ -1,0 +1,21 @@
+// expect: run 5
+// expect: diagnostics 0
+
+// `unless (test) body end` runs its body when the test is false. Like an
+// `if` without `else`, it produces no values; the body runs for its
+// effects. (A `block` cleanup sequences the effect before the read here.)
+
+define class <counter> (<object>)
+  slot count :: <integer>, init-value: 0;
+end;
+
+define function bump(c :: <counter>, full? :: <boolean>) => ()
+  unless (full?) c.count := c.count + 5 end
+end;
+
+define function main() => <integer>
+  let c = make(<counter>);
+  let first = block () #t cleanup bump(c, #f) end;
+  let second = block () #t cleanup bump(c, #t) end;
+  c.count
+end;

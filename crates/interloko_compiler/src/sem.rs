@@ -1251,6 +1251,7 @@ impl Module {
                 }),
             Expr::Handle { restart, .. } => scalar_result_kind(&restart.result_kinds),
             Expr::Block { .. } => scalar_result_kind(&self.expr_kinds(expr)),
+            Expr::Discard { .. } => ValueKind::Error,
             Expr::Cast { class, .. } if *class == OBJECT_CLASS_ID => ValueKind::Any,
             Expr::Cast { class, .. } => self
                 .builtin_value_kind(*class)
@@ -1300,6 +1301,7 @@ impl Module {
                 |generic| generic.result_kinds.clone(),
             ),
             Expr::Handle { restart, .. } => restart.result_kinds.clone(),
+            Expr::Discard { .. } => Vec::new(),
             Expr::If {
                 then_branch,
                 else_branch,
@@ -1701,6 +1703,7 @@ impl<'a> SiteNumbering<'a> {
                 self.expr(then_branch);
                 self.expr(else_branch);
             }
+            Expr::Discard { value, .. } => self.expr(value),
             Expr::Handle { body, restart, .. } => {
                 self.expr(body);
                 if let Some(guard) = &mut restart.guard {
@@ -3769,6 +3772,16 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Evaluates `value` for its effects and produces no values.
+    ///
+    /// An arm of a conditional without a default body, such as `if (c) f()
+    /// end`, is discarded this way: the conditional produces no values.
+    Discard {
+        /// Expression whose values are dropped.
+        value: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// Recoverable condition handler expression.
     Handle {
         /// Handled body expression.
@@ -3842,6 +3855,7 @@ impl Expr {
             | Self::MixedCompare { span, .. }
             | Self::ValueEqual { span, .. }
             | Self::If { span, .. }
+            | Self::Discard { span, .. }
             | Self::Handle { span, .. }
             | Self::Block { span, .. }
             | Self::Error { span } => *span,
@@ -3966,6 +3980,66 @@ pub(crate) fn limited_type_name(range: IntRange) -> String {
     }
     name.push(')');
     name
+}
+
+/// Where in a conditional an arm lowered to nested [`Expr::If`]s was
+/// written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Conditional {
+    /// The first arm of `if (test) body elseif … else body end`.
+    If,
+    /// A later arm of an `if`: `elseif (test) body`.
+    Elseif,
+    /// An arm of `case test => body; … otherwise => body end`.
+    Case,
+}
+
+impl Conditional {
+    /// The arms after this one.
+    const fn rest(self) -> Self {
+        match self {
+            Self::If | Self::Elseif => Self::Elseif,
+            Self::Case => Self::Case,
+        }
+    }
+
+    /// The keyword the arm's test follows.
+    const fn test_keyword(self) -> &'static str {
+        match self {
+            Self::If => "if",
+            Self::Elseif => "elseif",
+            Self::Case => "case",
+        }
+    }
+
+    /// The keyword that opens the whole conditional.
+    const fn construct(self) -> &'static str {
+        match self {
+            Self::If | Self::Elseif => "if",
+            Self::Case => "case",
+        }
+    }
+}
+
+/// An expression producing no values, as a conditional without a default
+/// body does when no test is true.
+fn no_values(span: Span) -> Expr {
+    Expr::Values {
+        values: Vec::new(),
+        result_kinds: Vec::new(),
+        span,
+    }
+}
+
+/// Evaluates `expr` for its effects and produces no values.
+fn discard_values(lowering: &Lowering, expr: Expr) -> Expr {
+    if lowering.expr_kinds(&expr).is_empty() {
+        return expr;
+    }
+    Expr::Discard {
+        span: expr.span(),
+        value: Box::new(expr),
+    }
 }
 
 fn scalar_result_kind(kinds: &[ValueKind]) -> ValueKind {
@@ -7342,60 +7416,45 @@ impl Lowering {
                 self.lower_compare(ctx, *op, lhs, rhs, *span)
             }
             ast::Expr::If {
+                arms,
+                else_body,
+                span,
+                ..
+            } => self.lower_conditional(
+                ctx,
+                Conditional::If,
+                arms,
+                else_body.as_deref(),
+                *span,
+                expected_results,
+            ),
+            ast::Expr::Case {
+                arms,
+                otherwise,
+                span,
+                ..
+            } => self.lower_conditional(
+                ctx,
+                Conditional::Case,
+                arms,
+                otherwise.as_deref(),
+                *span,
+                expected_results,
+            ),
+            ast::Expr::Unless {
                 condition,
-                then_branch,
-                else_branch,
+                body,
                 span,
                 ..
             } => {
                 let condition = self.lower_expr(ctx, condition);
-                let refinement = self.true_branch_refinement(&condition);
-                let previous_kind = refinement
-                    .and_then(|refinement| ctx.refine_local(refinement.local, refinement.kind));
-                let mut then_branch =
-                    self.lower_expr_expected_results(ctx, then_branch, expected_results);
-                if let (Some(refinement), Some(previous_kind)) = (refinement, previous_kind) {
-                    let _ = ctx.refine_local(refinement.local, previous_kind);
-                }
-                let mut else_branch =
-                    self.lower_expr_expected_results(ctx, else_branch, expected_results);
-                self.adopt_divergent_kinds(&mut then_branch, &else_branch);
-                self.adopt_divergent_kinds(&mut else_branch, &then_branch);
-                self.join_integer_branches(&mut then_branch, &mut else_branch);
-                let condition_kind = self.expr_kind(&condition);
-                if !matches!(condition_kind, ValueKind::Bool | ValueKind::Error) {
-                    ctx.diagnostics.push(
-                        Diagnostic::error(*span, DiagnosticCode::IfConditionTypeMismatch)
-                            .with_arg(DiagnosticArg::text("expected", "<boolean>"))
-                            .with_arg(DiagnosticArg::text(
-                                "actual",
-                                self.kind_name(condition_kind),
-                            )),
-                    );
-                }
-                let then_kinds = self.expr_kinds(&then_branch);
-                let else_kinds = self.expr_kinds(&else_branch);
-                if self.join_arm_kinds(&then_kinds, &else_kinds).is_none()
-                    && !result_kinds_contain_error(&then_kinds)
-                    && !result_kinds_contain_error(&else_kinds)
-                {
-                    ctx.diagnostics.push(
-                        Diagnostic::error(*span, DiagnosticCode::IfBranchTypeMismatch)
-                            .with_arg(DiagnosticArg::text(
-                                "then",
-                                self.result_kinds_name(&then_kinds),
-                            ))
-                            .with_arg(DiagnosticArg::text(
-                                "else",
-                                self.result_kinds_name(&else_kinds),
-                            )),
-                    );
-                }
+                self.check_test_is_boolean(ctx, "unless", &condition);
+                let body = self.lower_body_expr(ctx, body, None);
                 Expr::If {
                     condition: Box::new(condition),
-                    refinement,
-                    then_branch: Box::new(then_branch),
-                    else_branch: Box::new(else_branch),
+                    refinement: None,
+                    then_branch: Box::new(no_values(Span::new(span.end, span.end))),
+                    else_branch: Box::new(discard_values(self, body)),
                     span: *span,
                 }
             }
@@ -8739,6 +8798,122 @@ impl Lowering {
         }
     }
 
+    /// Lowers the arms of an `if` or `case` to nested [`Expr::If`]s.
+    ///
+    /// Each arm's test guards its body, and the rest of the chain is the
+    /// false branch, so a later test and body see everything the earlier
+    /// tests ruled out, exactly as nested `if`s do. The chain's value is the
+    /// join of its bodies. Without a default body (`else` or `otherwise`) the
+    /// chain produces no values: each arm's values are discarded, and using
+    /// the chain where a value is expected is a type error there.
+    fn lower_conditional(
+        &mut self,
+        ctx: &mut FunctionContext,
+        form: Conditional,
+        arms: &[ast::CondArm],
+        default: Option<&ast::Block>,
+        span: Span,
+        expected_results: Option<&[ValueKind]>,
+    ) -> Expr {
+        let Some((arm, rest)) = arms.split_first() else {
+            return match default {
+                Some(body) => self.lower_body_expr(ctx, body, expected_results),
+                None => no_values(Span::new(span.end, span.end)),
+            };
+        };
+        let arm_expected = if default.is_some() {
+            expected_results
+        } else {
+            None
+        };
+        let condition = self.lower_expr(ctx, &arm.test);
+        self.check_test_is_boolean(ctx, form.test_keyword(), &condition);
+        let refinement = self.true_branch_refinement(&condition);
+        let previous_kind =
+            refinement.and_then(|refinement| ctx.refine_local(refinement.local, refinement.kind));
+        let mut then_branch = self.lower_body_expr(ctx, &arm.body, arm_expected);
+        if let (Some(refinement), Some(previous_kind)) = (refinement, previous_kind) {
+            let _ = ctx.refine_local(refinement.local, previous_kind);
+        }
+        let rest_start = rest.first().map_or(arm.span.end, |next| next.span.start);
+        let mut else_branch = self.lower_conditional(
+            ctx,
+            form.rest(),
+            rest,
+            default,
+            Span::new(rest_start, span.end),
+            expected_results,
+        );
+        if default.is_none() {
+            then_branch = discard_values(self, then_branch);
+        }
+        self.adopt_divergent_kinds(&mut then_branch, &else_branch);
+        self.adopt_divergent_kinds(&mut else_branch, &then_branch);
+        self.join_integer_branches(&mut then_branch, &mut else_branch);
+        let then_kinds = self.expr_kinds(&then_branch);
+        let else_kinds = self.expr_kinds(&else_branch);
+        if self.join_arm_kinds(&then_kinds, &else_kinds).is_none()
+            && !result_kinds_contain_error(&then_kinds)
+            && !result_kinds_contain_error(&else_kinds)
+        {
+            ctx.diagnostics.push(
+                Diagnostic::error(span, DiagnosticCode::IfBranchTypeMismatch)
+                    .with_arg(DiagnosticArg::text("form", form.construct()))
+                    .with_arg(DiagnosticArg::text(
+                        "then",
+                        self.result_kinds_name(&then_kinds),
+                    ))
+                    .with_arg(DiagnosticArg::text(
+                        "else",
+                        self.result_kinds_name(&else_kinds),
+                    )),
+            );
+        }
+        Expr::If {
+            condition: Box::new(condition),
+            refinement,
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+            span,
+        }
+    }
+
+    /// Reports a conditional test, written after `keyword`, whose value is
+    /// not a `<boolean>`.
+    fn check_test_is_boolean(&self, ctx: &mut FunctionContext, keyword: &str, test: &Expr) {
+        let kind = self.expr_kind(test);
+        if !matches!(kind, ValueKind::Bool | ValueKind::Error) {
+            ctx.diagnostics.push(
+                Diagnostic::error(test.span(), DiagnosticCode::IfConditionTypeMismatch)
+                    .with_arg(DiagnosticArg::text("form", keyword))
+                    .with_arg(DiagnosticArg::text("expected", "<boolean>"))
+                    .with_arg(DiagnosticArg::text("actual", self.kind_name(kind))),
+            );
+        }
+    }
+
+    /// Lowers a conditional arm's body in its own scope: its `let`s end with
+    /// it. A body without `let`s is just its result expression.
+    fn lower_body_expr(
+        &mut self,
+        ctx: &mut FunctionContext,
+        body: &ast::Block,
+        expected_results: Option<&[ValueKind]>,
+    ) -> Expr {
+        let scope_start = ctx.scope_start();
+        let block = self.lower_block(ctx, body, expected_results);
+        ctx.hide_locals_from(scope_start);
+        if block.lets.is_empty() {
+            return block.result;
+        }
+        Expr::Block {
+            exit: None,
+            span: block.span,
+            body: Box::new(block),
+            cleanup: None,
+        }
+    }
+
     fn adopt_divergent_kinds(&self, expr: &mut Expr, sibling: &Expr) {
         if matches!(sibling, Expr::Signal { .. }) {
             return;
@@ -8748,6 +8923,17 @@ impl Lowering {
             return;
         }
         let sigs = self.expr_result_callable_signatures(sibling);
+        let mut expr = expr;
+        // A body with `let`s ends in the expression that may diverge.
+        while let Expr::Block {
+            exit: None,
+            cleanup: None,
+            body,
+            ..
+        } = expr
+        {
+            expr = &mut body.result;
+        }
         if let Expr::Signal {
             result_kinds,
             result_callable_sigs,
@@ -10086,7 +10272,7 @@ impl Lowering {
             .unwrap_or(ValueKind::Error),
             Expr::Handle { restart, .. } => scalar_result_kind(&restart.result_kinds),
             Expr::Block { .. } => scalar_result_kind(&self.expr_kinds(expr)),
-            Expr::Error { .. } => ValueKind::Error,
+            Expr::Discard { .. } | Expr::Error { .. } => ValueKind::Error,
         }
     }
 
@@ -10116,6 +10302,7 @@ impl Lowering {
                 .unwrap_or_else(|| vec![ValueKind::Error]),
             Expr::Signal { result_kinds, .. } => result_kinds.clone(),
             Expr::Handle { restart, .. } => restart.result_kinds.clone(),
+            Expr::Discard { .. } => Vec::new(),
             // Values leaving through the exit join the body's own results.
             Expr::Block {
                 exit: Some(exit),
@@ -10216,6 +10403,7 @@ impl Lowering {
                 exit: Some(exit), ..
             } => vec![None; exit.result_kinds.len()],
             Expr::Block { body, .. } => self.expr_result_callable_signatures(&body.result),
+            Expr::Discard { .. } => Vec::new(),
             _ => vec![self.expr_callable_signature(expr)],
         }
     }
@@ -11712,7 +11900,7 @@ mod tests {
             "define class <shape> (<object>)\nend;\n\
              define class <circle> (<shape>)\nend;\n\
              define function widen() => <shape>\n  as(<shape>, make(<circle>))\nend;\n\
-             define function main()\n  if 1 < 2 then 3 else 4 end\nend;",
+             define function main()\n  if (1 < 2) 3 else 4 end\nend;",
         );
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
         let shape = module
@@ -12374,7 +12562,7 @@ mod tests {
         let module = lower_source(
             "define class <problem> (<object>)\n  slot fallback :: <integer>, init-value: 1;\nend;\n\
              define class <invalid-radius> (<problem>)\n  slot radius :: <integer>, init-value: 2;\nend;\n\
-             define function main()\n  handle if instance?(make(<invalid-radius>), <problem>) then as(<problem>, make(<invalid-radius>)).fallback else 0 end with restart e :: <problem> e.fallback end\nend;\n\
+             define function main()\n  handle if (instance?(make(<invalid-radius>), <problem>)) as(<problem>, make(<invalid-radius>)).fallback else 0 end with restart e :: <problem> e.fallback end\nend;\n\
              define function recover()\n  handle signal(make(<invalid-radius>)) with restart e :: <problem> e.fallback end\nend;",
         );
 
@@ -12817,7 +13005,7 @@ mod tests {
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define function keep?(flag :: <boolean>) => <boolean>\n  flag\nend;\n\
              define function build(klass :: class <circle>, radius :: <integer>) => <circle>\n  make(klass, radius: radius)\nend;\n\
-             define function main()\n  if keep?(#t) then build(<circle>, 4).radius else 0 end\nend;",
+             define function main()\n  if (keep?(#t)) build(<circle>, 4).radius else 0 end\nend;",
         );
 
         assert_eq!(module.diagnostics, Vec::new());
@@ -12871,7 +13059,7 @@ mod tests {
     fn resolves_instance_tests_casts_and_true_branch_refinement() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
-             define function radius-or-zero(x :: <object>) => <integer>\n  if instance?(x, <circle>) then x.radius else 0 end\nend;\n\
+             define function radius-or-zero(x :: <object>) => <integer>\n  if (instance?(x, <circle>)) x.radius else 0 end\nend;\n\
              define function radius(x :: <object>) => <integer>\n  as(<circle>, x).radius\nend;",
         );
 
@@ -12926,12 +13114,12 @@ mod tests {
     #[test]
     fn scalar_instance_tests_refine_a_boxed_local_to_its_unboxed_kind() {
         let module = lower_source(
-            "define function f(x :: <object>) => <integer>\n  if instance?(x, <integer>) then x + 1 else 0 end\nend;\n\
-             define function g(x :: <object>) => <double-float>\n  if instance?(x, <double-float>) then x else 0.0 end\nend;\n\
-             define function h(x :: <object>) => <single-float>\n  if instance?(x, <single-float>) then x else 0.0f32 end\nend;\n\
-             define function i(x :: <object>) => <integer>\n  if instance?(x, <i32>) then x else 0 end\nend;\n\
-             define function j(x :: <object>) => <object>\n  if instance?(x, <real>) then x else 0 end\nend;\n\
-             define function k(x :: <i32>) => <integer>\n  if instance?(x, <integer>) then x else 0 end\nend;",
+            "define function f(x :: <object>) => <integer>\n  if (instance?(x, <integer>)) x + 1 else 0 end\nend;\n\
+             define function g(x :: <object>) => <double-float>\n  if (instance?(x, <double-float>)) x else 0.0 end\nend;\n\
+             define function h(x :: <object>) => <single-float>\n  if (instance?(x, <single-float>)) x else 0.0f32 end\nend;\n\
+             define function i(x :: <object>) => <integer>\n  if (instance?(x, <i32>)) x else 0 end\nend;\n\
+             define function j(x :: <object>) => <object>\n  if (instance?(x, <real>)) x else 0 end\nend;\n\
+             define function k(x :: <i32>) => <integer>\n  if (instance?(x, <integer>)) x else 0 end\nend;",
         );
         assert_eq!(module.diagnostics, Vec::new());
         let refinement = |index: usize| {
@@ -12967,7 +13155,7 @@ mod tests {
         let instance = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
-             define function main()\n  if instance?(make(<square>, side: 2), <circle>) then 1 else 0 end\nend;",
+             define function main()\n  if (instance?(make(<square>, side: 2), <circle>)) 1 else 0 end\nend;",
         );
         assert!(has_diagnostic(
             &instance,
@@ -13009,7 +13197,7 @@ mod tests {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define class <box> (<object>)\n  slot item :: <circle>;\n  slot valid? :: <boolean>;\nend;\n\
-             define function main()\n  if make(<box>, item: make(<circle>, radius: 7), valid?: #t).valid? then make(<box>, item: make(<circle>, radius: 7), valid?: #t).item.radius else 0 end\nend;",
+             define function main()\n  if (make(<box>, item: make(<circle>, radius: 7), valid?: #t).valid?) make(<box>, item: make(<circle>, radius: 7), valid?: #t).item.radius else 0 end\nend;",
         );
 
         assert_eq!(module.diagnostics, Vec::new());
@@ -13248,7 +13436,7 @@ mod tests {
     fn checks_booleans_comparisons_and_if_kinds() {
         let module = lower_source(
             "define function nonnegative(x)\n  x >= 0\nend;\n\
-             define function main(x)\n  if nonnegative(x) then x else 0 - x end\nend;",
+             define function main(x)\n  if (nonnegative(x)) x else 0 - x end\nend;",
         );
 
         assert_eq!(module.diagnostics, Vec::new());
@@ -13268,8 +13456,7 @@ mod tests {
 
     #[test]
     fn reports_invalid_if_condition_and_branch_mismatch() {
-        let invalid_condition =
-            lower_source("define function main()\n  if 1 then 2 else 3 end\nend;");
+        let invalid_condition = lower_source("define function main()\n  if (1) 2 else 3 end\nend;");
         assert!(has_diagnostic(
             &invalid_condition,
             DiagnosticCode::IfConditionTypeMismatch,
@@ -13277,7 +13464,7 @@ mod tests {
         ));
 
         let mismatched_branches =
-            lower_source("define function main(x)\n  if x = 0 then #t else 3 end\nend;");
+            lower_source("define function main(x)\n  if (x = 0) #t else 3 end\nend;");
         assert!(has_diagnostic(
             &mismatched_branches,
             DiagnosticCode::IfBranchTypeMismatch,
@@ -13354,7 +13541,7 @@ mod tests {
 
         let float_branch = lower_source(
             "define class <bad> (<object>)\nend;\n\
-             define function pick(x :: <double-float>)\n  if x < 0.0 then signal(make(<bad>)) else x end\nend;",
+             define function pick(x :: <double-float>)\n  if (x < 0.0) signal(make(<bad>)) else x end\nend;",
         );
         assert!(
             float_branch.diagnostics.is_empty(),

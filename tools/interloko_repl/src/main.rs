@@ -2232,12 +2232,17 @@ fn block_definition_boundary(tokens: &[syntax::Token]) -> Option<PendingDefiniti
     let mut previous = None;
     for (index, token) in tokens.iter().enumerate() {
         match token.kind {
-            TokenKind::Class | TokenKind::Function | TokenKind::Method
-                if previous == Some(TokenKind::Define) =>
-            {
+            TokenKind::Class | TokenKind::Method if previous == Some(TokenKind::Define) => {
                 depth += 1;
             }
-            TokenKind::If | TokenKind::Handle => {
+            // Every form closed by `end`: a defined or anonymous function,
+            // the conditionals, `handle`, and `block`.
+            TokenKind::Function
+            | TokenKind::If
+            | TokenKind::Unless
+            | TokenKind::Case
+            | TokenKind::Handle
+            | TokenKind::Block => {
                 depth += 1;
             }
             TokenKind::End if depth > 0 => {
@@ -3593,8 +3598,11 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::Method
         | TokenKind::Let
         | TokenKind::If
-        | TokenKind::Then
+        | TokenKind::Elseif
         | TokenKind::Else
+        | TokenKind::Unless
+        | TokenKind::Case
+        | TokenKind::Otherwise
         | TokenKind::Handle
         | TokenKind::With
         | TokenKind::Restart

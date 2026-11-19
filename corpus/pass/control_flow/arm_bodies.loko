@@ -1,0 +1,21 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// An arm's body is a Dylan body: `let`s, then the expression that is the
+// arm's value. The `let`s are scoped to the arm, so both arms may bind the
+// same name.
+
+define function pick(flag :: <boolean>) => <integer>
+  if (flag)
+    let x = 40;
+    let y = 2;
+    x + y
+  else
+    let x = 0;
+    x
+  end
+end;
+
+define function main() => <integer>
+  pick(#t) + pick(#f)
+end;

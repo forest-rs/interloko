@@ -564,14 +564,26 @@ fn collect_expr(expr: &ast::Expr, binders: &mut Vec<Binder>) {
         }
         Expr::UnaryMinus { expr, .. } => collect_expr(expr, binders),
         Expr::If {
-            condition,
-            then_branch,
-            else_branch,
+            arms, else_body, ..
+        }
+        | Expr::Case {
+            arms,
+            otherwise: else_body,
             ..
         } => {
+            for arm in arms {
+                collect_expr(&arm.test, binders);
+                collect_block(&arm.body, binders);
+            }
+            if let Some(else_body) = else_body {
+                collect_block(else_body, binders);
+            }
+        }
+        Expr::Unless {
+            condition, body, ..
+        } => {
             collect_expr(condition, binders);
-            collect_expr(then_branch, binders);
-            collect_expr(else_branch, binders);
+            collect_block(body, binders);
         }
         Expr::Handle { body, restart, .. } => {
             collect_expr(body, binders);

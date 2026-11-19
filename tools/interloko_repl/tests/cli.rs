@@ -128,7 +128,7 @@ fn dispatch_sites_can_be_listed_and_explained() {
 fn rich_values_work_in_expressions_and_dumps() {
     let (stdout, stderr) = run_repl(
         "define function same-message(a :: <string>, b :: <string>) => <boolean>\n  a = b\nend;\n\
-         if same-message(\"hello\", \"hello\") then 7 else 0 end\n\
+         if (same-message(\"hello\", \"hello\")) 7 else 0 end\n\
          :dump sem\n\
          :quit\n",
     );
@@ -437,7 +437,7 @@ fn invoke_shows_flow_types_and_contract_dependents() {
          define method area(c :: <circle>)\n  7\nend;\n\
          define function pick() => <shape>\n  make(<circle>)\nend;\n\
          define function measure(s :: <shape>)\n  \
-         if instance?(s, <circle>) then area(s) else area(pick()) end\nend;\n";
+         if (instance?(s, <circle>)) area(s) else area(pick()) end\nend;\n";
     let (stdout, stderr) = run_repl(&format!(
         "{definitions}:invoke function:f1 show-types\n:dump types\n:dump eop\n:quit\n"
     ));
@@ -623,6 +623,32 @@ fn multiline_definitions_finish_from_parser_state_without_semicolons() {
 
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.lines().any(|line| line == "9"));
+}
+
+#[test]
+fn multiline_definitions_wait_for_every_end_closed_form() {
+    // Each line ending in `end` closes a nested form, not the definition:
+    // the conditionals, an anonymous `function`, and `block`.
+    let (stdout, stderr) = run_repl(
+        "define function main()\n\
+           let pick = function (n :: <integer>) => <integer>\n\
+             case\n\
+               n < 0 => 0;\n\
+               otherwise => if (n < 10) 1 else 2 end\n\
+             end\n\
+           end;\n\
+           block ()\n\
+             pick(7) * 10 + pick(70)\n\
+           cleanup\n\
+             unless (#t) 0 end\n\
+           end\n\
+         end\n\
+         :run main\n\
+         :quit\n",
+    );
+
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(stdout.lines().any(|line| line == "12"), "{stdout}");
 }
 
 #[test]
@@ -895,9 +921,9 @@ fn reload_discards_typed_definitions_after_the_last_load() {
 fn repl_turns_keep_the_runtime_image_flat() {
     let mut input = String::from(
         "define function score(text :: <string>) => <integer>\n  \
-         if text = \"abcd\" then 1 else 0 end\nend;\n\
+         if (text = \"abcd\") 1 else 0 end\nend;\n\
          define function churn(n :: <integer>) => <integer>\n  \
-         if n = 0 then 0 else churn(n - 1) + score(concatenate(\"ab\", \"cd\")) end\nend;\n",
+         if (n = 0) 0 else churn(n - 1) + score(concatenate(\"ab\", \"cd\")) end\nend;\n",
     );
     for _ in 0..10 {
         input.push_str("churn(40)\n:heap\n");
@@ -1022,7 +1048,7 @@ define method area(c :: <circle>)
   7
 end;
 define function measure(s :: <shape>)
-  let bonus = if instance?(s, <circle>) then 1 else 0 end;
+  let bonus = if (instance?(s, <circle>)) 1 else 0 end;
   area(s) + bonus
 end;
 ";

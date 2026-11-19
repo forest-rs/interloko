@@ -1,0 +1,57 @@
+// expect: run 26
+// expect: diagnostics 0
+// expect: dump typing contains strict scope=declared overflow=runtime definitions=1 errors=0
+// expect: dump typing contains s1 dispatch proved rule=dispatch-covered
+// expect: dump typing contains expected=dispatch area methods=3 actual=<circle>
+// expect: dump typing contains s3 dispatch proved rule=dispatch-covered
+// expect: dump typing contains expected=dispatch area methods=3 actual=<square>
+// expect: dump typing contains s4 dispatch proved rule=dispatch-covered
+// expect: dump typing contains expected=dispatch area methods=3 actual=<triangle>
+
+// A strict function must prove every send. The `elseif` arm sees that
+// `s` is not a `<circle>` and is a `<square>`, and the `else` arm that it
+// is neither, so each `area` send reaches exactly one method.
+
+define sealed abstract class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define class <triangle> (<shape>)
+  slot base :: <integer>;
+end;
+
+define generic area(s :: <shape>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  3 * c.radius * c.radius
+end;
+
+define method area(s :: <square>) => <integer>
+  s.side * s.side
+end;
+
+define method area(t :: <triangle>) => <integer>
+  t.base
+end;
+
+define strict function measure(s :: <shape>) => <integer>
+  if (instance?(s, <circle>))
+    area(s)
+  elseif (instance?(s, <square>))
+    area(s)
+  else
+    area(s)
+  end
+end;
+
+define function main() => <integer>
+  measure(make(<circle>, radius: 2)) + measure(make(<square>, side: 3))
+    + measure(make(<triangle>, base: 5))
+end;
