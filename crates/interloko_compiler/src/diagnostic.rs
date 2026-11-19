@@ -216,6 +216,8 @@ pub enum DiagnosticCode {
     CastTypeMismatch,
     /// An `as` cast is statically impossible.
     CastImpossible,
+    /// A vector literal element is not a value a vector can hold.
+    VectorElementTypeMismatch,
     /// `make` was called with a non-class object argument.
     MakeClassArgumentTypeMismatch,
     /// A host-backed class was passed to `make`.
@@ -422,6 +424,7 @@ impl DiagnosticCode {
         Self::InstanceOfImpossible,
         Self::CastTypeMismatch,
         Self::CastImpossible,
+        Self::VectorElementTypeMismatch,
         Self::MakeClassArgumentTypeMismatch,
         Self::HostBackedMake,
         Self::BuiltinValueMake,
@@ -565,6 +568,7 @@ impl DiagnosticCode {
             Self::InstanceOfImpossible => "sem.instance-of-impossible",
             Self::CastTypeMismatch => "sem.cast-type-mismatch",
             Self::CastImpossible => "sem.cast-impossible",
+            Self::VectorElementTypeMismatch => "sem.vector-element-type-mismatch",
             Self::MakeClassArgumentTypeMismatch => "sem.make-class-argument-type-mismatch",
             Self::HostBackedMake => "sem.host-backed-make",
             Self::BuiltinValueMake => "sem.builtin-value-make",
@@ -709,6 +713,7 @@ impl DiagnosticCode {
             "sem.instance-of-impossible" => Self::InstanceOfImpossible,
             "sem.cast-type-mismatch" => Self::CastTypeMismatch,
             "sem.cast-impossible" => Self::CastImpossible,
+            "sem.vector-element-type-mismatch" => Self::VectorElementTypeMismatch,
             "sem.make-class-argument-type-mismatch" => Self::MakeClassArgumentTypeMismatch,
             "sem.host-backed-make" => Self::HostBackedMake,
             "sem.builtin-value-make" => Self::BuiltinValueMake,
