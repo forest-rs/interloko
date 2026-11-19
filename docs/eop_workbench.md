@@ -691,7 +691,7 @@ observe:
   method's operation inline, and a proved cast or narrowed read makes no
   `interloko.cast_object` call. Execution traces show fewer host calls and
   activations (no `interloko.code.dispatch`, `+#dispatch` or `+#method0`
-  for an inlined `+`), and the driver's `ControlStats::sends` and
+  for an inlined `+`), and the run's `ControlStats::sends` and
   `send_cache_hits` count fewer sends. Dispatch-site records (`dispatch:dN`)
   still describe every send in the source; the decision's `codegen=inlined`
   says the run makes no dispatch there. Typing gives an inlined send's
@@ -710,7 +710,7 @@ observe:
   them back at its entry unit, so a linked send goes where a dynamic one
   would (see [`eop_mutation.md`](eop_mutation.md)); the break loop's
   `:links` shows where each points now. Execution traces show `call.link`
-  instead of the host call and `call.indirect`, and the driver's
+  instead of the host call and `call.indirect`, and the run's
   `ControlStats::sends` counts only dynamic sends. A linked send costs about
   what a direct function call does; the `typed` bench's `generic send` case
   compares it with a dynamic one.

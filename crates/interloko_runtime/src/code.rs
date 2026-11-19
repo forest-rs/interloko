@@ -10,9 +10,10 @@
 //!
 //! Generic sends are late-bound and dispatched by the runtime: compiled code
 //! asks [`CODE_DISPATCH`] for the method its arguments select and calls it
-//! indirectly. The driver chooses from the newest unit's [`GenericDispatch`]
-//! table and caches the choice per argument classes until the next install,
-//! so a frame running superseded code still sends to the newest methods.
+//! indirectly. The host answers inline, choosing from the newest unit's
+//! [`GenericDispatch`] table, and caches the choice per argument classes
+//! until the next install ([`crate::InterlokoHost::send_cache`]), so a frame
+//! running superseded code still sends to the newest methods.
 //! When the table cannot decide (scalar dispatch, or a method that needs its
 //! arguments converted), the answer is the newest unit's compiled dispatcher.
 //! Direct calls to source functions stay within the caller's unit.
@@ -671,6 +672,16 @@ pub(crate) struct UnitTable {
 impl UnitTable {
     pub(crate) fn push(&mut self, unit: UnitId, code: Arc<CodeUnit>) {
         self.units.push((unit, code));
+    }
+
+    /// Makes this table `other`'s copy, reusing its storage.
+    pub(crate) fn copy_from(&mut self, other: &Self) {
+        self.units.clone_from(&other.units);
+    }
+
+    /// Drops every unit, keeping the storage.
+    pub(crate) fn clear(&mut self) {
+        self.units.clear();
     }
 
     /// Checks that `code` can take over from every unit here but `except`,

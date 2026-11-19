@@ -1,0 +1,71 @@
+// expect: run 2044
+// expect: diagnostics 0
+// codegen: off
+
+// Dynamic sends from a handler's guard, from its recovery, and after its
+// restart unwinds, while the send that found no method is still on the
+// stack: each one selects its own method, though the runtime answers them
+// from one cache and the same generic failed for another class first.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>;
+end;
+
+define class <problem> (<object>)
+  slot shape :: <shape>;
+end;
+
+define generic area(s :: <shape>) => <integer>;
+
+define method area(c :: <circle>) => <integer>
+  3 * c.radius * c.radius
+end;
+
+define method area(s :: <square>) => <integer>
+  s.side * s.side
+end;
+
+define generic weight(s :: <shape>) => <integer>;
+
+define method weight(c :: <circle>) => <integer>
+  1000
+end;
+
+define function risky(s :: <shape>) => <integer>
+  signal(make(<problem>, shape: s))
+end;
+
+// The guard sends `area` to a <square>, the recovery to a <circle> and the
+// <square> again: 12 + 4.
+define function guarded(c :: <circle>, s :: <square>) => <integer>
+  handle
+    risky(s)
+  with restart e :: <problem> when area(e.shape) = 4 =>
+    area(c) + area(e.shape)
+  end
+end;
+
+// `weight` finds no method for a <square>; the handler sends `weight` to a
+// <circle> while the failed send waits: 1000 + 12 * 2.
+define function failed(c :: <circle>, s :: <shape>) => <integer>
+  handle
+    weight(s)
+  with restart e :: <no-applicable-method>
+    weight(c) + area(c) * 2
+  end
+end;
+
+define function main() => <integer>
+  let c = make(<circle>, radius: 2);
+  let s = make(<square>, side: 2);
+  let recovered = guarded(c, s) + failed(c, s);
+  // After both restarts unwound, the sends still select per class.
+  recovered + area(s) + weight(c)
+end;

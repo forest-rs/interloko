@@ -168,7 +168,8 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("ok pass/control_flow/elseif_chain.loko"));
     assert!(out.contains("ok pass/control_flow/case.loko"));
     assert!(out.contains("ok fail/syntax/old_if_then.loko"));
-    assert!(out.contains("corpus: 507 passed, 0 failed, 507 total"));
+    assert!(out.contains("ok pass/generics/sends_in_handlers.loko"));
+    assert!(out.contains("corpus: 508 passed, 0 failed, 508 total"));
 }
 
 #[test]
