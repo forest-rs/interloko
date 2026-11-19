@@ -1,0 +1,24 @@
+// expect: runtime code type-error.entry
+// expect: diagnostics 0
+// A keyword of a typed callable type takes an untyped callable passed
+// through a value at its signature, so a callable of another signature is
+// a `<type-error>` where it is called, as for a positional parameter.
+
+define function inc(x :: <integer>) => <integer>
+  x + 1
+end;
+
+define function app(x :: <integer>, #key g :: callable(<integer>) => <integer> = inc) => <integer>
+  g(x)
+end;
+
+define function half(x :: <double-float>) => <double-float>
+  x / 2.0
+end;
+
+define function main() => <integer>
+  let f :: <callable> = app;
+  let a :: <integer> = f(1);
+  let b :: <integer> = f(1, g: half);
+  a + b
+end;

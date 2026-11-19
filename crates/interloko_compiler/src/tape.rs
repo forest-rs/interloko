@@ -1566,9 +1566,14 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::unsupplied_signature(),
         ),
         (
-            RuntimeOp::IsUnsupplied,
-            runtime::IS_UNSUPPLIED,
-            runtime::is_unsupplied_signature(),
+            RuntimeOp::KeywordAbsent,
+            runtime::KEYWORD_ABSENT,
+            runtime::unsupplied_signature(),
+        ),
+        (
+            RuntimeOp::IsKeywordAbsent,
+            runtime::IS_KEYWORD_ABSENT,
+            runtime::is_keyword_absent_signature(),
         ),
         (
             RuntimeOp::InternSymbol,

@@ -1,0 +1,18 @@
+// expect: run 110
+// expect: diagnostics 0
+// Passing `$unsupplied` explicitly passes it, through a value as directly:
+// a call through a value marks a keyword it leaves out with a marker of
+// the kernel's that source cannot write.
+
+define function probe(x :: <integer>, #key by :: <object> = 2) => <integer>
+  if (by == $unsupplied) 1 else 0 end
+end;
+
+define function through(f :: <callable>) => <integer>
+  let r :: <integer> = f(1, by: $unsupplied);
+  r
+end;
+
+define function main() => <integer>
+  probe(1, by: $unsupplied) * 100 + through(probe) * 10 + probe(1)
+end;

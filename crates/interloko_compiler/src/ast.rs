@@ -171,6 +171,9 @@ impl TypeExpr {
 pub struct CallableTypeExpr {
     /// Parameter types in call order.
     pub params: Vec<TypeExpr>,
+    /// `#key` parameters after them, `name :: <type>`, in declaration
+    /// order.
+    pub keywords: Vec<(String, TypeExpr)>,
     /// Result types in return order.
     pub results: ResultAnnotation,
 }
@@ -239,6 +242,15 @@ impl core::fmt::Display for TypeExpr {
                         f.write_str(", ")?;
                     }
                     write!(f, "{param}")?;
+                }
+                for (index, (name, ty)) in signature.keywords.iter().enumerate() {
+                    if index > 0 || !signature.params.is_empty() {
+                        f.write_str(", ")?;
+                    }
+                    if index == 0 {
+                        f.write_str("#key ")?;
+                    }
+                    write!(f, "{name} :: {ty}")?;
                 }
                 write!(f, ") => {}", signature.results)
             }
@@ -3931,11 +3943,28 @@ impl<'tree> Lowering<'tree> {
             }
             index += 2;
             let mut params = Vec::new();
+            let mut keywords = Vec::new();
+            let mut in_keywords = false;
             while index < tokens.len() {
-                match self.tree.tokens[tokens[index]].kind {
+                let token = self.tree.tokens[tokens[index]];
+                match token.kind {
                     TokenKind::RParen => break,
                     TokenKind::Comma => {
                         index += 1;
+                    }
+                    TokenKind::Symbol if token.text(&self.tree.source) == "#key" => {
+                        in_keywords = true;
+                        index += 1;
+                    }
+                    TokenKind::Ident if in_keywords => {
+                        let name = token.text(&self.tree.source).to_string();
+                        if kind_at(index + 1)? != TokenKind::DoubleColon {
+                            return None;
+                        }
+                        let (annotation, next) =
+                            self.type_annotation_from_tokens(tokens, index + 2)?;
+                        keywords.push((name, annotation));
+                        index = next;
                     }
                     _ => {
                         let (annotation, next) = self.type_annotation_from_tokens(tokens, index)?;
@@ -3951,7 +3980,11 @@ impl<'tree> Lowering<'tree> {
             let span = callable_token.span.cover(results.span);
             return Some((
                 TypeExpr::Callable {
-                    signature: CallableTypeExpr { params, results },
+                    signature: CallableTypeExpr {
+                        params,
+                        keywords,
+                        results,
+                    },
                     span,
                 },
                 next,

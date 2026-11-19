@@ -1,0 +1,15 @@
+// expect: run 18
+// expect: diagnostics 0
+// A callable value made earlier in a body is still called after code that
+// checks, which the tape proves nothing across, by opening it afresh.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2) => <integer>
+  x * by
+end;
+
+define function main() => <integer>
+  let f :: <callable> = scale;
+  let a :: <integer> = f(3);
+  let b :: <integer> = f(3, by: 4);
+  a + b
+end;
