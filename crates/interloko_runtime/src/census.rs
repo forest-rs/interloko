@@ -191,6 +191,7 @@ impl InterlokoHost {
                     | BoxedHandle::SingleFloat(_)
                     | BoxedHandle::Integer(_)
                     | BoxedHandle::Bool(_)
+                    | BoxedHandle::Character(_)
                     | BoxedHandle::Invalid => {}
                 }
                 continue;

@@ -12,8 +12,9 @@
 //!   low 45 bits: a one-based index into the image's boxed values (`00`), a
 //!   runtime object's own handle (`01`), a small immediate (`10`), or the
 //!   serial of a nursery box (`11`). A small immediate is a boolean (payload
-//!   `0` or `1`) or, with bit 32 set, a `<single-float>` whose IEEE 754 bits
-//!   are the low 32 bits. Nursery serials count across turns, so a box kept
+//!   `0` or `1`); with bit 32 set, a `<single-float>` whose IEEE 754 bits
+//!   are the low 32 bits; or with bit 33 set, a `<character>` whose Unicode
+//!   scalar value is the low 32 bits. Nursery serials count across turns, so a box kept
 //!   past its turn is detected rather than aliased; see
 //!   [`crate::region`].
 //!
@@ -21,8 +22,8 @@
 //! payload bits set), which no IEEE arithmetic produces by default. Floats
 //! with those exact bits, integers outside the immediate range, and other
 //! values (`u64`s, objects whose handle does not fit) are boxed on the heap,
-//! so boxing never changes a value's bits. Every `<single-float>` is
-//! immediate.
+//! so boxing never changes a value's bits. Every `<single-float>` and every
+//! `<character>` is immediate.
 //!
 //! `<i32>` and `<u32>` are limited `<integer>` types, not classes: their
 //! values box as the `<integer>` they are, always immediate.
@@ -52,6 +53,8 @@ const KIND_OBJECT: u64 = 0b01 << KIND_SHIFT;
 const KIND_SMALL: u64 = 0b10 << KIND_SHIFT;
 /// Set in a small immediate's payload for a `<single-float>`.
 const SINGLE_FLOAT_FLAG: u64 = 1 << 32;
+/// Set in a small immediate's payload for a `<character>`.
+const CHARACTER_FLAG: u64 = 1 << 33;
 const KIND_NURSERY_HEAP: u64 = 0b11 << KIND_SHIFT;
 
 /// Width of a nursery box's serial: the whole payload.
@@ -75,6 +78,8 @@ pub(crate) enum BoxedHandle {
     SingleFloat(f32),
     /// An immediate boolean.
     Bool(bool),
+    /// An immediate `<character>`.
+    Character(char),
     /// A runtime object, by its own [`crate::INTERLOKO_OBJECT_TYPE`] handle.
     Object(ObjHandle),
     /// A zero-based index into a region's boxed values.
@@ -122,6 +127,10 @@ impl BoxedHandle {
                 // The flag check leaves exactly the low 32 bits.
                 Self::SingleFloat(f32::from_bits(payload as u32))
             }
+            // Only a Unicode scalar value is a character.
+            KIND_SMALL if payload >> 32 == CHARACTER_FLAG >> 32 => {
+                char::from_u32(payload as u32).map_or(Self::Invalid, Self::Character)
+            }
             _ => Self::Invalid,
         }
     }
@@ -151,6 +160,12 @@ impl BoxedHandle {
     /// fits.
     pub(crate) const fn immediate_single_float(value: f32) -> ObjHandle {
         ObjHandle(TAG | KIND_SMALL | SINGLE_FLOAT_FLAG | value.to_bits() as u64)
+    }
+
+    /// Encodes a `<character>` as an immediate handle; every scalar value
+    /// fits.
+    pub(crate) const fn immediate_character(value: char) -> ObjHandle {
+        ObjHandle(TAG | KIND_SMALL | CHARACTER_FLAG | value as u64)
     }
 
     /// Encodes a runtime object's handle, or `None` when it is too large to
@@ -264,11 +279,36 @@ mod tests {
             BoxedHandle::immediate_single_float(0.0),
             BoxedHandle::immediate_bool(false)
         );
-        // A small payload with bits above 32 names nothing.
+        // A small payload with a bit above the kind flags names nothing.
         assert_eq!(
-            decode(ObjHandle(BoxedHandle::immediate_bool(false).0 | (1 << 33))),
+            decode(ObjHandle(BoxedHandle::immediate_bool(false).0 | (1 << 34))),
             BoxedHandle::Invalid
         );
+    }
+
+    #[test]
+    fn characters_are_immediate_and_only_scalar_values_decode() {
+        for value in [
+            '\0',
+            'a',
+            '\u{7f}',
+            '\u{e9}',
+            '\u{d7ff}',
+            '\u{e000}',
+            char::MAX,
+        ] {
+            let handle = BoxedHandle::immediate_character(value);
+            assert_eq!(decode(handle), BoxedHandle::Character(value));
+            assert_ne!(
+                handle,
+                BoxedHandle::immediate_single_float(f32::from_bits(value as u32))
+            );
+        }
+        // A surrogate or a value past `char::MAX` is not a character.
+        let character = BoxedHandle::immediate_character('\0').0;
+        for raw in [0xD800_u64, 0xDFFF, 0x11_0000, u64::from(u32::MAX)] {
+            assert_eq!(decode(ObjHandle(character | raw)), BoxedHandle::Invalid);
+        }
     }
 
     #[test]

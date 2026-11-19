@@ -505,33 +505,20 @@ fn parse_host_slot_kind(path: &Path, line: usize, input: &str) -> Result<ValueKi
 /// The accepted spellings are exactly the ones [`FunctionValue`]'s `Display`
 /// produces, so a run expectation always names the value's type as well as
 /// its contents: `42` is an integer, `42.0` a float, `#t` a boolean, and
-/// `"42"` a string. Floats also accept `inf`, `-inf`, and `nan`.
+/// `"42"` a string, `'4'` a character. Floats also accept `inf`, `-inf`,
+/// and `nan`.
 fn parse_run_value(text: &str) -> Option<FunctionValue> {
     match text {
         "#t" => return Some(FunctionValue::Boolean(true)),
         "#f" => return Some(FunctionValue::Boolean(false)),
         _ => {}
     }
-    if let Some(body) = text
-        .strip_prefix('"')
-        .and_then(|rest| rest.strip_suffix('"'))
-    {
-        let mut decoded = String::new();
-        let mut chars = body.chars();
-        while let Some(ch) = chars.next() {
-            if ch != '\\' {
-                decoded.push(ch);
-                continue;
-            }
-            match chars.next()? {
-                'n' => decoded.push('\n'),
-                't' => decoded.push('\t'),
-                '"' => decoded.push('"'),
-                '\\' => decoded.push('\\'),
-                _ => return None,
-            }
-        }
-        return Some(FunctionValue::String(decoded));
+    if text.starts_with('"') {
+        return interloko_compiler::ast::decode_string_literal(text).map(FunctionValue::String);
+    }
+    if text.starts_with('\'') {
+        return interloko_compiler::ast::decode_character_literal(text)
+            .map(FunctionValue::Character);
     }
     if let Some(digits) = text.strip_suffix("i32") {
         return digits.parse().ok().map(FunctionValue::I32);

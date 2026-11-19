@@ -1,0 +1,25 @@
+// expect: run 4095
+// expect: diagnostics 0
+
+// `digit?` and `digit-value` are ASCII only; `alphabetic?` and
+// `whitespace?` are Unicode, with `ascii-` forms; case mapping maps one
+// scalar to one.
+
+define function bit(b :: <boolean>, n :: <integer>) => <integer>
+  if (b) n else 0 end
+end;
+
+define function main() => <integer>
+  bit(digit?('7'), 1)
+    + bit(digit-value('7') = 7, 2)
+    + bit(digit?('\u{0663}'), 4) + 4
+    + bit(alphabetic?('é'), 8)
+    + bit(ascii-alphabetic?('é'), 16) + 16
+    + bit(whitespace?('\u{3000}'), 32)
+    + bit(ascii-whitespace?('\u{3000}'), 64) + 64
+    + bit(as-uppercase('a') = 'A', 128)
+    + bit(as-lowercase('É') = 'é', 256)
+    + bit(as-uppercase('ß') = 'ß', 512)
+    + bit(uppercase?('A'), 1024)
+    + bit(alphanumeric?('9'), 2048)
+end;

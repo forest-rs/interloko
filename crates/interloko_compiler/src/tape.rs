@@ -232,6 +232,7 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
         lower::ValueKind::F32 => ValueType::F32,
         lower::ValueKind::U64 => ValueType::U64,
         lower::ValueKind::Bool => ValueType::Bool,
+        lower::ValueKind::Char => ValueType::U32,
         lower::ValueKind::Function(_) => ValueType::Func,
         lower::ValueKind::Closure(_) => ValueType::Agg,
         lower::ValueKind::Entry => ValueType::Closure,
@@ -617,7 +618,8 @@ impl ControlAbi {
                 | lower::Instr::UnboxValue { .. }
                 | lower::Instr::SignalTypeError { .. }
                 | lower::Instr::UnboxObject { .. }
-                | lower::Instr::NoApplicableMethod { .. } => uses_control = true,
+                | lower::Instr::NoApplicableMethod { .. }
+                | lower::Instr::TextCall { check: Some(_), .. } => uses_control = true,
                 lower::Instr::Throw { tag, .. } if *tag != lower::ControlTag::Retry => {
                     uses_control = true;
                     note_tag(*tag);
@@ -1699,6 +1701,11 @@ impl<'a> FunctionEmitter<'a> {
                     lower::ValueKind::F64 => self.abi.box_f64,
                     lower::ValueKind::F32 => self.abi.box_f32,
                     lower::ValueKind::Bool => self.abi.box_bool,
+                    // Declared at its first use, as characters box only
+                    // where they cross `<object>`.
+                    lower::ValueKind::Char => self
+                        .builder
+                        .host_sig_for(runtime::BOX_CHARACTER, runtime::box_character_signature()),
                     // Declared at its first use, as callables box only
                     // where they cross `<object>`.
                     lower::ValueKind::Closure(_) => self.builder.host_sig_for(
@@ -1814,6 +1821,32 @@ impl<'a> FunctionEmitter<'a> {
                 self.set_span(*span);
                 self.asm
                     .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
+            }
+            lower::Instr::TextCall {
+                dst,
+                function,
+                args,
+                check,
+                span,
+            } => {
+                // Declared at its first use, as only text code calls it.
+                let sig = self
+                    .builder
+                    .host_sig_for(function.symbol(), function.signature());
+                self.set_span(*span);
+                match (
+                    check,
+                    function.checked_arg().and_then(|index| args.get(index)),
+                ) {
+                    (Some(check), Some(checked)) => {
+                        self.emit_checked_text_call(*dst, sig, args, *checked, check, *span)?;
+                    }
+                    (None, None) => {
+                        self.asm
+                            .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
+                    }
+                    _ => return Err(invalid_lowered("a text call's check does not match it")),
+                }
             }
             lower::Instr::F64NotEqual {
                 dst,
@@ -2118,6 +2151,10 @@ impl<'a> FunctionEmitter<'a> {
                     lower::ValueKind::F64 => self.abi.unbox_f64,
                     lower::ValueKind::F32 => self.abi.unbox_f32,
                     lower::ValueKind::Bool => self.abi.unbox_bool,
+                    lower::ValueKind::Char => self.builder.host_sig_for(
+                        runtime::UNBOX_VALUE,
+                        runtime::unbox_value_signature(ValueType::U32),
+                    ),
                     lower::ValueKind::Closure(None) => self.builder.host_sig_for(
                         runtime::UNBOX_VALUE,
                         runtime::unbox_value_signature(ValueType::Agg),
@@ -2126,10 +2163,17 @@ impl<'a> FunctionEmitter<'a> {
                 };
                 // Every value of the result's register type is an instance
                 // of the class, a scalar's or `<function>`, so a
-                // replacement needs no check.
+                // replacement needs no check; except a character's, as a
+                // `u32` register holds more than the scalar values.
+                let recheck = (*kind == lower::ValueKind::Char).then(|| {
+                    self.builder.host_sig_for(
+                        runtime::CHECK_CHARACTER,
+                        runtime::check_character_signature(),
+                    )
+                });
                 let check = CheckedCall {
                     sig,
-                    recheck: None,
+                    recheck,
                     class: class.0,
                 };
                 self.emit_checked_call(*dst, *value, check, type_error, *span)?;
@@ -2477,6 +2521,81 @@ impl<'a> FunctionEmitter<'a> {
         self.set_span(span);
         self.asm.const_u64(site, index);
         Ok(site)
+    }
+
+    /// Emits a text call that can reject its argument `checked`, and what
+    /// happens when it does ([`lower::TextCheck`]):
+    ///
+    /// ```text
+    /// retry:  region (check-failed -> failed)
+    ///           dst = call(args)
+    ///         end region
+    ///         jmp done
+    /// failed: condition = type-error(boxed checked, site)
+    ///         checked = signal(condition)    // use-value
+    ///         jmp retry
+    /// done:
+    /// ```
+    ///
+    /// The operation checks every argument it is given, so a replacement
+    /// is checked the same way when the call is made again.
+    fn emit_checked_text_call(
+        &mut self,
+        dst: Reg,
+        sig: HostSigId,
+        args: &[Reg],
+        checked: Reg,
+        check: &lower::TextCheck,
+        span: Span,
+    ) -> Result<(), TapeError> {
+        let control = self.abi.control()?;
+        let check_failed = control.check_failed;
+        let (retry, failed, done) = (self.asm.label(), self.asm.label(), self.asm.label());
+        self.asm.jmp(retry);
+        self.asm.place(retry).map_err(build_error)?;
+        self.set_span(span);
+        self.asm.begin_region(&[Catch::Tag(check_failed, failed)]);
+        self.asm
+            .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[dst]);
+        self.asm
+            .end_region()
+            .ok_or_else(|| invalid_lowered("check region is not open"))?;
+        self.asm.jmp(done);
+        self.asm.place(failed).map_err(build_error)?;
+        // The condition holds the rejected value as the class it is: a
+        // character's `u32` register would box as an `<integer>`.
+        let (reported, reported_type) = if check.kind == lower::ValueKind::Char {
+            let boxed = self.alloc_temp(runtime::any_type());
+            let box_character = self.builder.host_sig_for(
+                runtime::BOX_REJECTED_CHARACTER,
+                runtime::box_character_signature(),
+            );
+            self.asm.host_call(
+                Reg::EFFECT,
+                box_character,
+                Reg::EFFECT,
+                &[checked],
+                &[boxed],
+            );
+            (boxed, runtime::any_type())
+        } else {
+            (checked, self.register_type(checked)?)
+        };
+        let site = self.type_error_site(&check.type_error, span)?;
+        let condition = self.shared_temp(SharedTemp::Condition, runtime::object_type());
+        let report = self.abi.control()?.type_error_sig(&[reported_type])?;
+        self.asm.host_call(
+            Reg::EFFECT,
+            report,
+            Reg::EFFECT,
+            &[reported, site],
+            &[condition],
+        );
+        let replacement = self.register_type(checked)?;
+        self.emit_signal(&[replacement], &[checked], condition, span)?;
+        self.asm.jmp(retry);
+        self.asm.place(done).map_err(build_error)?;
+        Ok(())
     }
 
     /// Emits a checking host call, `dst = check(operand, class)`, and what

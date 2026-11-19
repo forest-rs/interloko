@@ -528,6 +528,7 @@ impl BaseLokoCstProjector<'_> {
             "number-literal" => self.leaf(CstKind::NumberExpr, node),
             "bool-literal" => self.leaf(CstKind::BoolExpr, node),
             "string-literal" => self.leaf(CstKind::StringExpr, node),
+            "character-literal" => self.leaf(CstKind::CharacterExpr, node),
             "symbol-literal" => self.leaf(CstKind::SymbolExpr, node),
             "keyword-symbol" => self.build_keyword_symbol(node),
             _ => self.unwrap_first_expr(node),
@@ -1251,6 +1252,7 @@ impl BaseLokoCstProjector<'_> {
                 | "number-literal"
                 | "bool-literal"
                 | "string-literal"
+                | "character-literal"
                 | "symbol-literal"
                 | "keyword-symbol"
         )

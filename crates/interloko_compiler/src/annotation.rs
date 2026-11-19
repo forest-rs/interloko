@@ -529,6 +529,7 @@ fn collect_expr(expr: &ast::Expr, binders: &mut Vec<Binder>) {
         | Expr::Number32 { .. }
         | Expr::Bool { .. }
         | Expr::String { .. }
+        | Expr::Character { .. }
         | Expr::Symbol { .. }
         | Expr::Name { .. }
         | Expr::ClassName { .. }

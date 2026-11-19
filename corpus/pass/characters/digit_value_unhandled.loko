@@ -1,0 +1,9 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 'x' is not of type <character>
+// expect: diagnostics 0
+
+// `digit-value` takes only an ASCII digit.
+
+define function main() => <integer>
+  digit-value('x')
+end;

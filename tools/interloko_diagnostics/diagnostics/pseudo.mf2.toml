@@ -7,6 +7,7 @@
 "ast.float-literal-out-of-range" = "[ps] float literal beyond finite range"
 "ast.literal-suffix-mismatch" = "[ps] integer suffix on float literal"
 "ast.malformed-string-literal" = "[ps] string literal is malformed"
+"ast.malformed-character-literal" = "[ps] character literal is malformed"
 "ast.slot-option-requires-keyword" = "[ps] keyword value required by slot option { $option }"
 "ast.slot-init-value-requires-expression" = "[ps] expression required by slot option { $option }"
 "ast.unsupported-slot-option" = "[ps] slot option not supported: { $option }"

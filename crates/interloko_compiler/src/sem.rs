@@ -14,6 +14,8 @@ use crate::syntax::{self, Span};
 
 mod collection;
 pub use collection::{BUILTIN_METHODS, BuiltinMethod, CollectionFunction};
+mod text;
+pub use text::{NAMED_TEXT_FUNCTIONS, text_function_for_name, text_function_name};
 
 use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
 use interloko_model::sealing::Sealing;
@@ -25,7 +27,7 @@ pub use interloko_model::{
     BuiltinValueClass, ClassId, FloatBits, GenericFunctionId, LimitedInteger, MethodId, Number32,
     OBJECT_CLASS_ID, SingleFloatBits, SlotId,
 };
-pub use interloko_runtime::FloatFunction;
+pub use interloko_runtime::{FloatFunction, TextFunction};
 
 /// Durable direct function identifier within a semantic module.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -146,6 +148,8 @@ pub enum ValueKind {
     F32,
     /// Boolean value.
     Bool,
+    /// `<character>`: an unboxed Unicode scalar value.
+    Char,
     /// Runtime string object.
     String(ClassId),
     /// Runtime interned symbol object.
@@ -335,6 +339,9 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         | Intrinsic::TypeName => 1,
         Intrinsic::VectorRef | Intrinsic::Concatenate | Intrinsic::InstanceOfType => 2,
         Intrinsic::VectorElementOr => 3,
+        Intrinsic::Text(function) => function.params().len(),
+        Intrinsic::CharCompare(_) => 2,
+        Intrinsic::CharToInteger => 1,
         Intrinsic::FloatToString | Intrinsic::IntegerToString => 1,
     }
 }
@@ -377,6 +384,11 @@ fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
             0,
         ) => "<limited-integer>",
         (Intrinsic::SubclassTypeClass, 0) => "<subclass-type>",
+        (Intrinsic::Text(function), index) => function
+            .params()
+            .get(index)
+            .map_or("<object>", |kind| text::text_kind_name(*kind)),
+        (Intrinsic::CharCompare(_) | Intrinsic::CharToInteger, _) => "<character>",
         _ => "<object>",
     }
 }
@@ -857,6 +869,9 @@ impl Module {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Boolean,
             } => Some(ValueKind::Bool),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Character,
+            } => Some(ValueKind::Char),
             // A value declared `<function>` is any callable value.
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Function,
@@ -915,6 +930,7 @@ impl Module {
                 self.builtin_value_class(BuiltinValueClass::SlotDescriptor)
             }
             ValueKind::Bool => self.builtin_value_class(BuiltinValueClass::Boolean),
+            ValueKind::Char => self.builtin_value_class(BuiltinValueClass::Character),
             ValueKind::Callable | ValueKind::KnownCallable(_) => {
                 self.builtin_value_class(BuiltinValueClass::Function)
             }
@@ -952,6 +968,7 @@ impl Module {
             ValueKind::F64 => builtin(BuiltinValueClass::DoubleFloat),
             ValueKind::F32 => builtin(BuiltinValueClass::SingleFloat),
             ValueKind::Bool => Type::union([Atom::Boolean(false), Atom::Boolean(true)], self),
+            ValueKind::Char => builtin(BuiltinValueClass::Character),
             ValueKind::String(class)
             | ValueKind::Symbol(class)
             | ValueKind::Vector(class)
@@ -1261,6 +1278,7 @@ impl Module {
         match expr {
             Expr::ConstI64 { .. } | Expr::CheckRange { .. } => ValueKind::I64,
             Expr::ConstF64 { .. } => ValueKind::F64,
+            Expr::ConstChar { .. } => ValueKind::Char,
             Expr::Const32 { value, .. } => number32_kind(*value),
             Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
             Expr::Convert { to, .. } => to.value_kind(),
@@ -1827,6 +1845,7 @@ impl<'a> SiteNumbering<'a> {
             | Expr::ConstF64 { .. }
             | Expr::Const32 { .. }
             | Expr::ConstBool { .. }
+            | Expr::ConstChar { .. }
             | Expr::StringLiteral { .. }
             | Expr::SymbolLiteral { .. }
             | Expr::Local { .. }
@@ -2748,11 +2767,12 @@ pub enum EntryTarget {
     ClassObject(ClassId),
     /// An `<integer>` in the range.
     Range(IntRange),
-    /// A number or boolean of the kind: an `<integer>`, `<i32>`, `<u32>`,
-    /// `<double-float>`, `<single-float>` or `<boolean>`, unboxed
-    /// from the boxed `<object>` an untyped caller passed to the boxed
-    /// entry; the typed entry's register type establishes it. An `<i32>`
-    /// or `<u32>` is an `<integer>` in its range.
+    /// A number, boolean or character of the kind: an `<integer>`,
+    /// `<i32>`, `<u32>`, `<double-float>`, `<single-float>`, `<boolean>` or
+    /// `<character>`, unboxed from the boxed `<object>` an untyped caller
+    /// passed to the boxed entry; the typed entry's register type
+    /// establishes it, except a character's, which only the unboxing does.
+    /// An `<i32>` or `<u32>` is an `<integer>` in its range.
     Unbox(ValueKind),
 }
 
@@ -2776,7 +2796,8 @@ impl EntryTarget {
             | ValueKind::I32
             | ValueKind::U32
             | ValueKind::F32
-            | ValueKind::Bool => Some(Self::Unbox(kind)),
+            | ValueKind::Bool
+            | ValueKind::Char => Some(Self::Unbox(kind)),
             _ => None,
         }
     }
@@ -3502,6 +3523,13 @@ pub enum Intrinsic {
     /// `<i32>`, `limited(<integer>, min: 0, max: 255)` or
     /// `subclass(<shape>)`.
     TypeName,
+    /// A text operation the runtime host serves, such as `digit?` or
+    /// `as(<character>, i)`.
+    Text(TextFunction),
+    /// Compares two `<character>`s by scalar value, inline.
+    CharCompare(CompareOp),
+    /// `as(<integer>, c)`: a `<character>`'s scalar value, inline.
+    CharToInteger,
 }
 
 /// Semantic expression.
@@ -3532,6 +3560,13 @@ pub enum Expr {
     ConstBool {
         /// Constant value.
         value: bool,
+        /// Source span.
+        span: Span,
+    },
+    /// `<character>` constant.
+    ConstChar {
+        /// Constant Unicode scalar value.
+        value: char,
         /// Source span.
         span: Span,
     },
@@ -4168,6 +4203,7 @@ impl Expr {
             | Self::ConstF64 { .. }
             | Self::Const32 { .. }
             | Self::ConstBool { .. }
+            | Self::ConstChar { .. }
             | Self::StringLiteral { .. }
             | Self::SymbolLiteral { .. }
             | Self::Local { .. }
@@ -4208,6 +4244,7 @@ impl Expr {
             | Self::Const32 { span, .. }
             | Self::CheckRange { span, .. }
             | Self::ConstBool { span, .. }
+            | Self::ConstChar { span, .. }
             | Self::StringLiteral { span, .. }
             | Self::SymbolLiteral { span, .. }
             | Self::VectorLiteral { span, .. }
@@ -4484,6 +4521,7 @@ fn identical_refinement(lhs: &Expr, rhs: &Expr) -> Option<Refinement> {
                     ..
                 } => ValueKind::I64,
                 Expr::ConstBool { .. } => ValueKind::Bool,
+                Expr::ConstChar { .. } => ValueKind::Char,
                 _ => return None,
             };
             Some(Refinement {
@@ -7523,6 +7561,10 @@ impl Lowering {
                 value: *value,
                 span: *span,
             },
+            ast::Expr::Character { value, span, .. } => Expr::ConstChar {
+                value: *value,
+                span: *span,
+            },
             ast::Expr::String { value, span, .. } => Expr::StringLiteral {
                 value: value.clone(),
                 class: self
@@ -7850,6 +7892,25 @@ impl Lowering {
                 }
                 if let Some(builtin) = FloatBuiltin::from_name(callee) {
                     return self.lower_float_call(ctx, builtin, lowered_args, *span);
+                }
+                if let Some(function) = text_function_for_name(callee) {
+                    let arity = function.params().len();
+                    if lowered_args.len() != arity {
+                        ctx.diagnostics.push(Self::arity_mismatch(
+                            callee,
+                            arity,
+                            lowered_args.len(),
+                            *span,
+                        ));
+                        return Expr::Error { span: *span };
+                    }
+                    return self.checked_intrinsic_call(
+                        ctx,
+                        Intrinsic::Text(function),
+                        callee,
+                        lowered_args,
+                        *span,
+                    );
                 }
                 if let Some(op) = BinaryOp::bitwise_function(callee) {
                     return self.lower_bitwise(ctx, op, lowered_args, *span);
@@ -8924,8 +8985,11 @@ impl Lowering {
             | Intrinsic::MethodSpecializers => self
                 .builtin_value_class(BuiltinValueClass::Vector)
                 .map_or(ValueKind::Error, ValueKind::Vector),
-            Intrinsic::SlotMutable | Intrinsic::InstanceOfType => ValueKind::Bool,
-            Intrinsic::VectorSize => ValueKind::I64,
+            Intrinsic::SlotMutable | Intrinsic::InstanceOfType | Intrinsic::CharCompare(_) => {
+                ValueKind::Bool
+            }
+            Intrinsic::VectorSize | Intrinsic::CharToInteger => ValueKind::I64,
+            Intrinsic::Text(function) => text::text_result_kind(function.result()),
             Intrinsic::LimitedIntegerBase => self
                 .builtin_value_class(BuiltinValueClass::Integer)
                 .map_or(ValueKind::Error, ValueKind::ClassObject),
@@ -9046,6 +9110,13 @@ impl Lowering {
             (Intrinsic::SubclassTypeClass, 0) => {
                 actual == ValueKind::Any
                     || self.is_builtin_subclass_instance(actual, BuiltinValueClass::SubclassType)
+            }
+            (Intrinsic::Text(function), index) => function
+                .params()
+                .get(index)
+                .is_some_and(|kind| text::text_arg_matches(*kind, actual)),
+            (Intrinsic::CharCompare(_), 0 | 1) | (Intrinsic::CharToInteger, 0) => {
+                actual == ValueKind::Char
             }
             _ => false,
         }
@@ -10661,6 +10732,16 @@ impl Lowering {
                 span,
             };
         }
+        // Characters compare by scalar value, which orders them as UTF-8
+        // orders their encodings.
+        if lhs_kind == ValueKind::Char && rhs_kind == ValueKind::Char {
+            return Expr::IntrinsicCall {
+                intrinsic: Intrinsic::CharCompare(op.into()),
+                args: vec![lhs, rhs],
+                result_kind: ValueKind::Bool,
+                span,
+            };
+        }
         if Self::dispatches_numerically(&[lhs_kind, rhs_kind]) {
             return self.numeric_dispatch(
                 promotion::NumericOperator::Compare(op.into()),
@@ -10720,6 +10801,10 @@ impl Lowering {
         // unboxed integers compare as `=` compares them, without boxing.
         let integer = |kind| matches!(kind, ValueKind::I64 | ValueKind::I32 | ValueKind::U32);
         if integer(lhs_kind) && integer(rhs_kind) {
+            return self.lower_compare(ctx, ast::CompareOp::Eq, lhs, rhs, span);
+        }
+        // So are characters, by scalar value.
+        if lhs_kind == ValueKind::Char && rhs_kind == ValueKind::Char {
             return self.lower_compare(ctx, ast::CompareOp::Eq, lhs, rhs, span);
         }
         // Every value is an object, so only an operand that failed to
@@ -10968,6 +11053,28 @@ impl Lowering {
         class_id: ClassId,
         span: Span,
     ) -> Expr {
+        // A `<character>` and its scalar value convert both ways: to an
+        // `<integer>` always, and back when the integer is a scalar value.
+        let target = self.kind_for_builtin_class(class_id);
+        match (self.expr_kind(&value), target) {
+            (ValueKind::Char, Some(ValueKind::I64)) => {
+                return Expr::IntrinsicCall {
+                    intrinsic: Intrinsic::CharToInteger,
+                    args: vec![value],
+                    result_kind: ValueKind::I64,
+                    span,
+                };
+            }
+            (ValueKind::I64 | ValueKind::I32 | ValueKind::U32, Some(ValueKind::Char)) => {
+                return Expr::IntrinsicCall {
+                    intrinsic: Intrinsic::Text(TextFunction::CharacterFromInteger),
+                    args: vec![value],
+                    result_kind: ValueKind::Char,
+                    span,
+                };
+            }
+            _ => {}
+        }
         if let Some(from) = NumericKind::of(self.expr_kind(&value))
             && let Some(to) = self
                 .kind_for_builtin_class(class_id)
@@ -11663,6 +11770,7 @@ impl Lowering {
                 float_call_kind(*builtin, args, |arg| self.expr_kind(arg))
             }
             Expr::ConstF64 { .. } => ValueKind::F64,
+            Expr::ConstChar { .. } => ValueKind::Char,
             Expr::Const32 { value, .. } => number32_kind(*value),
             Expr::StringLiteral { class, .. } => ValueKind::String(*class),
             Expr::SymbolLiteral { class, .. } => ValueKind::Symbol(*class),
@@ -11926,6 +12034,9 @@ impl Lowering {
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Boolean,
             } => Some(ValueKind::Bool),
+            ClassOrigin::BuiltinValue {
+                kind: BuiltinValueClass::Character,
+            } => Some(ValueKind::Char),
             // A value declared `<function>` is any callable value.
             ClassOrigin::BuiltinValue {
                 kind: BuiltinValueClass::Function,
@@ -11979,6 +12090,7 @@ impl Lowering {
                 self.builtin_value_class(BuiltinValueClass::SlotDescriptor)
             }
             ValueKind::Bool => self.builtin_value_class(BuiltinValueClass::Boolean),
+            ValueKind::Char => self.builtin_value_class(BuiltinValueClass::Character),
             ValueKind::Callable | ValueKind::KnownCallable(_) => {
                 self.builtin_value_class(BuiltinValueClass::Function)
             }
@@ -12339,6 +12451,7 @@ impl Lowering {
         match type_name {
             "<object>" => ValueKind::Any,
             "<boolean>" => ValueKind::Bool,
+            "<character>" => ValueKind::Char,
             "<string>" => self
                 .builtin_value_class(BuiltinValueClass::String)
                 .map_or(ValueKind::Error, ValueKind::String),
@@ -12432,6 +12545,7 @@ impl Lowering {
                 .value_kind_class(expected)
                 .is_some_and(|class| self.is_same_or_subclass(class, specializer)),
             ValueKind::Bool
+            | ValueKind::Char
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -12482,6 +12596,7 @@ impl Lowering {
             | ValueKind::U32
             | ValueKind::F32
             | ValueKind::Bool
+            | ValueKind::Char
             | ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -12507,6 +12622,7 @@ impl Lowering {
             ValueKind::U32 => "<u32>".into(),
             ValueKind::F32 => "<single-float>".into(),
             ValueKind::Bool => "<boolean>".into(),
+            ValueKind::Char => "<character>".into(),
             ValueKind::Callable => "<callable>".into(),
             ValueKind::String(_) => "<string>".into(),
             ValueKind::Symbol(_) => "<symbol>".into(),
@@ -13287,6 +13403,7 @@ mod tests {
             ValueKind::U32,
             ValueKind::F32,
             ValueKind::Bool,
+            ValueKind::Char,
             ValueKind::String(builtin(BuiltinValueClass::String)),
             ValueKind::Symbol(builtin(BuiltinValueClass::Symbol)),
             ValueKind::Vector(builtin(BuiltinValueClass::Vector)),
@@ -13314,6 +13431,7 @@ mod tests {
                 ValueKind::Bool => {
                     Type::union([Atom::Boolean(true), Atom::Boolean(false)], &module)
                 }
+                ValueKind::Char => of(Atom::Exact(builtin(BuiltinValueClass::Character))),
                 // Built-in value classes are closed.
                 ValueKind::String(class) | ValueKind::Symbol(class) | ValueKind::Vector(class) => {
                     of(Atom::Exact(class))

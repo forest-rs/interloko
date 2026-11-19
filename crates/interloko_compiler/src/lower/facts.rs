@@ -448,6 +448,7 @@ fn visit_exprs(expr: &sem::Expr, visit: &mut impl FnMut(&sem::Expr)) {
         | E::ConstF64 { .. }
         | E::Const32 { .. }
         | E::ConstBool { .. }
+        | E::ConstChar { .. }
         | E::StringLiteral { .. }
         | E::SymbolLiteral { .. }
         | E::Local { .. }

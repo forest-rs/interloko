@@ -584,6 +584,15 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Character literal, such as `'a'` or `'\u{1F600}'`.
+    Character {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Decoded Unicode scalar value.
+        value: char,
+        /// Source span.
+        span: Span,
+    },
     /// Symbol literal.
     Symbol {
         /// Stable-ish AST node identity.
@@ -1086,6 +1095,7 @@ impl Expr {
             | Self::Number32 { .. }
             | Self::Bool { .. }
             | Self::String { .. }
+            | Self::Character { .. }
             | Self::Symbol { .. }
             | Self::Function { .. }
             | Self::Name { .. }
@@ -1122,6 +1132,7 @@ impl Expr {
             | Self::Number32 { id, .. }
             | Self::Bool { id, .. }
             | Self::String { id, .. }
+            | Self::Character { id, .. }
             | Self::Symbol { id, .. }
             | Self::Vector { id, .. }
             | Self::Function { id, .. }
@@ -1160,6 +1171,7 @@ impl Expr {
             | Self::Number32 { span, .. }
             | Self::Bool { span, .. }
             | Self::String { span, .. }
+            | Self::Character { span, .. }
             | Self::Symbol { span, .. }
             | Self::Vector { span, .. }
             | Self::Function { span, .. }
@@ -2064,6 +2076,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::NumberExpr => self.lower_number(node),
             CstKind::BoolExpr => self.lower_bool(node),
             CstKind::StringExpr => self.lower_string(node),
+            CstKind::CharacterExpr => self.lower_character(node),
             CstKind::SymbolExpr => self.lower_symbol(node),
             CstKind::KeywordExpr => self.lower_keyword_value(node),
             CstKind::VectorExpr => self.lower_vector(node),
@@ -2348,6 +2361,32 @@ impl<'tree> Lowering<'tree> {
                 self.diagnostics.push(Diagnostic::error(
                     span,
                     DiagnosticCode::AstMalformedStringLiteral,
+                ));
+                Expr::Error {
+                    id: self.ast_id(node),
+                    span,
+                }
+            }
+        }
+    }
+
+    fn lower_character(&mut self, node: &CstNode) -> Expr {
+        let Some((span, text)) = self.first_token_text(node, TokenKind::Character) else {
+            return Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            };
+        };
+        match decode_character_literal(text) {
+            Some(value) => Expr::Character {
+                id: self.ast_id(node),
+                value,
+                span,
+            },
+            None => {
+                self.diagnostics.push(Diagnostic::error(
+                    span,
+                    DiagnosticCode::AstMalformedCharacterLiteral,
                 ));
                 Expr::Error {
                     id: self.ast_id(node),
@@ -3922,27 +3961,66 @@ fn is_float_literal_text(text: &str) -> bool {
     text.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E'))
 }
 
-fn decode_string_literal(text: &str) -> Option<String> {
-    if !text.starts_with('"') || !text.ends_with('"') || text.len() < 2 {
-        return None;
-    }
-    let body = &text[1..text.len() - 1];
+/// Decodes a string literal's text, quotes included, such as `"a\tb"`, or
+/// returns `None` when it is malformed.
+#[must_use]
+pub fn decode_string_literal(text: &str) -> Option<String> {
+    let body = text.strip_prefix('"')?.strip_suffix('"')?;
     let mut decoded = String::new();
     let mut chars = body.chars();
     while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            decoded.push(ch);
-            continue;
-        }
-        match chars.next()? {
-            'n' => decoded.push('\n'),
-            't' => decoded.push('\t'),
-            '"' => decoded.push('"'),
-            '\\' => decoded.push('\\'),
-            _ => return None,
-        }
+        decoded.push(if ch == '\\' {
+            decode_escape(&mut chars)?
+        } else {
+            ch
+        });
     }
     Some(decoded)
+}
+
+/// Decodes a character literal's text, `'a'` or `'\n'`: exactly one
+/// character or escape between single quotes. Returns `None` when it is
+/// malformed.
+#[must_use]
+pub fn decode_character_literal(text: &str) -> Option<char> {
+    let body = text.strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut chars = body.chars();
+    let value = match chars.next()? {
+        '\\' => decode_escape(&mut chars)?,
+        '\'' => return None,
+        ch => ch,
+    };
+    chars.next().is_none().then_some(value)
+}
+
+/// Decodes the escape after a backslash, the same in string and character
+/// literals: `\n`, `\t`, `\r`, `\0`, `\\`, `\"`, `\'`, and `\u{...}` with
+/// one to six hex digits naming a Unicode scalar value.
+fn decode_escape(chars: &mut core::str::Chars<'_>) -> Option<char> {
+    Some(match chars.next()? {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        '0' => '\0',
+        '"' => '"',
+        '\'' => '\'',
+        '\\' => '\\',
+        'u' => {
+            if chars.next()? != '{' {
+                return None;
+            }
+            let rest = chars.as_str();
+            let close = rest.find('}')?;
+            let digits = &rest[..close];
+            if digits.is_empty() || digits.len() > 6 {
+                return None;
+            }
+            let value = char::from_u32(u32::from_str_radix(digits, 16).ok()?)?;
+            *chars = rest[close + 1..].chars();
+            value
+        }
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

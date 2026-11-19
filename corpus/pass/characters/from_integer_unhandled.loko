@@ -1,0 +1,10 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 55296 is not of type <character>
+// expect: diagnostics 0
+
+// `as(<character>, i)` checks that `i` is a Unicode scalar value: a
+// surrogate is not one.
+
+define function main() => <character>
+  as(<character>, 55296)
+end;
