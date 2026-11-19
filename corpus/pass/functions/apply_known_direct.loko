@@ -8,7 +8,7 @@
 // expect: dump tape contains closure.new
 // expect: dump tape contains call.indirect
 
-define function inc(x)
+define function inc(x :: <integer>)
   x + 1
 end;
 

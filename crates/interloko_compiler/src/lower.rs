@@ -14842,7 +14842,7 @@ mod tests {
     #[test]
     fn lowers_direct_calls_arithmetic_and_locals() {
         let module = lower_source(
-            "define function add(a, b)\n  let c = a + b;\n  c\nend;\n\
+            "define function add(a :: <integer>, b :: <integer>)\n  let c = a + b;\n  c\nend;\n\
              define function main()\n  add(40, 2)\nend;",
         );
         assert_eq!(module.functions.len(), 2);
@@ -14878,8 +14878,8 @@ mod tests {
     #[test]
     fn interns_callable_signatures_separately_from_function_targets() {
         let module = lower_source(
-            "define function inc(x)\n  x + 1\nend;\n\
-             define function dec(x)\n  x - 1\nend;\n\
+            "define function inc(x :: <integer>)\n  x + 1\nend;\n\
+             define function dec(x :: <integer>)\n  x - 1\nend;\n\
              define function main()\n  let f = inc;\n  let g = dec;\n  apply(f, 2) + apply(g, 2)\nend;",
         );
 
@@ -14958,7 +14958,7 @@ mod tests {
     #[test]
     fn lowers_runtime_callable_parameter_apply_to_indirect_call() {
         let module = lower_source(
-            "define function inc(x)\n  x + 1\nend;\n\
+            "define function inc(x :: <integer>)\n  x + 1\nend;\n\
              define function callit(f :: <callable>) => <integer>\n  apply(f, 41)\nend;\n\
              define function main()\n  callit(inc)\nend;",
         );

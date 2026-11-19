@@ -329,7 +329,8 @@ pub enum ResidualCause {
     /// something the declarations leave open.
     Declared,
     /// An operand comes from a parameter, or a callee's result, whose type
-    /// no annotation writes, so typing has only sem's inferred category.
+    /// no annotation writes, so typing has only the parameter's default
+    /// (`<object>`) or sem's inferred result category.
     UnannotatedInput,
     /// An operand is a cone over an open class whose current subclasses
     /// would satisfy the check: sealing the class would let typing rely on
@@ -864,15 +865,17 @@ fn residual(
             continue;
         };
         if let Some((input, target)) = unannotated_input(inputs, typed, reason) {
+            let ty = decision
+                .actual
+                .get(*index)
+                .map_or_else(String::new, |ty| typing::type_name(module, ty));
+            let source = match typed.reason(reason).map(|reason| &reason.kind) {
+                Some(ReasonKind::Contract { .. }) => "what sem inferred",
+                _ => "its default",
+            };
             let mut residual = with_fixes(
                 ResidualCause::UnannotatedInput,
-                format!(
-                    "{input} has no written type, so typing knows only what sem inferred ({})",
-                    decision
-                        .actual
-                        .get(*index)
-                        .map_or_else(String::new, |ty| typing::type_name(module, ty))
-                ),
+                format!("{input} has no written type, so typing knows only {source} ({ty})"),
             );
             residual.input = target;
             return residual;

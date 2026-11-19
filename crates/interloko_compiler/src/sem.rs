@@ -7460,7 +7460,7 @@ impl Lowering {
                 .map(|param| {
                     self.resolve_function_type_detail(
                         param.type_annotation.as_ref(),
-                        ValueKind::I64,
+                        ValueKind::Any,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -9652,7 +9652,7 @@ impl Lowering {
                 );
             }
             let resolved =
-                self.resolve_function_type_detail(param.type_annotation.as_ref(), ValueKind::I64);
+                self.resolve_function_type_detail(param.type_annotation.as_ref(), ValueKind::Any);
             param_kinds.push(resolved.kind);
             param_callable_sigs.push(resolved.callable_signature.clone());
             param_ranges.push(resolved.range);
@@ -17807,7 +17807,7 @@ mod tests {
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
-             define function inc(x)\n  x + 1\nend;\n\
+             define function inc(x :: <integer>)\n  x + 1\nend;\n\
              define function main()\n  let f = inc;\n  let g = area;\n  apply(f, 2) + apply(g, make(<circle>, radius: 3))\nend;",
         );
 
@@ -19278,8 +19278,8 @@ mod tests {
     #[test]
     fn checks_booleans_comparisons_and_if_kinds() {
         let module = lower_source(
-            "define function nonnegative(x)\n  x >= 0\nend;\n\
-             define function main(x)\n  if (nonnegative(x)) x else 0 - x end\nend;",
+            "define function nonnegative(x :: <integer>)\n  x >= 0\nend;\n\
+             define function main(x :: <integer>)\n  if (nonnegative(x)) x else 0 - x end\nend;",
         );
 
         assert_eq!(module.diagnostics, Vec::new());

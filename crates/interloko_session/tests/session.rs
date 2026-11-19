@@ -380,14 +380,23 @@ end;
     let before = session.claims(&id, ClaimDetail::Summary).unwrap();
     assert_eq!(before.revision, Some(0));
     assert!(session.is_current(&before));
-    assert_eq!(before.tally.checked, 1);
-    // The program asked for the conversion with `as`, so it is not lost
+    // `n` has no written type, so it is an `<object>`: `as` tests its class
+    // and then the range of each number it may be.
+    assert_eq!(before.tally.checked, 8);
+    // The program asked for the conversion with `as`, so none is lost
     // precision, even though `n` has no written type.
-    let site = before.residual_sites().next().unwrap();
-    assert_eq!(
-        site.residual.as_ref().map(|residual| residual.cause),
-        Some(ResidualCause::Requested(CheckOrigin::Explicit))
-    );
+    for site in before.residual_sites() {
+        assert!(
+            matches!(
+                site.residual.as_ref().map(|residual| residual.cause),
+                Some(ResidualCause::Requested(
+                    CheckOrigin::Explicit | CheckOrigin::Conversion
+                ))
+            ),
+            "{}",
+            before.render()
+        );
+    }
 
     let target = AnnotationTarget::Binding {
         definition,

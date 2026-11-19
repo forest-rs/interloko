@@ -136,8 +136,9 @@ fn annotating_a_parameter_proves_its_dispatch_and_elides_its_test() {
 
 #[test]
 fn annotating_an_inferred_binding_inserts_the_annotation() {
-    // An unannotated parameter defaults to `<integer>`, so writing that
-    // type changes no decision: the delta says the annotation buys nothing.
+    // An unannotated parameter is an `<object>`, as in Dylan, so writing
+    // that type changes no decision: the delta says the annotation buys
+    // nothing.
     let source = format!("{SHAPES}define function twice(s)\n  s * 2\nend;\n");
     let mut artifacts = compile(&source);
     assert!(!artifacts.has_errors(), "{:?}", artifacts.diagnostics);
@@ -153,13 +154,13 @@ fn annotating_an_inferred_binding_inserts_the_annotation() {
     let outcome = artifacts
         .apply_mutation(SessionMutation::Annotate {
             target: target.clone(),
-            type_source: "<integer>".into(),
+            type_source: "<object>".into(),
         })
         .expect("annotation compiles");
     let annotation = outcome.annotation().expect("annotate");
     assert_eq!(annotation.previous, None);
     assert!(annotation.delta.is_empty(), "{}", annotation.delta.render());
-    assert!(artifacts.source.source.contains("twice(s :: <integer>)"));
+    assert!(artifacts.source.source.contains("twice(s :: <object>)"));
     let site = artifacts
         .annotation_sites()
         .into_iter()
@@ -465,9 +466,10 @@ fn policy_changes_report_codegen_deltas_without_touching_the_log() {
 
 #[test]
 fn annotating_a_limited_parameter_proves_its_conversion_and_checks_its_callers() {
-    // `n` defaults to `<integer>`, so `as(<u32>, n)` is tested. Limiting it
-    // to a digit proves the conversion inside `digit` and moves the range
-    // check to `main`, where the 7 it passes is proved too.
+    // `n` has no written type, so it is an `<object>` and `as(<u32>, n)`
+    // tests its class and range. Limiting it to a digit proves the
+    // conversion inside `digit` and moves the range check to `main`, where
+    // the 7 it passes is proved too.
     let source = "\
 define function digit(n)
   as(<u32>, n)
@@ -536,7 +538,7 @@ fn narrowing_a_parameter_reports_the_specification_change_and_the_moved_checks()
     // Limiting `n` proves the conversion in `digit` only by rejecting
     // inputs `digit` accepted before: the range check moves to `main`.
     let source = "\
-define function digit(n)
+define function digit(n :: <integer>)
   as(<u32>, n)
 end;
 define function main()

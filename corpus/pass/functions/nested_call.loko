@@ -2,11 +2,11 @@
 // expect: diagnostics 0
 // expect: dump lowered contains call
 
-define function add(a, b)
+define function add(a :: <integer>, b :: <integer>)
   a + b
 end;
 
-define function double(x)
+define function double(x :: <integer>)
   x * 2
 end;
 

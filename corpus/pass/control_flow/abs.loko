@@ -2,7 +2,7 @@
 // expect: diagnostics 0
 // expect: dump lowered contains i64.lt
 
-define function abs(x)
+define function abs(x :: <integer>)
   if (x < 0) 0 - x else x end
 end;
 

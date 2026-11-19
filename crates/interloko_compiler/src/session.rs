@@ -18275,7 +18275,7 @@ mod tests {
     fn session_runs_named_zero_arg_functions() {
         let artifacts = CompilerSession::compile_source(
             "scratch.loko",
-            "define function helper(x)\n  x + 1\nend;\n\
+            "define function helper(x :: <integer>)\n  x + 1\nend;\n\
              define function __interloko_repl_expr_0()\n  helper(41)\nend;\n\
              define function object_result()\n  make(<box>, value: 1)\nend;\n\
              define class <box> (<object>)\n  slot value :: <integer>;\nend;",
@@ -21763,7 +21763,7 @@ mod tests {
                       define generic area(x);\n\
                       define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
                       define method area(s :: <square>)\n  s.side * s.side\nend;\n\
-                      define function hold(x)\n  x\nend;\n\
+                      define function hold(x :: <integer>)\n  x\nend;\n\
                       define function main()\n  let ignored = hold(7);\n  area(make(<circle>, radius: 10))\nend;";
         let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
                      define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\

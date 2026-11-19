@@ -8,7 +8,7 @@ define class <negative-input> (<object>)
   slot fallback :: <integer>;
 end;
 
-define function checked-double(x)
+define function checked-double(x :: <integer>)
   handle
     if (x < 0)
       signal(make(<negative-input>, fallback: 99))

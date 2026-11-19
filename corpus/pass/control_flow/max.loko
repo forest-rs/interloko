@@ -2,7 +2,7 @@
 // expect: diagnostics 0
 // expect: dump lowered contains i64.ge
 
-define function max(a, b)
+define function max(a :: <integer>, b :: <integer>)
   if (a >= b) a else b end
 end;
 

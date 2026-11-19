@@ -3738,7 +3738,7 @@ mod tests {
     #[test]
     fn emits_verified_tape_for_direct_calls_and_arithmetic() {
         let module = lower_source(
-            "define function add(a, b)\n  a + b\nend;\n\
+            "define function add(a :: <integer>, b :: <integer>)\n  a + b\nend;\n\
              define function main()\n  add(40, 2)\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
@@ -3764,7 +3764,7 @@ mod tests {
     #[test]
     fn emits_known_callable_apply_through_indirect_call_signature() {
         let module = lower_source(
-            "define function inc(x)\n  x + 1\nend;\n\
+            "define function inc(x :: <integer>)\n  x + 1\nend;\n\
              define function main()\n  let f = inc;\n  apply(f, 2)\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
