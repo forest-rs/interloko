@@ -256,9 +256,10 @@ fn residual_checks_name_why_typing_could_not_prove_them() {
         ResidualCause::Requested(CheckOrigin::Explicit)
     );
 
+    // `x` has no written type, so it is an `<object>` and `+` sends.
     let count = report(&artifacts, "count", ClaimDetail::Summary);
     assert_eq!(
-        cause(&count, TypingCheck::Overflow),
+        cause(&count, TypingCheck::Dispatch),
         ResidualCause::UnannotatedInput
     );
     let input = count
@@ -404,7 +405,7 @@ fn claims_are_environment_objects_of_every_source_definition() {
 fn a_join_that_only_adds_citations_keeps_the_cause_it_explains() {
     // The `else` arm is dead only because `<shape>` is sealed, so the join
     // after the `if` keeps `x`'s fact and cites the sealing too. The
-    // overflow on `y + 1` is still `x`'s missing annotation, not the join.
+    // send of `y + 1` is still `x`'s missing annotation, not the join.
     let artifacts = compile(
         "define sealed abstract class <shape> (<object>)\nend;\n\
          define sealed class <circle> (<shape>)\nend;\n\
@@ -417,7 +418,7 @@ fn a_join_that_only_adds_citations_keeps_the_cause_it_explains() {
     );
     let pick = report(&artifacts, "pick", ClaimDetail::Summary);
     assert_eq!(
-        cause(&pick, TypingCheck::Overflow),
+        cause(&pick, TypingCheck::Dispatch),
         ResidualCause::UnannotatedInput,
         "{}",
         pick.render()

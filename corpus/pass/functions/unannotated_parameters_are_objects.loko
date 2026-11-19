@@ -1,0 +1,18 @@
+// expect: run 42
+// expect: diagnostics 0
+// expect: dump sem contains add(a:object-top, b:object-top) result=object-top
+// expect: dump sem contains main() result=object-top
+
+// As in Dylan, a parameter without a type is an `<object>`. `+` on two
+// `<object>`s sends to the numeric generic, so `add` adds integers and
+// floats alike, and its result is an `<object>` too. `main`'s `<object>`
+// result holds the integer 42, which is what the run reports.
+
+define function add(a, b)
+  a + b
+end;
+
+define function main()
+  let sum = add(1.5, 2.5);
+  if (instance?(sum, <double-float>)) add(40, 2) else 0 end
+end;

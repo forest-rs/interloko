@@ -103,9 +103,11 @@ than special generic-dispatch bytecode.
 The current slices include:
 
 - function definitions, locals, arithmetic, booleans, conditionals, and
-  calls; a function, method or closure declared `=> ()` returns no values,
-  and as in Dylan its body's last expression runs for its effects with
-  its values discarded;
+  calls; as in Dylan, a parameter without a type is an `<object>`, so
+  `define function add(a, b) a + b end` adds whatever numbers it is passed
+  through the numeric generics; a function, method or closure declared
+  `=> ()` returns no values, and as in Dylan its body's last expression
+  runs for its effects with its values discarded;
 - Dylan's conditionals: `if (test) … elseif (test) … else … end`,
   `unless (test) … end`, and `case test => …; otherwise => … end`. Each arm
   is a body, with its own `let`s, whose last expression is its value. A

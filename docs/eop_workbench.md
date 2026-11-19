@@ -636,7 +636,7 @@ types genuinely leave open, from lost precision:
 | `requested(explicit)`, `requested(test)`, `requested(conversion)`, `requested(entry)` | an `as(...)`, an `instance?` test, the class test an `as(...)` of a boxed number makes to pick its conversion, or an indirect entry's guard: the program's own check |
 | `always-fails` | the check fails whenever it is reached |
 | `declared` | the written types admit values the check rejects |
-| `unannotated-input` | an operand comes from a parameter or a callee's result with no written type; `input` names the annotation target |
+| `unannotated-input` | an operand comes from a parameter or a callee's result with no written type: a parameter's default `<object>`, or an inferred result; `input` names the annotation target |
 | `open-class` | an operand is a cone over an open class whose current subclasses would satisfy the check: sealing would let typing rely on them |
 | `widened(atoms)` | an `instance?` test could not narrow a sealed hierarchy because what it leaves has more than `MAX_ATOMS` pieces |
 | `widened(dispatch-tuples)` | a send's arguments split into more than `MAX_DISPATCH_TUPLES` combinations of sealed pieces |
