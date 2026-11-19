@@ -119,6 +119,14 @@ pub enum BuiltinValueClass {
     /// The concrete built-in `<string-builder>` class: the one mutable text
     /// type, whose contents become a `<string>` without a copy.
     StringBuilder,
+    /// The concrete built-in `<stretchy-vector>` class: a `<vector>` that
+    /// grows at its end (`add!`). Its instances
+    /// are `<vector>`s, so every `<vector>` operation takes one.
+    StretchyVector,
+    /// The concrete built-in `<table>` class: a mutable map from keys to
+    /// values. Keys compare as Dylan's `<table>` compares them, by `==`,
+    /// except strings, which compare by their text as with `=`.
+    Table,
 }
 
 impl BuiltinValueClass {
@@ -146,6 +154,8 @@ impl BuiltinValueClass {
         (Self::Character, "<character>"),
         (Self::StringPosition, "<string-position>"),
         (Self::StringBuilder, "<string-builder>"),
+        (Self::StretchyVector, "<stretchy-vector>"),
+        (Self::Table, "<table>"),
     ];
 
     /// Returns the Loko-visible class name for this built-in value class.
@@ -174,6 +184,8 @@ impl BuiltinValueClass {
             Self::Character => "<character>",
             Self::StringPosition => "<string-position>",
             Self::StringBuilder => "<string-builder>",
+            Self::StretchyVector => "<stretchy-vector>",
+            Self::Table => "<table>",
         }
     }
 
@@ -203,6 +215,8 @@ impl BuiltinValueClass {
             b"<character>" => Some(Self::Character),
             b"<string-position>" => Some(Self::StringPosition),
             b"<string-builder>" => Some(Self::StringBuilder),
+            b"<stretchy-vector>" => Some(Self::StretchyVector),
+            b"<table>" => Some(Self::Table),
             _ => None,
         }
     }
@@ -233,6 +247,8 @@ impl BuiltinValueClass {
             Self::Character => 19,
             Self::StringPosition => 20,
             Self::StringBuilder => 21,
+            Self::StretchyVector => 22,
+            Self::Table => 23,
         }
     }
 
@@ -243,8 +259,9 @@ impl BuiltinValueClass {
     /// then `<real>` > `<rational>` > `<integer>` for exact numbers and
     /// `<real>` > `<float>` > `<double-float>` and `<single-float>` for
     /// floats. The type objects sit under `<type>`: `<class>`,
-    /// `<limited-integer>` and `<subclass-type>`. [`Self::ALL`] is in
-    /// declaration order, not superclass order.
+    /// `<limited-integer>` and `<subclass-type>`, and `<stretchy-vector>` is a
+    /// `<vector>`. [`Self::ALL`] is in declaration order, not superclass
+    /// order.
     #[must_use]
     pub const fn builtin_superclass(self) -> Option<Self> {
         match self {
@@ -253,6 +270,7 @@ impl BuiltinValueClass {
             Self::Rational | Self::Float => Some(Self::Real),
             Self::Integer => Some(Self::Rational),
             Self::DoubleFloat | Self::SingleFloat => Some(Self::Float),
+            Self::StretchyVector => Some(Self::Vector),
             _ => None,
         }
     }
@@ -570,32 +588,34 @@ mod tests {
         assert!(!BuiltinValueClass::Boolean.is_abstract());
         assert!(BuiltinValueClass::Boolean.is_scalar());
         assert!(!BuiltinValueClass::Boolean.is_numeric());
-        assert_eq!(
-            BuiltinValueClass::Boolean.index(),
-            BuiltinValueClass::ALL.len() - 5
-        );
+        assert_eq!(BuiltinValueClass::Boolean.index(), 17);
         assert_eq!(chain(BuiltinValueClass::Function), ["<function>"]);
         assert!(!BuiltinValueClass::Function.is_abstract());
         assert!(!BuiltinValueClass::Function.is_scalar());
         assert!(BuiltinValueClass::Function.is_unboxed());
         assert!(BuiltinValueClass::Boolean.is_unboxed());
         assert!(!BuiltinValueClass::String.is_unboxed());
-        assert_eq!(
-            BuiltinValueClass::Function.index(),
-            BuiltinValueClass::ALL.len() - 4
-        );
+        assert_eq!(BuiltinValueClass::Function.index(), 18);
         assert_eq!(chain(BuiltinValueClass::Character), ["<character>"]);
         assert!(!BuiltinValueClass::Character.is_abstract());
         assert!(BuiltinValueClass::Character.is_scalar());
         assert!(!BuiltinValueClass::Character.is_numeric());
-        assert_eq!(
-            BuiltinValueClass::Character.index(),
-            BuiltinValueClass::ALL.len() - 3
-        );
+        assert_eq!(BuiltinValueClass::Character.index(), 19);
         assert!(BuiltinValueClass::StringPosition.is_scalar());
         assert!(!BuiltinValueClass::StringBuilder.is_unboxed());
+        assert_eq!(BuiltinValueClass::StringBuilder.index(), 21);
+        // The collection classes come after every older class, so adding
+        // them moved no built-in class's id.
         assert_eq!(
-            BuiltinValueClass::StringBuilder.index(),
+            chain(BuiltinValueClass::StretchyVector),
+            ["<stretchy-vector>", "<vector>"]
+        );
+        assert_eq!(chain(BuiltinValueClass::Table), ["<table>"]);
+        for class in [BuiltinValueClass::StretchyVector, BuiltinValueClass::Table] {
+            assert!(!class.is_abstract() && !class.is_unboxed());
+        }
+        assert_eq!(
+            BuiltinValueClass::Table.index(),
             BuiltinValueClass::ALL.len() - 1
         );
     }

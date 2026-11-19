@@ -12,6 +12,8 @@ mod boxed;
 mod census;
 pub mod chooser;
 pub mod code;
+mod collection;
+pub use collection::MAX_VECTOR_SIZE;
 pub mod control;
 pub mod driver;
 mod evacuate;
@@ -206,12 +208,51 @@ pub const MOP_LIMITED_INTEGER_MAX: &str = "interloko.mop.limited_integer_max";
 pub const MOP_SUBCLASS_TYPE_CLASS: &str = "interloko.mop.subclass_type_class";
 /// Host-call symbol for writing a type object as Loko writes the type.
 pub const MOP_TYPE_NAME: &str = "interloko.mop.type_name";
-/// Host-call symbol for immutable vector length.
-pub const VECTOR_SIZE: &str = "interloko.vector_size";
-/// Host-call symbol for immutable vector indexing. With
-/// [`vector_ref_signature`], an index outside the vector fails; with
-/// [`vector_element_or_signature`], it returns the default argument.
-pub const VECTOR_REF: &str = "interloko.vector_ref";
+/// Host-call symbol for making a `<vector>` or `<stretchy-vector>`: the
+/// class, a size of zero or more, and the element every slot starts as. It
+/// takes [`make_vector_signature`].
+pub const MAKE_VECTOR: &str = "interloko.collection.make_vector";
+/// Host-call symbol for making an empty `<table>`. It takes
+/// [`make_table_signature`].
+pub const MAKE_TABLE: &str = "interloko.collection.make_table";
+/// Host-call symbol for the number of elements of a vector or entries of a
+/// table. It takes [`collection_size_signature`].
+pub const COLLECTION_SIZE: &str = "interloko.collection.size";
+/// Host-call symbol for a vector's element at an index. An index outside
+/// the vector raises [`control::CHECK_FAILED_TAG`]. It takes
+/// [`vector_element_signature`].
+pub const VECTOR_ELEMENT: &str = "interloko.collection.vector_element";
+/// Host-call symbol for a vector's element at an index, or a default when
+/// the index is outside the vector. It takes
+/// [`vector_element_or_signature`].
+pub const VECTOR_ELEMENT_OR: &str = "interloko.collection.vector_element_or";
+/// Host-call symbol for storing a vector's element at an index, `(value,
+/// vector, index) -> value`. An index outside the vector raises
+/// [`control::CHECK_FAILED_TAG`]. It takes
+/// [`vector_element_setter_signature`].
+pub const VECTOR_ELEMENT_SETTER: &str = "interloko.collection.vector_element_setter";
+/// Host-call symbol for adding an element at the end of a
+/// `<stretchy-vector>`, which it returns. It takes
+/// [`stretchy_add_signature`].
+pub const STRETCHY_ADD: &str = "interloko.collection.stretchy_add";
+/// Host-call symbol for the value stored under a key in a `<table>`. A key
+/// the table lacks raises [`control::CHECK_FAILED_TAG`]. It takes
+/// [`table_element_signature`].
+pub const TABLE_ELEMENT: &str = "interloko.collection.table_element";
+/// Host-call symbol for the value stored under a key in a `<table>`, or a
+/// default when the table lacks the key. It takes
+/// [`table_element_or_signature`].
+pub const TABLE_ELEMENT_OR: &str = "interloko.collection.table_element_or";
+/// Host-call symbol for storing a value under a key in a `<table>`,
+/// `(value, table, key) -> value`. It takes
+/// [`table_element_setter_signature`].
+pub const TABLE_ELEMENT_SETTER: &str = "interloko.collection.table_element_setter";
+/// Host-call symbol for whether a `<table>` has a key. It takes
+/// [`table_key_signature`].
+pub const TABLE_KEY_EXISTS: &str = "interloko.collection.table_key_exists";
+/// Host-call symbol for removing a key's entry from a `<table>`, returning
+/// whether it had one. It takes [`table_key_signature`].
+pub const TABLE_REMOVE_KEY: &str = "interloko.collection.table_remove_key";
 /// Host-call symbol for rendering a float as its shortest round-trip literal.
 pub const FLOAT_TO_STRING: &str = "interloko.float_to_string";
 /// Host-call symbol for rendering an integer in decimal.
@@ -1696,9 +1737,16 @@ enum RuntimeObjectStorage {
     Symbol {
         name: String,
     },
+    /// A `<vector>` or `<stretchy-vector>`'s elements, each a boxed
+    /// `<object>`.
     Vector {
         elements: Vec<Value>,
+        /// Whether programs may not store into it: a vector literal, or a
+        /// vector the runtime made, such as a metaobject's slots.
+        constant: bool,
     },
+    /// A `<table>`'s entries.
+    Table(alloc::boxed::Box<collection::Table>),
     ClassMeta {
         class: ClassId,
     },
@@ -1928,6 +1976,7 @@ impl InterlokoHost {
             | RuntimeObjectStorage::StringBuilder { .. }
             | RuntimeObjectStorage::Symbol { .. }
             | RuntimeObjectStorage::Vector { .. }
+            | RuntimeObjectStorage::Table(_)
             | RuntimeObjectStorage::ClassMeta { .. }
             | RuntimeObjectStorage::GenericMeta { .. }
             | RuntimeObjectStorage::MethodMeta { .. }
@@ -1994,10 +2043,12 @@ impl InterlokoHost {
         let [old] = slots.as_slice() else {
             return Err(RuntimeError::NotACell);
         };
-        if self.turn.is_some() && location.space == Space::Image {
-            let old = old.clone();
-            self.log_image_store(location.index, 0, old);
-        }
+        let old = old.clone();
+        self.log_store(location.space, || region::LoggedStore::Slot {
+            index: location.index,
+            slot: 0,
+            old,
+        });
         let RuntimeObjectStorage::Native { slots } = &mut self.object_mut(cell)?.storage else {
             return Err(RuntimeError::NotACell);
         };
@@ -2035,7 +2086,11 @@ impl InterlokoHost {
             && let Some(old) = slots.get(slot.0 as usize)
         {
             let old = old.clone();
-            self.log_image_store(location.index, slot.0 as usize, old);
+            self.log_store(location.space, || region::LoggedStore::Slot {
+                index: location.index,
+                slot: slot.0 as usize,
+                old,
+            });
         }
         let object = self.object_mut(object)?;
         let RuntimeObjectStorage::Native { slots } = &mut object.storage else {
@@ -2355,7 +2410,10 @@ impl Host for InterlokoHost {
                 }
                 rets[0] = self.push_object(RuntimeObject {
                     class,
-                    storage: RuntimeObjectStorage::Vector { elements: values },
+                    storage: RuntimeObjectStorage::Vector {
+                        elements: values,
+                        constant: true,
+                    },
                 });
                 Ok(0)
             }
@@ -2703,33 +2761,103 @@ impl Host for InterlokoHost {
                 rets[0] = self.push_string(text)?;
                 Ok(0)
             }
-            VECTOR_SIZE => {
-                let [arg] = args else {
+            MAKE_VECTOR => {
+                let [ValueRef::U64(class), ValueRef::I64(size), fill] = args else {
                     return Err(HostError::Failed);
                 };
-                rets[0] = Value::I64(
-                    i64::try_from(self.vector_elements_from_any(*arg)?.len()).unwrap_or(i64::MAX),
+                rets[0] = self.make_vector(runtime_class_id(*class)?, *size, fill.to_value())?;
+                Ok(0)
+            }
+            MAKE_TABLE => {
+                rets[0] = self.make_table()?;
+                Ok(0)
+            }
+            COLLECTION_SIZE => {
+                let [ValueRef::Obj(collection)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::I64(self.collection_size(*collection)?);
+                Ok(0)
+            }
+            VECTOR_ELEMENT => {
+                let [ValueRef::Obj(vector), ValueRef::I64(index)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self
+                    .vector_element(*vector, *index)?
+                    .ok_or_else(|| type_error::check_failed(&ctx))?;
+                Ok(0)
+            }
+            VECTOR_ELEMENT_OR => {
+                let [ValueRef::Obj(vector), ValueRef::I64(index), default] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self
+                    .vector_element(*vector, *index)?
+                    .unwrap_or_else(|| default.to_value());
+                Ok(0)
+            }
+            VECTOR_ELEMENT_SETTER => {
+                let [value, ValueRef::Obj(vector), ValueRef::I64(index)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self
+                    .vector_element_setter(value.to_value(), *vector, *index)?
+                    .ok_or_else(|| type_error::check_failed(&ctx))?;
+                Ok(0)
+            }
+            STRETCHY_ADD => {
+                let [ValueRef::Obj(vector), value] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.stretchy_add(*vector, value.to_value())?;
+                Ok(0)
+            }
+            TABLE_ELEMENT => {
+                let [ValueRef::Obj(table), key] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self
+                    .table_lookup(*table, key.to_value(), Some(&ctx))?
+                    .ok_or_else(|| type_error::check_failed(&ctx))?;
+                Ok(0)
+            }
+            TABLE_ELEMENT_OR => {
+                let [ValueRef::Obj(table), key, default] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self
+                    .table_lookup(*table, key.to_value(), Some(&ctx))?
+                    .unwrap_or_else(|| default.to_value());
+                Ok(0)
+            }
+            TABLE_ELEMENT_SETTER => {
+                let [value, ValueRef::Obj(table), key] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.table_element_setter(
+                    value.to_value(),
+                    *table,
+                    key.to_value(),
+                    Some(&ctx),
+                )?;
+                Ok(0)
+            }
+            TABLE_KEY_EXISTS => {
+                let [ValueRef::Obj(table), key] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::Bool(
+                    self.table_lookup(*table, key.to_value(), Some(&ctx))?
+                        .is_some(),
                 );
                 Ok(0)
             }
-            VECTOR_REF => {
-                let (arg, index, default) = match args {
-                    [arg, ValueRef::I64(index)] => (arg, index, None),
-                    [arg, ValueRef::I64(index), default @ ValueRef::Obj(_)] => {
-                        (arg, index, Some(default))
-                    }
-                    _ => return Err(HostError::Failed),
+            TABLE_REMOVE_KEY => {
+                let [ValueRef::Obj(table), key] = args else {
+                    return Err(HostError::Failed);
                 };
-                let elements = self.vector_elements_from_any(*arg)?;
-                let element = usize::try_from(*index)
-                    .ok()
-                    .and_then(|index| elements.get(index))
-                    .cloned();
-                rets[0] = match (element, default) {
-                    (Some(element), _) => element,
-                    (None, Some(default)) => default.to_value(),
-                    (None, None) => return Err(HostError::Failed),
-                };
+                rets[0] = Value::Bool(self.table_remove_key(*table, key.to_value(), Some(&ctx))?);
                 Ok(0)
             }
             MAKE_OBJECT => {
@@ -2974,7 +3102,10 @@ impl InterlokoHost {
         let class = self.builtin_class(BuiltinValueClass::Vector)?;
         Ok(self.push_object(RuntimeObject {
             class,
-            storage: RuntimeObjectStorage::Vector { elements },
+            storage: RuntimeObjectStorage::Vector {
+                elements,
+                constant: true,
+            },
         }))
     }
 
@@ -3167,14 +3298,6 @@ impl InterlokoHost {
             .ok_or(HostError::Failed)
     }
 
-    fn vector_elements_from_any(&self, value: ValueRef<'_>) -> Result<&[Value], HostError> {
-        let object = self.object_from_any(value)?;
-        match &object.storage {
-            RuntimeObjectStorage::Vector { elements } => Ok(elements),
-            _ => Err(HostError::Failed),
-        }
-    }
-
     fn value_for_any(&self, value: ValueRef<'_>) -> Result<Value, HostError> {
         let ValueRef::Obj(obj) = value else {
             return Err(HostError::Failed);
@@ -3195,8 +3318,10 @@ impl InterlokoHost {
                 RuntimeObjectStorage::String { text: right },
             ) => left.as_str() == right.as_str(),
             (
-                RuntimeObjectStorage::Vector { elements: left },
-                RuntimeObjectStorage::Vector { elements: right },
+                RuntimeObjectStorage::Vector { elements: left, .. },
+                RuntimeObjectStorage::Vector {
+                    elements: right, ..
+                },
             ) => left == right,
             (left, right) => left.denotes_same(right),
         })
@@ -3627,31 +3752,107 @@ pub fn limited_integer_type_signature() -> HostSig {
     }
 }
 
-/// Host signature for immutable vector length.
+/// Host signature for [`MAKE_VECTOR`]: `(class, size, fill) -> vector`.
 #[must_use]
-pub fn vector_size_signature() -> HostSig {
+pub fn make_vector_signature() -> HostSig {
     HostSig {
-        args: vec![any_type()],
+        args: vec![ValueType::U64, ValueType::I64, any_type()],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for [`MAKE_TABLE`]: `() -> table`.
+#[must_use]
+pub fn make_table_signature() -> HostSig {
+    HostSig {
+        args: Vec::new(),
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for [`COLLECTION_SIZE`]: `(collection) -> size`.
+#[must_use]
+pub fn collection_size_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type()],
         rets: vec![ValueType::I64],
     }
 }
 
-/// Host signature for immutable vector indexing.
+/// Host signature for [`VECTOR_ELEMENT`]: `(vector, index) -> element`.
 #[must_use]
-pub fn vector_ref_signature() -> HostSig {
+pub fn vector_element_signature() -> HostSig {
     HostSig {
-        args: vec![any_type(), ValueType::I64],
+        args: vec![object_type(), ValueType::I64],
         rets: vec![any_type()],
     }
 }
 
-/// Host signature for immutable vector indexing with a default, returned
-/// when the index is outside the vector.
+/// Host signature for [`VECTOR_ELEMENT_OR`]: `(vector, index, default) ->
+/// element`.
 #[must_use]
 pub fn vector_element_or_signature() -> HostSig {
     HostSig {
-        args: vec![any_type(), ValueType::I64, any_type()],
+        args: vec![object_type(), ValueType::I64, any_type()],
         rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`VECTOR_ELEMENT_SETTER`]: `(value, vector, index) ->
+/// value`.
+#[must_use]
+pub fn vector_element_setter_signature() -> HostSig {
+    HostSig {
+        args: vec![any_type(), object_type(), ValueType::I64],
+        rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`STRETCHY_ADD`]: `(vector, element) -> vector`.
+#[must_use]
+pub fn stretchy_add_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type(), any_type()],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for [`TABLE_ELEMENT`]: `(table, key) -> value`.
+#[must_use]
+pub fn table_element_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type(), any_type()],
+        rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`TABLE_ELEMENT_OR`]: `(table, key, default) ->
+/// value`.
+#[must_use]
+pub fn table_element_or_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type(), any_type(), any_type()],
+        rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`TABLE_ELEMENT_SETTER`]: `(value, table, key) ->
+/// value`.
+#[must_use]
+pub fn table_element_setter_signature() -> HostSig {
+    HostSig {
+        args: vec![any_type(), object_type(), any_type()],
+        rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`TABLE_KEY_EXISTS`] and [`TABLE_REMOVE_KEY`]:
+/// `(table, key) -> <boolean>`.
+#[must_use]
+pub fn table_key_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type(), any_type()],
+        rets: vec![ValueType::Bool],
     }
 }
 
@@ -4029,7 +4230,7 @@ mod tests {
                     RuntimeObjectStorage::Native { slots } => format!("native {slots:?}"),
                     RuntimeObjectStorage::String { text } => format!("string {:?}", text.as_str()),
                     RuntimeObjectStorage::Symbol { name } => format!("symbol {name:?}"),
-                    RuntimeObjectStorage::Vector { elements } => format!("vector {elements:?}"),
+                    RuntimeObjectStorage::Vector { elements, .. } => format!("vector {elements:?}"),
                     _ => String::from("other"),
                 };
                 format!("{:?} {storage}", object.class)

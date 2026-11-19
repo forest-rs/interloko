@@ -13804,9 +13804,18 @@ fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
         sem::Intrinsic::GenericFunctionMethods => "generic-function-methods",
         sem::Intrinsic::MethodGenericFunction => "method-generic-function",
         sem::Intrinsic::MethodSpecializers => "method-specializers",
-        sem::Intrinsic::VectorSize => "vector-size",
-        sem::Intrinsic::VectorRef => "vector-ref",
-        sem::Intrinsic::VectorElementOr => "element",
+        sem::Intrinsic::CollectionSize => "size",
+        sem::Intrinsic::VectorElement | sem::Intrinsic::TableElement => "element",
+        sem::Intrinsic::VectorElementOr | sem::Intrinsic::TableElementOr => "element-or",
+        sem::Intrinsic::VectorElementSetter | sem::Intrinsic::TableElementSetter => {
+            "element-setter"
+        }
+        sem::Intrinsic::StretchyAdd => "add!",
+        sem::Intrinsic::TableKeyExists => "key-exists?",
+        sem::Intrinsic::TableRemoveKey => "remove-key!",
+        sem::Intrinsic::MakeVector => "make-vector",
+        sem::Intrinsic::MakeStretchyVector => "make-stretchy-vector",
+        sem::Intrinsic::MakeTable => "make-table",
         sem::Intrinsic::FloatToString => "float-to-string",
         sem::Intrinsic::IntegerToString => "integer-to-string",
         sem::Intrinsic::Concatenate => "concatenate",
@@ -23038,6 +23047,51 @@ end;
             let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
             assert_eq!(value, FunctionValue::Integer(42), "{policy:?}");
             assert_eq!(codes, ["type-error.range", "type-error.overflow"]);
+        }
+    }
+
+    #[test]
+    fn collection_access_failures_resume_with_a_replacement() {
+        // An index outside a vector reports the vector's indices and takes
+        // a replacement index, checked again; a missing table key takes the
+        // element itself.
+        let artifacts = CompilerSession::compile_source(
+            "collections.loko",
+            "define function main() => <integer>\n  \
+             let v = make(<vector>, size: 3, fill: 10);\n  \
+             v[2] := 30;\n  \
+             let t = make(<table>);\n  \
+             as(<integer>, v[5]) + as(<integer>, t[7])\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut seen = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                if let Some(report) = condition.type_error() {
+                    assert_eq!(report.kind(), Some(TypeErrorKind::Range));
+                    assert_eq!(report.expected, "limited(<integer>, min: 0, max: 2)");
+                    seen.push(report.value.clone());
+                    // -1 is no index either, so it fails again; 2 passes.
+                    return Choice::UseValue(vec![Value::I64(if seen.len() == 1 {
+                        -1
+                    } else {
+                        2
+                    })]);
+                }
+                let not_found = condition.runtime.layout().class_id("<not-found-error>");
+                assert_eq!(Some(condition.class), not_found);
+                seen.push(String::from("not found"));
+                let key = condition
+                    .runtime
+                    .read_slot(condition.condition, interloko_model::SlotId(1))
+                    .expect("the key");
+                Choice::UseValue(vec![key])
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+            assert_eq!(value, FunctionValue::Integer(37), "{policy:?}");
+            assert_eq!(seen, ["5", "-1", "not found"]);
         }
     }
 

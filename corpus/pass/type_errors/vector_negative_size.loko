@@ -1,0 +1,13 @@
+// expect: runtime code type-error.range
+// expect: run reports -2 is not of type limited(<integer>, min: 0, max: 268435456)
+
+// A vector's size is an `<integer>` from 0 to 2^28; `make` checks it as a
+// limited parameter is checked.
+
+define function sized(n :: <integer>) => <vector>
+  make(<vector>, size: n)
+end;
+
+define function main() => <integer>
+  size(sized(-2))
+end;

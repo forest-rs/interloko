@@ -14,7 +14,7 @@ end;
 define function main() => <integer>
   let direct = class-direct-slots(<circle>);
   let effective = class-effective-slots(<circle>);
-  if (vector-size(direct) = 2) if (vector-size(effective) = 3) 3 else 0 end
+  if (size(direct) = 2) if (size(effective) = 3) 3 else 0 end
   else 0
   end
 end;

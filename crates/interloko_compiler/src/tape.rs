@@ -620,6 +620,7 @@ impl ControlAbi {
                 | lower::Instr::SignalTypeError { .. }
                 | lower::Instr::UnboxObject { .. }
                 | lower::Instr::NoApplicableMethod { .. }
+                | lower::Instr::CheckedRuntimeCall { .. }
                 | lower::Instr::TextCall { check: Some(_), .. } => uses_control = true,
                 lower::Instr::Throw { tag, .. } if *tag != lower::ControlTag::Retry => {
                     uses_control = true;
@@ -1216,19 +1217,64 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::meta_query_object_signature(),
         ),
         (
-            RuntimeOp::VectorSize,
-            runtime::VECTOR_SIZE,
-            runtime::vector_size_signature(),
+            RuntimeOp::MakeVector,
+            runtime::MAKE_VECTOR,
+            runtime::make_vector_signature(),
         ),
         (
-            RuntimeOp::VectorRef,
-            runtime::VECTOR_REF,
-            runtime::vector_ref_signature(),
+            RuntimeOp::MakeTable,
+            runtime::MAKE_TABLE,
+            runtime::make_table_signature(),
+        ),
+        (
+            RuntimeOp::CollectionSize,
+            runtime::COLLECTION_SIZE,
+            runtime::collection_size_signature(),
+        ),
+        (
+            RuntimeOp::VectorElement,
+            runtime::VECTOR_ELEMENT,
+            runtime::vector_element_signature(),
         ),
         (
             RuntimeOp::VectorElementOr,
-            runtime::VECTOR_REF,
+            runtime::VECTOR_ELEMENT_OR,
             runtime::vector_element_or_signature(),
+        ),
+        (
+            RuntimeOp::VectorElementSetter,
+            runtime::VECTOR_ELEMENT_SETTER,
+            runtime::vector_element_setter_signature(),
+        ),
+        (
+            RuntimeOp::StretchyAdd,
+            runtime::STRETCHY_ADD,
+            runtime::stretchy_add_signature(),
+        ),
+        (
+            RuntimeOp::TableElement,
+            runtime::TABLE_ELEMENT,
+            runtime::table_element_signature(),
+        ),
+        (
+            RuntimeOp::TableElementOr,
+            runtime::TABLE_ELEMENT_OR,
+            runtime::table_element_or_signature(),
+        ),
+        (
+            RuntimeOp::TableElementSetter,
+            runtime::TABLE_ELEMENT_SETTER,
+            runtime::table_element_setter_signature(),
+        ),
+        (
+            RuntimeOp::TableKeyExists,
+            runtime::TABLE_KEY_EXISTS,
+            runtime::table_key_signature(),
+        ),
+        (
+            RuntimeOp::TableRemoveKey,
+            runtime::TABLE_REMOVE_KEY,
+            runtime::table_key_signature(),
         ),
     ]
     .into_iter()
@@ -2343,6 +2389,26 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm
                     .end_region()
                     .ok_or_else(|| invalid_lowered("unbox region is not open"))?;
+            }
+            lower::Instr::CheckedRuntimeCall {
+                dst,
+                op,
+                args,
+                failed,
+                span,
+            } => {
+                // The call raises the check-failed tag when it refuses its
+                // arguments; the passing path is the call alone.
+                let check_failed = self.abi.control()?.check_failed;
+                let sig = self.abi.runtime_call(*op)?;
+                let failed = self.label(*failed)?;
+                self.set_span(*span);
+                self.asm.begin_region(&[Catch::Tag(check_failed, failed)]);
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
+                self.asm
+                    .end_region()
+                    .ok_or_else(|| invalid_lowered("checked call region is not open"))?;
             }
             lower::Instr::NoApplicableMethod {
                 dst,

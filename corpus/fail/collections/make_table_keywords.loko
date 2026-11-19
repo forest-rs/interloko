@@ -1,0 +1,8 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.unknown-init-keyword
+
+// `make(<table>)` takes no keywords.
+
+define function main() => <integer>
+  size(make(<table>, size: 10))
+end;

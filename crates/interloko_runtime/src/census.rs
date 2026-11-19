@@ -12,6 +12,7 @@ use core::mem::size_of;
 use execution_tape::value::{Obj, Value};
 
 use crate::boxed::BoxedHandle;
+use crate::evacuate::stored_values;
 use crate::region::{ObjectRef, Region, Space};
 use crate::{
     INTERLOKO_OBJECT_TYPE, INTERLOKO_VALUE_TYPE, InterlokoHost, RuntimeObject, RuntimeObjectStorage,
@@ -82,7 +83,8 @@ pub(crate) fn object_bytes(object: &RuntimeObject) -> usize {
         RuntimeObjectStorage::String { text } => text.as_str().len(),
         RuntimeObjectStorage::StringBuilder { text, .. } => text.capacity(),
         RuntimeObjectStorage::Symbol { name } => name.len(),
-        RuntimeObjectStorage::Vector { elements } => elements.len() * size_of::<Value>(),
+        RuntimeObjectStorage::Vector { elements, .. } => elements.len() * size_of::<Value>(),
+        RuntimeObjectStorage::Table(table) => table.bytes(),
         RuntimeObjectStorage::ClassMeta { .. }
         | RuntimeObjectStorage::GenericMeta { .. }
         | RuntimeObjectStorage::MethodMeta { .. }
@@ -227,10 +229,5 @@ pub(crate) struct RegionMarks {
 
 /// Returns the values an object refers to.
 pub(crate) fn object_edges(object: &RuntimeObject) -> impl Iterator<Item = &Value> {
-    let edges: &[Value] = match &object.storage {
-        RuntimeObjectStorage::Native { slots } => slots,
-        RuntimeObjectStorage::Vector { elements } => elements,
-        _ => &[],
-    };
-    edges.iter()
+    stored_values(&object.storage).unwrap_or_default().iter()
 }

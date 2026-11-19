@@ -472,13 +472,35 @@ pub enum RuntimeOp {
     MethodGenericFunction,
     /// Returns a vector of class metaobjects for a method's specializers.
     MethodSpecializers,
-    /// Returns vector length.
-    VectorSize,
-    /// Returns a vector element as `<object>`.
-    VectorRef,
+    /// Makes a `<vector>` or `<stretchy-vector>` from its class, size and
+    /// fill.
+    MakeVector,
+    /// Makes an empty `<table>`.
+    MakeTable,
+    /// Returns a vector's or table's size.
+    CollectionSize,
+    /// Returns a vector element as `<object>`; an index outside the vector
+    /// raises the check-failed tag.
+    VectorElement,
     /// Returns a vector element as `<object>`, or a default when the index
     /// is outside the vector.
     VectorElementOr,
+    /// Stores a vector element; an index outside the vector or a constant
+    /// vector raises the check-failed tag.
+    VectorElementSetter,
+    /// Adds an element at the end of a `<stretchy-vector>`.
+    StretchyAdd,
+    /// Returns the value under a key of a `<table>`; a missing key raises
+    /// the check-failed tag.
+    TableElement,
+    /// Returns the value under a key of a `<table>`, or a default.
+    TableElementOr,
+    /// Stores a value under a key of a `<table>`.
+    TableElementSetter,
+    /// Returns whether a `<table>` has a key.
+    TableKeyExists,
+    /// Removes a key's entry from a `<table>`, returning whether it had one.
+    TableRemoveKey,
     /// Renders a float as literal text.
     FloatToString,
     /// Renders a `<single-float>` as suffixed literal text.
@@ -1832,6 +1854,22 @@ pub enum Instr {
     PopBinding {
         /// Token register returned by the matching push.
         token: Reg,
+        /// Source span.
+        span: Span,
+    },
+    /// Runtime host call that may refuse its arguments, such as a vector
+    /// index outside the vector: the call raises the check-failed tag and
+    /// execution continues at `failed` with `dst` unset. Otherwise it is a
+    /// [`Self::RuntimeCall`].
+    CheckedRuntimeCall {
+        /// Destination register.
+        dst: Reg,
+        /// Runtime operation.
+        op: RuntimeOp,
+        /// Argument registers.
+        args: Vec<Reg>,
+        /// Where execution continues when the call refuses its arguments.
+        failed: LabelId,
         /// Source span.
         span: Span,
     },
@@ -7719,6 +7757,13 @@ impl<'module> BodyLowering<'module> {
         span: Span,
     ) -> Result<Value, LowerError> {
         match intrinsic {
+            sem::Intrinsic::VectorElement | sem::Intrinsic::VectorElementSetter => {
+                return self.lower_vector_access(intrinsic, args, span);
+            }
+            sem::Intrinsic::TableElement => return self.lower_table_element(args, span),
+            sem::Intrinsic::MakeVector | sem::Intrinsic::MakeStretchyVector => {
+                return self.lower_make_vector(intrinsic, args, result_kind, span);
+            }
             sem::Intrinsic::Text(function) => return self.lower_text_call(function, args, span),
             sem::Intrinsic::CharCompare(op) => {
                 let [lhs, rhs] = args else {
@@ -7901,6 +7946,298 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         Ok(result)
+    }
+
+    /// Lowers an intrinsic's arguments as its runtime operation takes them:
+    /// boxed where it takes an `<object>`, and integers widened.
+    fn lower_runtime_args(
+        &mut self,
+        op: RuntimeOp,
+        args: &[sem::Expr],
+    ) -> Result<Vec<Value>, LowerError> {
+        args.iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                let value = self.lower_expr(arg)?;
+                Ok(if runtime_op_arg_is_any(op, index) {
+                    self.box_any(value, arg.span())?
+                } else if matches!(value.kind, ValueKind::I32 | ValueKind::U32) {
+                    self.widen_integer(value, arg.span())
+                } else {
+                    value
+                })
+            })
+            .collect()
+    }
+
+    /// Lowers `make(<vector>, ...)` or `make(<stretchy-vector>, ...)`: the
+    /// class, then the size and fill sem checked.
+    fn lower_make_vector(
+        &mut self,
+        intrinsic: sem::Intrinsic,
+        args: &[sem::Expr],
+        result_kind: sem::ValueKind,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let builtin = if intrinsic == sem::Intrinsic::MakeVector {
+            sem::BuiltinValueClass::Vector
+        } else {
+            sem::BuiltinValueClass::StretchyVector
+        };
+        let class = self
+            .module
+            .builtin_value_class(builtin)
+            .ok_or_else(|| invalid_semantic("a vector class is missing"))?;
+        let class_reg = self.alloc(ValueKind::U64);
+        self.instructions.push(Instr::ConstU64 {
+            dst: class_reg.reg,
+            value: u64::from(class.0),
+            span,
+        });
+        let [size, fill] = args else {
+            return Err(invalid_semantic("make of a vector takes a size and a fill"));
+        };
+        let size = self.lower_expr(size)?;
+        let size = if matches!(size.kind, ValueKind::I32 | ValueKind::U32) {
+            self.widen_integer(size, span)
+        } else {
+            size
+        };
+        let fill = self.lower_expr(fill)?;
+        let fill = self.box_any(fill, span)?;
+        let result = self.alloc(self.value_kind(result_kind)?);
+        self.instructions.push(Instr::RuntimeCall {
+            dst: result.reg,
+            op: RuntimeOp::MakeVector,
+            args: vec![class_reg.reg, size.reg, fill.reg],
+            kind: result.kind,
+            span,
+        });
+        Ok(result)
+    }
+
+    /// Lowers `element(v, i)` or `element-setter(x, v, i)` of a vector. An
+    /// index outside the vector signals a `type-error.range` whose expected
+    /// type is the vector's indices, read when the check fails; a
+    /// `use-value` replacement index is tried in its place:
+    ///
+    /// ```text
+    /// retry:   dst = runtime.vector-element v i else failed
+    ///          jmp done
+    /// failed:  n = runtime.size v
+    ///          [setter: when 0 <= i < n, the vector is constant: signal
+    ///           <immutable-collection-error>, whose use-value is dst]
+    ///          i = signal type-error(i, n) -> retry
+    /// done:
+    /// ```
+    fn lower_vector_access(
+        &mut self,
+        intrinsic: sem::Intrinsic,
+        args: &[sem::Expr],
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let (op, index_at, vector_at) = match intrinsic {
+            sem::Intrinsic::VectorElement => (RuntimeOp::VectorElement, 1, 0),
+            _ => (RuntimeOp::VectorElementSetter, 2, 1),
+        };
+        let mut values = self.lower_runtime_args(op, args)?;
+        // A replacement index lands in a register of the access's own, not
+        // in a local the index came from.
+        let index = self.alloc(ValueKind::I64);
+        self.instructions.push(Instr::Move {
+            dst: index.reg,
+            src: values[index_at].reg,
+            span,
+        });
+        values[index_at] = index;
+        let vector = values[vector_at];
+        // The kernel method makes the check wherever it runs, inline or
+        // called, so its site names the method rather than a place.
+        let method = if op == RuntimeOp::VectorElement {
+            "element(<vector>)"
+        } else {
+            "element-setter(<vector>)"
+        };
+        let type_error = Box::new(TypeErrorSite {
+            indices: true,
+            ..*type_error_site(
+                TypeErrorKind::Range,
+                range_expected(IntRange {
+                    min: Some(0),
+                    max: None,
+                }),
+                format!("kernel:{method}"),
+                span,
+            )
+        });
+        let result = self.alloc(ValueKind::Any);
+        let [retry, failed, done] = core::array::from_fn(|_| self.alloc_label());
+        self.instructions.extend([
+            Instr::Jump { label: retry, span },
+            Instr::Label { label: retry },
+            Instr::CheckedRuntimeCall {
+                dst: result.reg,
+                op,
+                args: values.iter().map(|value| value.reg).collect(),
+                failed,
+                span,
+            },
+            Instr::Jump { label: done, span },
+            Instr::Label { label: failed },
+        ]);
+        let size = self.alloc(ValueKind::I64);
+        self.instructions.push(Instr::RuntimeCall {
+            dst: size.reg,
+            op: RuntimeOp::CollectionSize,
+            args: vec![vector.reg],
+            kind: ValueKind::I64,
+            span,
+        });
+        if op == RuntimeOp::VectorElementSetter {
+            // A store at an index inside the vector failed because the
+            // vector is constant.
+            let [nonnegative, inside, outside] = core::array::from_fn(|_| self.alloc_label());
+            let zero = self.alloc(ValueKind::I64);
+            let [at_least_zero, below_size] = core::array::from_fn(|_| self.alloc(ValueKind::Bool));
+            self.instructions.extend([
+                Instr::ConstI64 {
+                    dst: zero.reg,
+                    value: 0,
+                    span,
+                },
+                Instr::I64Compare {
+                    dst: at_least_zero.reg,
+                    op: sem::CompareOp::Ge,
+                    lhs: index.reg,
+                    rhs: zero.reg,
+                    span,
+                },
+                Instr::Branch {
+                    cond: at_least_zero.reg,
+                    then_label: nonnegative,
+                    else_label: outside,
+                    span,
+                },
+                Instr::Label { label: nonnegative },
+                Instr::I64Compare {
+                    dst: below_size.reg,
+                    op: sem::CompareOp::Lt,
+                    lhs: index.reg,
+                    rhs: size.reg,
+                    span,
+                },
+                Instr::Branch {
+                    cond: below_size.reg,
+                    then_label: inside,
+                    else_label: outside,
+                    span,
+                },
+                Instr::Label { label: inside },
+            ]);
+            let collection = self.box_any(vector, span)?;
+            let condition = self.collection_condition(
+                sem::ConditionClass::ImmutableCollectionError,
+                &[collection.reg],
+                interloko_model::condition::IMMUTABLE_COLLECTION_CODE,
+                span,
+            )?;
+            self.instructions.extend([
+                Instr::Signal {
+                    dsts: vec![result.reg],
+                    condition,
+                    span,
+                },
+                Instr::Jump { label: done, span },
+                Instr::Label { label: outside },
+            ]);
+        }
+        self.instructions.extend([
+            Instr::SignalTypeError {
+                dst: index.reg,
+                values: vec![index.reg, size.reg],
+                type_error,
+                resume: retry,
+                span,
+            },
+            Instr::Label { label: done },
+        ]);
+        Ok(result)
+    }
+
+    /// Lowers `element(t, k)` of a `<table>`. A key the table lacks signals
+    /// a `<not-found-error>`, whose `use-value` replacement is the element.
+    fn lower_table_element(&mut self, args: &[sem::Expr], span: Span) -> Result<Value, LowerError> {
+        let values = self.lower_runtime_args(RuntimeOp::TableElement, args)?;
+        let [table, key] = values.as_slice() else {
+            return Err(invalid_semantic("element of a table takes two arguments"));
+        };
+        let result = self.alloc(ValueKind::Any);
+        let [failed, done] = core::array::from_fn(|_| self.alloc_label());
+        self.instructions.extend([
+            Instr::CheckedRuntimeCall {
+                dst: result.reg,
+                op: RuntimeOp::TableElement,
+                args: vec![table.reg, key.reg],
+                failed,
+                span,
+            },
+            Instr::Jump { label: done, span },
+            Instr::Label { label: failed },
+        ]);
+        let collection = self.box_any(*table, span)?;
+        let condition = self.collection_condition(
+            sem::ConditionClass::NotFoundError,
+            &[collection.reg, key.reg],
+            interloko_model::condition::NOT_FOUND_CODE,
+            span,
+        )?;
+        self.instructions.extend([
+            Instr::Signal {
+                dsts: vec![result.reg],
+                condition,
+                span,
+            },
+            // A signal does not end its block; the jump does.
+            Instr::Jump { label: done, span },
+            Instr::Label { label: done },
+        ]);
+        Ok(result)
+    }
+
+    /// Makes the kernel collection condition `class` from its leading
+    /// `<object>` slots' `values`, then its stable `code`.
+    fn collection_condition(
+        &mut self,
+        class: sem::ConditionClass,
+        values: &[Reg],
+        code: &str,
+        span: Span,
+    ) -> Result<Reg, LowerError> {
+        let condition_class = self
+            .module
+            .condition_class(class)
+            .ok_or_else(|| invalid_semantic("a collection condition class is missing"))?;
+        let string_class = self
+            .module
+            .builtin_value_class(sem::BuiltinValueClass::String)
+            .ok_or_else(|| invalid_semantic("the <string> class is missing"))?;
+        let code_reg = self.alloc(ValueKind::Object(Some(string_class)));
+        self.instructions.push(Instr::StringLiteral {
+            dst: code_reg.reg,
+            value: code.into(),
+            class: string_class,
+            span,
+        });
+        let condition = self.alloc(ValueKind::Object(Some(condition_class)));
+        let mut fields = values.to_vec();
+        fields.push(code_reg.reg);
+        self.instructions.push(Instr::MakeObject {
+            dst: condition.reg,
+            class: condition_class,
+            fields,
+            span,
+        });
+        Ok(condition.reg)
     }
 
     fn lower_signal(
@@ -8324,7 +8661,26 @@ impl<'module> BodyLowering<'module> {
                 return Ok(None);
             };
             let actual = self.module.expr_kind(arg);
+            // A subclass's instance fits too: a `<stretchy-vector>` runs
+            // the `<vector>` method inline. Both are object registers.
+            let subclass = matches!(
+                (actual, local.kind),
+                (
+                    sem::ValueKind::Object(_) | sem::ValueKind::Vector(_),
+                    sem::ValueKind::Object(_) | sem::ValueKind::Vector(_)
+                )
+            ) && self
+                .module
+                .value_kind_class(actual)
+                .zip(self.module.value_kind_class(local.kind))
+                .is_some_and(|(actual, expected)| {
+                    self.module.is_same_or_subclass(actual, expected)
+                });
+            // An `<object>` parameter takes any value, which the operation
+            // boxes.
             let fits = actual == local.kind
+                || local.kind == sem::ValueKind::Any
+                || subclass
                 || (local.kind == sem::ValueKind::I64
                     && matches!(actual, sem::ValueKind::I32 | sem::ValueKind::U32));
             if !fits {
@@ -10041,9 +10397,18 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> Option<RuntimeOp> {
         sem::Intrinsic::GenericFunctionMethods => RuntimeOp::GenericFunctionMethods,
         sem::Intrinsic::MethodGenericFunction => RuntimeOp::MethodGenericFunction,
         sem::Intrinsic::MethodSpecializers => RuntimeOp::MethodSpecializers,
-        sem::Intrinsic::VectorSize => RuntimeOp::VectorSize,
-        sem::Intrinsic::VectorRef => RuntimeOp::VectorRef,
+        sem::Intrinsic::CollectionSize => RuntimeOp::CollectionSize,
+        sem::Intrinsic::VectorElement => RuntimeOp::VectorElement,
         sem::Intrinsic::VectorElementOr => RuntimeOp::VectorElementOr,
+        sem::Intrinsic::VectorElementSetter => RuntimeOp::VectorElementSetter,
+        sem::Intrinsic::StretchyAdd => RuntimeOp::StretchyAdd,
+        sem::Intrinsic::TableElement => RuntimeOp::TableElement,
+        sem::Intrinsic::TableElementOr => RuntimeOp::TableElementOr,
+        sem::Intrinsic::TableElementSetter => RuntimeOp::TableElementSetter,
+        sem::Intrinsic::TableKeyExists => RuntimeOp::TableKeyExists,
+        sem::Intrinsic::TableRemoveKey => RuntimeOp::TableRemoveKey,
+        sem::Intrinsic::MakeVector | sem::Intrinsic::MakeStretchyVector => RuntimeOp::MakeVector,
+        sem::Intrinsic::MakeTable => RuntimeOp::MakeTable,
         sem::Intrinsic::FloatToString => RuntimeOp::FloatToString,
         sem::Intrinsic::IntegerToString => RuntimeOp::IntegerToString,
         sem::Intrinsic::Concatenate => RuntimeOp::Concatenate,
@@ -10073,14 +10438,22 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         | RuntimeOp::GenericFunctionMethods
         | RuntimeOp::MethodGenericFunction
         | RuntimeOp::MethodSpecializers
-        | RuntimeOp::VectorSize
         | RuntimeOp::LimitedIntegerBase
         | RuntimeOp::LimitedIntegerMin
         | RuntimeOp::LimitedIntegerMax
         | RuntimeOp::SubclassTypeClass
         | RuntimeOp::TypeName => index == 0,
-        RuntimeOp::VectorRef => index == 0,
-        RuntimeOp::VectorElementOr => index != 1,
+        // Collections travel as the objects they are; elements, keys,
+        // values and defaults as boxed `<object>`s.
+        RuntimeOp::CollectionSize | RuntimeOp::VectorElement | RuntimeOp::MakeTable => false,
+        RuntimeOp::VectorElementOr | RuntimeOp::MakeVector => index == 2,
+        RuntimeOp::VectorElementSetter => index == 0,
+        RuntimeOp::StretchyAdd
+        | RuntimeOp::TableElement
+        | RuntimeOp::TableKeyExists
+        | RuntimeOp::TableRemoveKey => index == 1,
+        RuntimeOp::TableElementOr => index != 0,
+        RuntimeOp::TableElementSetter => index != 1,
         RuntimeOp::InstanceOfType => true,
         RuntimeOp::LimitedIntegerType => false,
         RuntimeOp::ClassMetaObject
@@ -10345,6 +10718,7 @@ fn type_error_site(
         expected,
         site,
         span: span.start..span.end,
+        indices: false,
     })
 }
 
@@ -10881,9 +11255,18 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::GenericFunctionMethods => "generic-function-methods",
         RuntimeOp::MethodGenericFunction => "method-generic-function",
         RuntimeOp::MethodSpecializers => "method-specializers",
-        RuntimeOp::VectorSize => "vector-size",
-        RuntimeOp::VectorRef => "vector-ref",
+        RuntimeOp::MakeVector => "make-vector",
+        RuntimeOp::MakeTable => "make-table",
+        RuntimeOp::CollectionSize => "size",
+        RuntimeOp::VectorElement => "vector-element",
         RuntimeOp::VectorElementOr => "vector-element-or",
+        RuntimeOp::VectorElementSetter => "vector-element-setter",
+        RuntimeOp::StretchyAdd => "add!",
+        RuntimeOp::TableElement => "table-element",
+        RuntimeOp::TableElementOr => "table-element-or",
+        RuntimeOp::TableElementSetter => "table-element-setter",
+        RuntimeOp::TableKeyExists => "key-exists?",
+        RuntimeOp::TableRemoveKey => "remove-key!",
         RuntimeOp::FloatToString | RuntimeOp::SingleFloatToString => "float-to-string",
         RuntimeOp::IntegerToString => "integer-to-string",
         RuntimeOp::Concatenate => "concatenate",
@@ -11593,6 +11976,20 @@ impl Module {
                 span,
             } => {
                 write!(f, "  %{dst} = unbox object %{value} else {otherwise}")?;
+                fmt_span(f, *span)
+            }
+            Instr::CheckedRuntimeCall {
+                dst,
+                op,
+                args,
+                failed,
+                span,
+            } => {
+                write!(f, "  %{dst} = runtime.{}", runtime_op_name(*op))?;
+                for arg in args {
+                    write!(f, " %{arg}")?;
+                }
+                write!(f, " else {failed}")?;
                 fmt_span(f, *span)
             }
             Instr::NoApplicableMethod {

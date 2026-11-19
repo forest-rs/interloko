@@ -1,6 +1,6 @@
 // expect: run 2
 // expect: dump lowered contains runtime.class-effective-slots
-// expect: dump lowered contains runtime.vector-size
+// expect: dump lowered contains runtime.size
 
 define class <shape> (<object>)
   slot size :: <integer>, init-value: 1;
@@ -11,5 +11,5 @@ define class <circle> (<shape>)
 end;
 
 define function main() => <integer>
-  vector-size(class-effective-slots(<circle>))
+  size(class-effective-slots(<circle>))
 end;

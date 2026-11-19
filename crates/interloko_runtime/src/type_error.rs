@@ -15,6 +15,7 @@ use execution_tape::host::{HostContext, HostError, ValueRef};
 use execution_tape::value::{Obj, Value};
 use interloko_model::condition::{ConditionClass, TypeErrorKind, TypeErrorSlot};
 use interloko_model::type_object::TypeObject;
+use interloko_model::types::IntRange;
 use interloko_model::{ClassId, FloatBits, SingleFloatBits, SlotId};
 
 use crate::control::{CHECK_FAILED_TAG, TypeErrorSite};
@@ -95,6 +96,17 @@ impl InterlokoHost {
             .ok_or(RuntimeError::MissingBuiltinClass {
                 name: ConditionClass::TypeError.name(),
             })?;
+        let (values, expected) = match (site.indices, values) {
+            (true, [index, Value::I64(size)]) => (
+                core::slice::from_ref(index),
+                TypeObject::limited(IntRange {
+                    min: Some(0),
+                    max: Some(size.saturating_sub(1)),
+                }),
+            ),
+            (true, _) => return Err(RuntimeError::CannotBoxValue),
+            (false, values) => (values, site.expected),
+        };
         let value = match values {
             [value] => self.box_top_value(value.clone())?,
             values => {
@@ -108,7 +120,7 @@ impl InterlokoHost {
                 self.box_top_value(vector)?
             }
         };
-        let expected = self.make_type_object(&site.expected)?;
+        let expected = self.make_type_object(&expected)?;
         let mut text = |text: &str| {
             self.push_string(text.to_string())
                 .map_err(|_| RuntimeError::MissingBuiltinClass { name: "<string>" })
@@ -202,7 +214,7 @@ impl InterlokoHost {
             RuntimeObjectStorage::String { text } => string_literal(text.as_str()),
             RuntimeObjectStorage::StringBuilder { .. } => "{<string-builder>}".into(),
             RuntimeObjectStorage::Symbol { name } => format!("#{name}"),
-            RuntimeObjectStorage::Vector { elements } => {
+            RuntimeObjectStorage::Vector { elements, .. } => {
                 let elements = elements
                     .iter()
                     .map(|element| self.describe_value(ValueRef::from_value(element)))
@@ -304,6 +316,7 @@ mod tests {
             expected,
             site: "typing:def0000000000000001:s0".into(),
             span: 4..9,
+            indices: false,
         }
     }
 

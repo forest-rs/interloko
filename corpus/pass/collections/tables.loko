@@ -1,0 +1,35 @@
+// expect: run 4116462
+// expect: diagnostics 0
+// expect: dump lowered contains runtime.table-element-setter
+
+// A `<table>` maps keys to values. Keys compare as Dylan's `<table>`
+// compares them, by `==`, except strings, which compare by their text as
+// `=` does: another `"max"` finds the entry stored under `"max"`. So the
+// integer 1 and the float 1.0 are different keys, as are two vectors with
+// the same elements. `element(t, k, default: d)` answers `d` for a key the
+// table lacks, `key-exists?` tests for one, and `remove-key!` removes one,
+// answering whether it was there.
+
+define function name(prefix :: <string>, suffix :: <string>) => <string>
+  concatenate(prefix, suffix)
+end;
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["max"] := 1;
+  t[name("m", "ax")] := 2;
+  t[1] := 10;
+  t[1.0] := 20;
+  t[#max] := 30;
+  let v = #[1];
+  t[v] := 400;
+  let found = as(<integer>, t[concatenate("ma", "x")])
+    + as(<integer>, t[1]) + as(<integer>, t[1.0]) + as(<integer>, t[#max])
+    + as(<integer>, t[v])
+    + as(<integer>, element(t, #[1], default: 6000));
+  // 2 + 10 + 20 + 30 + 400 + 6000 = 6462; the table has 5 keys.
+  let removed = if (remove-key!(t, "max")) 10000 else 0 end;
+  let again = if (remove-key!(t, "max")) 20000 else 0 end;
+  let present = if (key-exists?(t, 1.0)) 100000 else 0 end;
+  found + removed + again + present + size(t) * 1000000
+end;

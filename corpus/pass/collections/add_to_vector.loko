@@ -1,0 +1,12 @@
+// expect: runtime code dispatch.no-applicable-method
+// expect: diagnostics 0
+
+// `add!` is an open generic whose kernel methods grow a `<stretchy-vector>`
+// and a `<string-builder>`. A `<vector>` may be a stretchy one, so adding
+// to one compiles, and a vector that keeps its size has no method.
+
+define function main() => <integer>
+  let v = make(<vector>, size: 2);
+  add!(v, 3);
+  size(v)
+end;

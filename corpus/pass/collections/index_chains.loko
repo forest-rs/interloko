@@ -1,15 +1,15 @@
 // expect: run 42
 // expect: diagnostics 0
 // Element access chains with slot reads and other accesses, left to right:
-// `t.rows[1]` indexes the slot's value, and an index's value can be cast
+// `g.rows[1]` indexes the slot's value, and an index's value can be cast
 // and indexed again. Keys are any expressions.
 
-define class <table> (<object>)
+define class <grid> (<object>)
   slot rows :: <vector>;
 end;
 
 define function main() => <integer>
-  let t = make(<table>, rows: #[#[1, 2], #[40, 2]]);
+  let g = make(<grid>, rows: #[#[1, 2], #[40, 2]]);
   let i = 0;
-  as(<integer>, as(<vector>, t.rows[1])[i]) + as(<integer>, as(<vector>, t.rows[i + 1])[size(t.rows) - 1])
+  as(<integer>, as(<vector>, g.rows[1])[i]) + as(<integer>, as(<vector>, g.rows[i + 1])[size(g.rows) - 1])
 end;

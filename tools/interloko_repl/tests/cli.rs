@@ -448,22 +448,26 @@ fn invoke_shows_flow_types_and_contract_dependents() {
         "{stdout}"
     );
     assert!(stdout.contains("types status=checked "), "{stdout}");
-    let contract = stdout
+    // Kernel classes have contracts too (`<vector>`'s sealing), so find
+    // `pick`'s among them.
+    let contracts = stdout
         .lines()
         .filter_map(|line| line.trim().strip_prefix("object "))
-        .find(|id| id.starts_with("contract:"))
-        .expect("a contract object")
-        .to_string();
-
-    let (stdout, stderr) = run_repl(&format!(
-        "{definitions}:invoke {contract} show-dependents\n:quit\n"
-    ));
+        .filter(|id| id.starts_with("contract:"))
+        .map(String::from)
+        .collect::<Vec<_>>();
+    assert!(!contracts.is_empty(), "{stdout}");
+    let invokes = contracts
+        .iter()
+        .map(|contract| format!(":invoke {contract} show-dependents\n"))
+        .collect::<String>();
+    let (stdout, stderr) = run_repl(&format!("{definitions}{invokes}:quit\n"));
     assert!(stderr.is_empty(), "{stderr}");
-    assert!(
-        stdout.contains(&format!("contract {contract} of function pick")),
-        "{stdout}"
-    );
-    assert!(stdout.contains("dependents: 1"), "{stdout}");
+    let pick = stdout
+        .split("contract contract:")
+        .find(|report| report.contains(" of function pick"))
+        .expect("pick's contract");
+    assert!(pick.contains("dependents: 1"), "{stdout}");
 }
 
 #[test]

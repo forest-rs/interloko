@@ -18,15 +18,18 @@
 //! evacuation budget before anything changes: one per evacuated entry, one
 //! per value it holds, and one per root.
 
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
+use core::ops::Range;
 
 use execution_tape::value::{Obj, Value};
 
 use crate::boxed::BoxedHandle;
 use crate::census::{boxed_value_bytes, object_bytes, object_edges};
-use crate::region::{NurserySerials, ObjectRef, OpenTurn, Space};
+use crate::collection::{Table, TableUndo, identity_handle};
+use crate::region::{LoggedStore, NurserySerials, ObjectRef, OpenTurn, Space};
 use crate::{
     HeapStats, INTERLOKO_OBJECT_TYPE, INTERLOKO_VALUE_TYPE, InterlokoHost, RuntimeError,
     RuntimeObjectStorage,
@@ -135,19 +138,120 @@ impl Remap {
     }
 }
 
+impl Remap {
+    /// Rewrites the references to nursery survivors among the values at
+    /// `place` of an object's storage ([`stored_values`]). A table whose
+    /// identity key moved is reindexed under the key's new handle.
+    fn stored(&self, storage: &mut RuntimeObjectStorage, place: Range<usize>) {
+        match storage {
+            RuntimeObjectStorage::Native { slots: values }
+            | RuntimeObjectStorage::Vector {
+                elements: values, ..
+            } => {
+                let end = place.end.min(values.len());
+                values
+                    .get_mut(place.start.min(end)..end)
+                    .into_iter()
+                    .flatten()
+                    .for_each(|value| self.value(value));
+            }
+            RuntimeObjectStorage::Table(table) => {
+                let end = place.end.min(table.slots.len());
+                for slot in place.start.min(end)..end {
+                    let old = identity_handle(&table.slots[slot]);
+                    self.value(&mut table.slots[slot]);
+                    // Even slots hold keys.
+                    if slot % 2 == 0
+                        && let (Some(old), Some(new)) = (old, identity_handle(&table.slots[slot]))
+                    {
+                        table.rekey(slot / 2, old, new);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The values an object's storage holds, which may refer to other heap
+/// entries: a native object's slots, a vector's elements, or a table's
+/// keys and values, in its entry order.
+pub(crate) fn stored_values(storage: &RuntimeObjectStorage) -> Option<&[Value]> {
+    match storage {
+        RuntimeObjectStorage::Native { slots: values }
+        | RuntimeObjectStorage::Vector {
+            elements: values, ..
+        } => Some(values),
+        RuntimeObjectStorage::Table(table) => Some(&table.slots),
+        _ => None,
+    }
+}
+
+/// The places of image objects a turn's logged stores may have made refer
+/// to the nursery, as ranges of [`stored_values`] indices, each once.
+///
+/// A vector that grew contributes everything past the shortest length it
+/// grew from, so many additions to one vector cost one range, not one per
+/// addition; a table compacted during the turn contributes all of itself.
+fn logged_places(write_log: &[LoggedStore]) -> Vec<(usize, Range<usize>)> {
+    let mut slots = BTreeSet::new();
+    let mut grown = BTreeMap::<usize, usize>::new();
+    for store in write_log {
+        match store {
+            LoggedStore::Slot { index, slot, .. } => {
+                slots.insert((*index, *slot));
+            }
+            LoggedStore::Grew { index, len } => {
+                let from = grown.entry(*index).or_insert(*len);
+                *from = (*from).min(*len);
+            }
+            // A compaction moves every entry, so earlier logged positions
+            // no longer say where the turn's entries are: the whole table
+            // is a root.
+            LoggedStore::Table {
+                index,
+                undo: TableUndo::Compacted(_),
+            } => {
+                grown.insert(*index, 0);
+            }
+            LoggedStore::Table { index, undo } => {
+                if let Some(position) = Table::logged_position(undo) {
+                    slots.insert((*index, 2 * position));
+                    slots.insert((*index, 2 * position + 1));
+                }
+            }
+        }
+    }
+    slots
+        .into_iter()
+        .map(|(index, slot)| (index, slot..slot + 1))
+        .chain(
+            grown
+                .into_iter()
+                .map(|(index, from)| (index, from..usize::MAX)),
+        )
+        .collect()
+}
+
 impl InterlokoHost {
     /// Returns the turn's evacuation roots other than the values a caller
     /// keeps: roots it registered, and the current contents of the image
     /// slots it stored into.
     pub(crate) fn turn_roots(&self, turn: &OpenTurn) -> Vec<Value> {
-        let registered = self.roots[turn.roots..].iter().flatten().cloned();
-        let logged = turn.write_log.iter().filter_map(|store| {
-            match &self.image.objects.get(store.index)?.storage {
-                RuntimeObjectStorage::Native { slots } => slots.get(store.slot).cloned(),
-                _ => None,
-            }
-        });
-        registered.chain(logged).collect()
+        let mut roots: Vec<Value> = self.roots[turn.roots..].iter().flatten().cloned().collect();
+        for (index, place) in logged_places(&turn.write_log) {
+            let Some(values) = self
+                .image
+                .objects
+                .get(index)
+                .and_then(|object| stored_values(&object.storage))
+            else {
+                continue;
+            };
+            let end = place.end.min(values.len());
+            roots.extend(values[place.start.min(end)..end].iter().cloned());
+        }
+        roots
     }
 
     /// Evacuates the survivors of `turn` into the image and empties the
@@ -232,15 +336,8 @@ impl InterlokoHost {
             if !marked {
                 continue;
             }
-            match &mut object.storage {
-                RuntimeObjectStorage::Native { slots } => {
-                    slots.iter_mut().for_each(|value| remap.value(value));
-                }
-                RuntimeObjectStorage::Vector { elements } => {
-                    elements.iter_mut().for_each(|value| remap.value(value));
-                }
-                _ => {}
-            }
+            let len = stored_values(&object.storage).map_or(0, <[Value]>::len);
+            remap.stored(&mut object.storage, 0..len);
             promoted.objects += 1;
             promoted.bytes += object_bytes(&object);
             self.image.objects.push(object);
@@ -260,16 +357,16 @@ impl InterlokoHost {
             .iter_mut()
             .flatten()
             .for_each(|value| remap.value(value));
-        for store in &turn.write_log {
-            if let Some(RuntimeObjectStorage::Native { slots }) = self
+        for (index, place) in logged_places(&turn.write_log) {
+            let Some(storage) = self
                 .image
                 .objects
-                .get_mut(store.index)
+                .get_mut(index)
                 .map(|object| &mut object.storage)
-                && let Some(slot) = slots.get_mut(store.slot)
-            {
-                remap.value(slot);
-            }
+            else {
+                continue;
+            };
+            remap.stored(storage, place);
         }
         Ok(Evacuation { promoted, work })
     }

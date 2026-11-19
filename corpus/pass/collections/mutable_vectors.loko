@@ -1,0 +1,27 @@
+// expect: run 128
+// expect: diagnostics 0
+// expect: dump lowered contains runtime.make-vector
+// expect: dump lowered contains runtime.vector-element-setter
+
+// `make(<vector>, size: n, fill: x)` makes a vector of `n` elements, each
+// `x` (`size:` is 0 and `fill:` `#f` when absent), whose elements
+// `v[i] := x` replaces. An element is an `<object>`: a number boxes on the
+// way in and comes back out as an `<object>`. A store's value is the value
+// stored.
+
+define function main() => <integer>
+  let squares = make(<vector>, size: 8, fill: 0);
+  let i = 0;
+  while (i < size(squares))
+    squares[i] := i * i;
+    i := i + 1
+  end;
+  let stored = squares[0] := 79;
+  let empty = make(<vector>);
+  let falses = make(<vector>, size: 2);
+  if (size(empty) = 0)
+    if (falses[1] == #f) as(<integer>, squares[7]) + as(<integer>, stored) else 0 end
+  else
+    0
+  end
+end;

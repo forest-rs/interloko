@@ -52,6 +52,7 @@ use execution_tape::value::{ObjHandle, Value};
 
 use crate::RuntimeObject;
 use crate::boxed;
+use crate::collection::TableUndo;
 
 /// Handle bit marking a nursery object. Object handles stay below
 /// `2^45` so that a boxed `<object>` can carry any of them immediately.
@@ -198,17 +199,46 @@ pub(crate) struct OpenTurn {
 
 /// One store into an image object during a turn.
 ///
-/// The log is the turn's undo journal (an aborted turn restores `old` in
-/// reverse order), its remembered set (the image slots that may now refer
-/// to the nursery), and evidence of what the turn changed in the image.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct LoggedStore {
-    /// Image object written.
-    pub(crate) index: usize,
-    /// Slot written.
-    pub(crate) slot: usize,
-    /// Value the slot held before the store.
-    pub(crate) old: Value,
+/// The log is the turn's undo journal (an aborted turn undoes each store
+/// in reverse order), its remembered set (the image slots that may now
+/// refer to the nursery), and evidence of what the turn changed in the
+/// image.
+#[derive(Clone, Debug)]
+pub(crate) enum LoggedStore {
+    /// A native slot or a vector element was overwritten.
+    Slot {
+        /// Image object written.
+        index: usize,
+        /// Slot or element written.
+        slot: usize,
+        /// Value the slot held before the store.
+        old: Value,
+    },
+    /// An element was added at the end of a vector `len` long.
+    Grew {
+        /// Image vector.
+        index: usize,
+        /// Its length before.
+        len: usize,
+    },
+    /// A table entry was added, replaced or removed, or the table compacted.
+    Table {
+        /// Image table.
+        index: usize,
+        /// How to undo it.
+        undo: TableUndo,
+    },
+}
+
+impl LoggedStore {
+    /// The image object stored into.
+    pub(crate) const fn index(&self) -> usize {
+        match self {
+            Self::Slot { index, .. } | Self::Grew { index, .. } | Self::Table { index, .. } => {
+                *index
+            }
+        }
+    }
 }
 
 #[cfg(test)]
