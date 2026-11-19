@@ -571,7 +571,13 @@ The current slices include:
   default`, testing `default == $unsupplied` when the call passed none. A
   typed `c[k]` runs the kernel's plain operation inline, without testing
   for a default;
-- recoverable condition/restart forms, with `<condition>`, `<error>`,
+- recoverable condition/restart forms: `handle body with restart e :: <c>
+  when guard => body end`, whose body and restart are bodies with their
+  own `let`s, and Dylan's `block () body cleanup body exception (e :: <c>)
+  body end`, a restart around the block's body that runs after its
+  cleanup, with the block's exit procedure in scope (one exception clause
+  per block for now, and no `test:` or `init-arguments:` options); with
+  `<condition>`, `<error>`,
   `<type-error>`, `<no-applicable-method>`, `<select-error>`,
   `<not-found-error>`, `<immutable-collection-error>`,
   `<collection-modified-error>`, `<constant-cycle-error>` and

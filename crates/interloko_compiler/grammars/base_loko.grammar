@@ -57,17 +57,20 @@ rule let-name-binding = let-name type-annotation?
 rule let-name = name
 rule let-values-binding = `(` trailing-list-of<let-name-binding, `,`> `)`
 rule expression = assignment-expression
-rule handle-expression = `handle` expression `with` restart-clause `end`
-rule restart-clause = `restart` restart-condition restart-guard? expression
+rule handle-expression = `handle` body `with` restart-clause `end`
+rule restart-clause = `restart` restart-condition restart-guard? body
 rule restart-guard = `when` expression `=>`
 rule restart-condition = restart-parameter | restart-condition-type
 rule restart-parameter = restart-name type-annotation
 rule restart-name = name
 rule restart-condition-type = type-name
-rule block-expression = `block` `(` block-exit-name? `)` body cleanup-clause? `end`
+rule block-expression = `block` `(` block-exit-name? `)` body cleanup-clause? exception-clause? `end`
 rule begin-expression = `begin` body `end`
 rule block-exit-name = name
 rule cleanup-clause = `cleanup` body
+// Dylan's `exception (e :: <c>) body`: a restart for the block's body that
+// runs after its cleanup, as `handle` would.
+rule exception-clause = `exception` `(` restart-condition `)` body
 rule while-expression = `while` `(` expression `)` body `end`
 rule until-expression = `until` `(` expression `)` body `end`
 rule for-expression = `for` `(` trailing-list-of<for-clause, `,`> `)` body `end`

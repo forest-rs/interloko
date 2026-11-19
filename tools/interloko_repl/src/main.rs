@@ -3618,6 +3618,7 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::Block
         | TokenKind::Begin
         | TokenKind::Cleanup
+        | TokenKind::Exception
         | TokenKind::While
         | TokenKind::Until
         | TokenKind::For

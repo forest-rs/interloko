@@ -754,12 +754,21 @@ impl BaseLokoCstProjector<'_> {
         self.node(CstKind::TypeExpr, self.sorted(children), node.span)
     }
 
+    /// Builds `handle body with restart-clause end`: the body, then the
+    /// restart clause.
     fn build_handle(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let nested = node
             .children
             .iter()
-            .filter(|child| child.is_rule("expression") || child.is_rule("restart-clause"))
-            .map(|child| self.build_expr(child))
+            .filter_map(|child| {
+                if child.is_rule("body") {
+                    Some(self.build_body(child))
+                } else if child.is_rule("restart-clause") {
+                    Some(self.build_restart(child))
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
         self.node_with_nested(CstKind::HandleExpr, node, nested)
     }
@@ -777,6 +786,10 @@ impl BaseLokoCstProjector<'_> {
                     .map(|body| vec![self.build_body(body)])
                     .unwrap_or_default();
                 nested.push(self.node_with_nested(CstKind::CleanupClause, child, body));
+            } else if child.is_rule("exception-clause") {
+                // An exception clause is a restart clause in Dylan's
+                // spelling: its condition, then its body.
+                nested.push(self.build_restart(child));
             }
         }
         // Only this block's own exit name: a block nested in the body
@@ -786,12 +799,15 @@ impl BaseLokoCstProjector<'_> {
         self.node_with_nested_and_roles(CstKind::BlockExpr, node, nested, roles)
     }
 
+    /// Builds a restart clause, `restart condition guard? body`, or a
+    /// block's `exception (condition) body`: the body, the guard, and the
+    /// condition's name and type roles.
     fn build_restart(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let mut nested = node
             .children
             .iter()
-            .find(|child| child.is_rule("expression"))
-            .map(|expr| vec![self.build_expr(expr)])
+            .find(|child| child.is_rule("body"))
+            .map(|body| vec![self.build_body(body)])
             .unwrap_or_default();
         if let Some(guard) = node
             .children

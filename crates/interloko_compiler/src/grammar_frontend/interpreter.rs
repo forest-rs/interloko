@@ -38,6 +38,7 @@ const LOKO_RESERVED_WORDS: &[&str] = &[
     "when",
     "block",
     "cleanup",
+    "exception",
     "begin",
     "while",
     "until",

@@ -1,0 +1,42 @@
+// expect: run 3
+// expect: diagnostics 0
+// expect: dump ast contains handle
+
+// Dylan's `block () body exception (e :: <c>) handler end`: a condition of
+// class `<c>` signalled in the body unwinds it, running its cleanup first,
+// and the handler's values are the block's. The block's exit procedure is
+// bound in the handler as well.
+
+define class <oops> (<error>)
+  constant slot code :: <integer>, required-init-keyword: code:;
+end;
+
+define function check(n :: <integer>) => <integer>
+  if (n > 2) signal(make(<oops>, code: n)) else n end
+end;
+
+define function main() => <integer>
+  let passed = 0;
+  let cleaned = 0;
+  let pass = method (test :: <boolean>) => ()
+    if (test) passed := passed + 1 end
+  end;
+  let caught = block ()
+    check(7)
+  cleanup
+    cleaned := cleaned + 1
+  exception (e :: <oops>)
+    pass(cleaned = 1);                     // the cleanup ran first
+    e.code + 1
+  end;
+  pass(caught = 8);
+  let exited = block (out)
+    check(9);
+    0
+  exception (<oops>)
+    out(2);
+    4
+  end;
+  pass(exited = 2);
+  passed
+end;
