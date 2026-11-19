@@ -400,7 +400,10 @@ pub fn fixes(
         else {
             continue;
         };
-        let read = read_binding(module, typed, *reason);
+        // A read records the fact it saw, which may be a join that kept
+        // one side's fact; that side is the binding's.
+        let read = read_binding(module, typed, *reason)
+            .or_else(|| read_binding(module, typed, typed.principal_reason(*reason)));
         if let Some((binding, local, true)) = &read
             && type_source(module, &required).is_some()
         {

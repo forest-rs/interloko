@@ -2369,3 +2369,308 @@ fn a_test_that_assigns_its_operand_narrows_nothing() {
     assert_eq!(range.rule, TypingRule::RangeWithin);
     assert_eq!(type_name(&module, &range.actual[0]), "singleton(3)");
 }
+
+#[test]
+fn a_join_relies_on_what_each_path_relied_on() {
+    // After the `if`, `x` is a `<square>` on both paths: the first path's
+    // test says so directly, but the second's says it only because
+    // `<shape>` is sealed with exactly two subclasses. The send relies on
+    // that sealing, whichever path's fact the join keeps.
+    let (module, artifact) = decisions_for(
+        "define sealed abstract class <shape> (<object>)\nend;\n\
+         define sealed class <circle> (<shape>)\nend;\n\
+         define sealed class <square> (<shape>)\nend;\n\
+         define generic measure(s :: <shape>) => <integer>;\n\
+         define method measure(s :: <square>) => <integer>\n  4\nend;\n\
+         define function f(x :: <shape>, flag :: <boolean>) => <integer>\n  \
+         block (out)\n    \
+         let checked = if (flag)\n      \
+         if (instance?(x, <square>)) 0 else out(0) end\n    \
+         else\n      if (instance?(x, <circle>)) out(1) else 0 end\n    end;\n    \
+         measure(x) + checked\n  end\nend;",
+    );
+    let shape = module
+        .classes
+        .iter()
+        .position(|class| class.name == "<shape>")
+        .map(|index| sem::ClassId(u32::try_from(index).expect("class index")))
+        .expect("<shape>");
+    let [dispatch] = checks_of(&module, &artifact, "f", TypingCheck::Dispatch)
+        .try_into()
+        .expect("one dispatch");
+    assert_eq!(dispatch.verdict, TypingVerdict::Proved);
+    let typed = typed(&module, &artifact, "f");
+    assert!(
+        typed
+            .dependencies(&dispatch)
+            .contains(&TypingDependency::Sealed(shape)),
+        "{:?}",
+        typed.dependencies(&dispatch)
+    );
+}
+
+/// The class `name` of `module`.
+fn class_named(module: &sem::Module, name: &str) -> sem::ClassId {
+    module
+        .classes
+        .iter()
+        .position(|class| class.name == name)
+        .map(|index| sem::ClassId(u32::try_from(index).expect("class index")))
+        .expect("class")
+}
+
+const MEASURED_SHAPES: &str = "define sealed abstract class <shape> (<object>)\nend;\n\
+     define sealed class <circle> (<shape>)\nend;\n\
+     define sealed class <square> (<shape>)\nend;\n\
+     define generic measure(s :: <object>) => <integer>;\n\
+     define method measure(s :: <square>) => <integer>\n  4\nend;\n";
+
+#[test]
+fn a_join_relies_on_what_made_a_path_dead() {
+    // The last branch is dead only because `<shape>` is sealed with two
+    // subclasses, so `y` never reaches the send: proving it relies on that
+    // sealing, though only the live branches' values reach it.
+    let (module, artifact) = decisions_for(&format!(
+        "{MEASURED_SHAPES}define function g(x :: <shape>, y :: <object>) => <integer>\n  \
+         let s = if (instance?(x, <circle>)) make(<square>)\n    \
+         elseif (instance?(x, <square>)) make(<square>) else y end;\n  \
+         measure(s)\nend;"
+    ));
+    let [dispatch] = checks_of(&module, &artifact, "g", TypingCheck::Dispatch)
+        .try_into()
+        .expect("one dispatch");
+    assert_eq!(dispatch.verdict, TypingVerdict::Proved);
+    let shape = class_named(&module, "<shape>");
+    let dependencies = typed(&module, &artifact, "g").dependencies(&dispatch);
+    assert!(
+        dependencies.contains(&TypingDependency::Sealed(shape)),
+        "{dependencies:?}"
+    );
+}
+
+#[test]
+fn a_comparison_narrowing_relies_on_what_it_compared_against() {
+    // `n < m` bounds `n` by `m`'s range, which `limit`'s contract gives, so
+    // the overflow proof relies on that contract.
+    let (module, artifact) = decisions_for(
+        "define function limit() => limited(<integer>, min: 0, max: 10)\n  10\nend;\n\
+         define function h(n :: limited(<integer>, min: 0, max: 4294967296)) => <integer>\n  \
+         let m = limit();\n  \
+         if (n < m) n * n else 0 end\nend;",
+    );
+    let [overflow] = checks_of(&module, &artifact, "h", TypingCheck::Overflow)
+        .try_into()
+        .expect("one overflow check");
+    assert_eq!(overflow.rule, TypingRule::OverflowImpossible);
+    let limit = module
+        .functions
+        .iter()
+        .find(|function| function.name == "limit")
+        .expect("limit")
+        .definition;
+    let dependencies = typed(&module, &artifact, "h").dependencies(&overflow);
+    assert!(
+        dependencies.contains(&TypingDependency::Contract(limit)),
+        "{dependencies:?}"
+    );
+}
+
+#[test]
+fn a_loop_head_relies_on_what_its_back_edge_relied_on() {
+    // `s` is a `<square>` at the head whichever iteration it is: on entry
+    // because `p` is one, and around the back edge only because the
+    // `unless` test, with `<shape>` sealed, leaves `q` a `<square>`.
+    let (module, artifact) = decisions_for(&format!(
+        "{MEASURED_SHAPES}define function f(p :: <square>, q :: <shape>, n :: <integer>) => <integer>\n  \
+         let s :: <shape> = p;\n  \
+         let total = 0;\n  \
+         let i = 0;\n  \
+         while (i < n)\n    \
+         total := total + measure(s);\n    \
+         unless (instance?(q, <circle>)) s := q end;\n    \
+         i := i + 1\n  end;\n  \
+         total\nend;"
+    ));
+    let dispatch = checks_of(&module, &artifact, "f", TypingCheck::Dispatch)
+        .into_iter()
+        .next()
+        .expect("a dispatch");
+    assert_eq!(dispatch.verdict, TypingVerdict::Proved);
+    let shape = class_named(&module, "<shape>");
+    let dependencies = typed(&module, &artifact, "f").dependencies(&dispatch);
+    assert!(
+        dependencies.contains(&TypingDependency::Sealed(shape)),
+        "{dependencies:?}"
+    );
+}
+
+/// Whether the one proved dispatch of `name` relies on `<shape>`'s sealing.
+fn dispatch_relies_on_shape_sealing(source: &str, name: &str) -> bool {
+    let (module, artifact) = decisions_for(&format!("{MEASURED_SHAPES}{source}"));
+    let dispatch = checks_of(&module, &artifact, name, TypingCheck::Dispatch)
+        .into_iter()
+        .find(|decision| decision.verdict == TypingVerdict::Proved)
+        .expect("a proved dispatch");
+    typed(&module, &artifact, name)
+        .dependencies(&dispatch)
+        .contains(&TypingDependency::Sealed(class_named(&module, "<shape>")))
+}
+
+#[test]
+fn code_in_a_dead_path_is_dead_for_the_path_reason() {
+    // The exit call is in an arm the sealing rules out; the arm is dead
+    // because of that, not because the call would leave.
+    assert!(dispatch_relies_on_shape_sealing(
+        "define function f(x :: <shape>, y :: <object>) => <integer>\n  \
+         let sq :: <object> = make(<square>);\n  \
+         let s :: <object> = block (out)\n    \
+         if (instance?(x, <circle>)) sq elseif (instance?(x, <square>)) sq else out(y) end\n  \
+         end;\n  \
+         measure(s)\nend;",
+        "f",
+    ));
+}
+
+#[test]
+fn dead_paths_that_meet_keep_both_reasons() {
+    // Each arm of the inner test is dead for its own reason: the first two
+    // because a literal is `#f`, the last because of the sealing.
+    assert!(dispatch_relies_on_shape_sealing(
+        "define function f(x :: <shape>, y :: <object>) => <integer>\n  \
+         let t :: <object> = if (if (instance?(x, <circle>)) #f \
+         elseif (instance?(x, <square>)) #f else #t end) y else make(<square>) end;\n  \
+         measure(t)\nend;",
+        "f",
+    ));
+    // Two arms leave through exits, and the third is dead by the sealing.
+    assert!(dispatch_relies_on_shape_sealing(
+        "define function f(x :: <shape>, flag :: <boolean>, y :: <object>) => <integer>\n  \
+         let s :: <object> = make(<square>);\n  \
+         block (out)\n    \
+         if (flag)\n      \
+         if (instance?(x, <circle>)) out(0) elseif (instance?(x, <square>)) out(1) \
+         else s := y end\n    \
+         else 0 end;\n    \
+         measure(s)\n  end\nend;",
+        "f",
+    ));
+}
+
+#[test]
+fn a_loop_whose_back_edge_is_dead_relies_on_why() {
+    // No iteration comes back, because `limit`'s contract keeps `m` at most
+    // 10; if it did, `s` would be `y` at the send.
+    let (module, artifact) = decisions_for(&format!(
+        "{MEASURED_SHAPES}define function limit() => limited(<integer>, min: 0, max: 10)\n  10\nend;\n\
+         define function h(n :: <integer>, y :: <object>) => <integer>\n  \
+         let s :: <object> = make(<square>);\n  \
+         let m = limit();\n  \
+         let i = 0;\n  \
+         block (out)\n    \
+         while (i < n)\n      i := i + 1;\n      s := y;\n      \
+         if (m > 20) 0 else out(0) end\n    end;\n    \
+         measure(s)\n  end\nend;"
+    ));
+    let dispatch = checks_of(&module, &artifact, "h", TypingCheck::Dispatch)
+        .into_iter()
+        .find(|decision| decision.verdict == TypingVerdict::Proved)
+        .expect("a proved dispatch");
+    let limit = module
+        .functions
+        .iter()
+        .find(|function| function.name == "limit")
+        .expect("limit")
+        .definition;
+    let dependencies = typed(&module, &artifact, "h").dependencies(&dispatch);
+    assert!(
+        dependencies.contains(&TypingDependency::Contract(limit)),
+        "{dependencies:?}"
+    );
+}
+
+#[test]
+fn a_dead_path_is_cited_only_for_the_bindings_it_changed() {
+    // The dead arm narrows `s`, not `x`: the send on `x` relies on nothing
+    // about `<shape>`, and its strict fixes still offer to test `x`.
+    let source = "define function r(x :: <object>, s :: <shape>) => <integer>\n  \
+                  if (instance?(x, <shape>))\n    \
+                  let k = if (instance?(s, <circle>)) 1 elseif (instance?(s, <square>)) 2 else 3 end;\n    \
+                  measure(x) + k\n  \
+                  else 0 end\nend;";
+    let (module, artifact) = decisions_for(&format!("{MEASURED_SHAPES}{source}"));
+    let typed = typed(&module, &artifact, "r");
+    let dispatch = typed
+        .decisions
+        .iter()
+        .find(|decision| decision.check == TypingCheck::Dispatch)
+        .expect("a dispatch");
+    let shape = class_named(&module, "<shape>");
+    assert!(
+        !typed
+            .dependencies(dispatch)
+            .contains(&TypingDependency::Sealed(shape))
+    );
+    let fixes = strict_fixes(&module, typed, dispatch);
+    assert!(
+        fixes
+            .iter()
+            .any(|fix| matches!(fix, StrictFix::Narrow { name, .. } if name == "x")),
+        "{fixes:?}"
+    );
+}
+
+#[test]
+fn a_refutation_labels_only_the_paths_that_gave_the_value() {
+    // `y` is `v` whichever live arm runs; the dead arm's narrowing is cited
+    // for what it relies on, but gave no value, so it labels nothing.
+    let (_, artifact) = decisions_for(&format!(
+        "{MEASURED_SHAPES}define function p(s :: <shape>) => <integer>\n  \
+         let v :: <object> = 1;\n  \
+         let y = if (instance?(s, <circle>)) v\n    \
+         elseif (instance?(s, <square>)) v else make(<square>) end;\n  \
+         measure(y)\nend;"
+    ));
+    let refuted = artifact
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::TypingDispatchNoApplicableMethod)
+        .expect("the refuted send");
+    let labels = refuted
+        .labels
+        .iter()
+        .filter_map(|label| label.message.as_deref())
+        .collect::<Vec<_>>();
+    assert!(
+        labels.iter().all(|label| !label.contains("narrowed")),
+        "{labels:?}"
+    );
+}
+
+#[test]
+fn a_select_arm_ruled_out_by_a_contract_relies_on_it() {
+    // `bit`'s contract keeps `b` to 0 or 1, so the `==` tests leave the
+    // `otherwise` arm dead and `y` never reaches the send.
+    let (module, artifact) = decisions_for(&format!(
+        "{MEASURED_SHAPES}define function bit() => limited(<integer>, min: 0, max: 1)\n  1\nend;\n\
+         define function f(y :: <object>) => <integer>\n  \
+         let sq :: <object> = make(<square>);\n  \
+         let b = bit();\n  \
+         let s = select (b) 0 => sq; 1 => sq; otherwise => y; end;\n  \
+         measure(s)\nend;"
+    ));
+    let dispatch = checks_of(&module, &artifact, "f", TypingCheck::Dispatch)
+        .into_iter()
+        .find(|decision| decision.verdict == TypingVerdict::Proved)
+        .expect("a proved dispatch");
+    let bit = module
+        .functions
+        .iter()
+        .find(|function| function.name == "bit")
+        .expect("bit")
+        .definition;
+    let dependencies = typed(&module, &artifact, "f").dependencies(&dispatch);
+    assert!(
+        dependencies.contains(&TypingDependency::Contract(bit)),
+        "{dependencies:?}"
+    );
+}
