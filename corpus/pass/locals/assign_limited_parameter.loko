@@ -1,0 +1,33 @@
+// expect: run 1
+// expect: diagnostics 0
+
+// An assigned parameter keeps its declared range, as a limited `let` does:
+// each assignment checks the value, signalling `type-error.range` outside
+// it. A method's parameter takes its generic's range.
+
+define generic shifted(n :: limited(<integer>, min: 0, max: 10), k :: <integer>) => <integer>;
+
+define method shifted(n :: <integer>, k :: <integer>) => <integer>
+  n := n + k;
+  n
+end;
+
+define function moved(n :: limited(<integer>, min: 0, max: 10), k :: <integer>) => <integer>
+  n := n + k;
+  n
+end;
+
+define function main() => <integer>
+  let caught = 0;
+  let catch = method (code :: <integer>) => ()
+    if (code = -1) caught := caught + 1 end
+  end;
+  let closure = method (n :: limited(<integer>, min: 0, max: 10), k :: <integer>) => <integer>
+    n := n + k;
+    n
+  end;
+  catch(handle moved(3, 20) with restart e :: <type-error> -1 end);
+  catch(handle shifted(3, 20) with restart e :: <type-error> -1 end);
+  catch(handle closure(3, 20) with restart e :: <type-error> -1 end);
+  if (caught = 3 & moved(3, 4) = 7) 1 else 0 end
+end;
