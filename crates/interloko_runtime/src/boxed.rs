@@ -13,8 +13,9 @@
 //!   runtime object's own handle (`01`), a small immediate (`10`), or the
 //!   serial of a nursery box (`11`). A small immediate is a boolean (payload
 //!   `0` or `1`); with bit 32 set, a `<single-float>` whose IEEE 754 bits
-//!   are the low 32 bits; or with bit 33 set, a `<character>` whose Unicode
-//!   scalar value is the low 32 bits. Nursery serials count across turns, so a box kept
+//!   are the low 32 bits; with bit 33 set, a `<character>` whose Unicode
+//!   scalar value is the low 32 bits; or with bit 44 set, a
+//!   `<string-position>` whose byte offset is the low 44 bits. Nursery serials count across turns, so a box kept
 //!   past its turn is detected rather than aliased; see
 //!   [`crate::region`].
 //!
@@ -22,8 +23,9 @@
 //! payload bits set), which no IEEE arithmetic produces by default. Floats
 //! with those exact bits, integers outside the immediate range, and other
 //! values (`u64`s, objects whose handle does not fit) are boxed on the heap,
-//! so boxing never changes a value's bits. Every `<single-float>` and every
-//! `<character>` is immediate.
+//! so boxing never changes a value's bits. Every `<single-float>`,
+//! `<character>` and `<string-position>` is immediate: a string is at most
+//! [`crate::STRING_MAX_BYTES`] long.
 //!
 //! `<i32>` and `<u32>` are limited `<integer>` types, not classes: their
 //! values box as the `<integer>` they are, always immediate.
@@ -55,6 +57,8 @@ const KIND_SMALL: u64 = 0b10 << KIND_SHIFT;
 const SINGLE_FLOAT_FLAG: u64 = 1 << 32;
 /// Set in a small immediate's payload for a `<character>`.
 const CHARACTER_FLAG: u64 = 1 << 33;
+/// Set in a small immediate's payload for a `<string-position>`.
+const POSITION_FLAG: u64 = 1 << 44;
 const KIND_NURSERY_HEAP: u64 = 0b11 << KIND_SHIFT;
 
 /// Width of a nursery box's serial: the whole payload.
@@ -80,6 +84,8 @@ pub(crate) enum BoxedHandle {
     Bool(bool),
     /// An immediate `<character>`.
     Character(char),
+    /// An immediate `<string-position>`: a byte offset.
+    Position(u64),
     /// A runtime object, by its own [`crate::INTERLOKO_OBJECT_TYPE`] handle.
     Object(ObjHandle),
     /// A zero-based index into a region's boxed values.
@@ -127,6 +133,7 @@ impl BoxedHandle {
                 // The flag check leaves exactly the low 32 bits.
                 Self::SingleFloat(f32::from_bits(payload as u32))
             }
+            KIND_SMALL if payload & POSITION_FLAG != 0 => Self::Position(payload & !POSITION_FLAG),
             // Only a Unicode scalar value is a character.
             KIND_SMALL if payload >> 32 == CHARACTER_FLAG >> 32 => {
                 char::from_u32(payload as u32).map_or(Self::Invalid, Self::Character)
@@ -166,6 +173,13 @@ impl BoxedHandle {
     /// fits.
     pub(crate) const fn immediate_character(value: char) -> ObjHandle {
         ObjHandle(TAG | KIND_SMALL | CHARACTER_FLAG | value as u64)
+    }
+
+    /// Encodes a `<string-position>` as an immediate handle, or `None` for
+    /// an offset no string has.
+    pub(crate) fn immediate_position(offset: i64) -> Option<ObjHandle> {
+        let offset = u64::try_from(offset).ok()?;
+        (offset < POSITION_FLAG).then_some(ObjHandle(TAG | KIND_SMALL | POSITION_FLAG | offset))
     }
 
     /// Encodes a runtime object's handle, or `None` when it is too large to
@@ -309,6 +323,20 @@ mod tests {
         for raw in [0xD800_u64, 0xDFFF, 0x11_0000, u64::from(u32::MAX)] {
             assert_eq!(decode(ObjHandle(character | raw)), BoxedHandle::Invalid);
         }
+    }
+
+    #[test]
+    fn positions_are_immediate_and_distinct_from_other_small_values() {
+        for offset in [0, 1, 42, (1 << 44) - 1] {
+            let handle = BoxedHandle::immediate_position(offset).expect("a position");
+            assert_eq!(decode(handle), BoxedHandle::Position(offset as u64));
+        }
+        assert_eq!(BoxedHandle::immediate_position(-1), None);
+        assert_eq!(BoxedHandle::immediate_position(1 << 44), None);
+        assert_ne!(
+            BoxedHandle::immediate_position(0),
+            Some(BoxedHandle::immediate_bool(false))
+        );
     }
 
     #[test]

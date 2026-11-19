@@ -1,0 +1,11 @@
+// expect: run "é😀"
+// expect: diagnostics 0
+
+// `copy-sequence` copies the characters between two positions; `end:`
+// takes the reserved word as a keyword.
+
+define function main() => <string>
+  let s = "aé😀b";
+  let p = next-position(s, start-position(s));
+  copy-sequence(s, start: p, end: previous-position(s, end-position(s)))
+end;

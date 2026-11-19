@@ -79,6 +79,11 @@
 //! closure captures it, so it lives in a shared cell, against the same loop
 //! with the total in a register.
 //!
+//! `character scan` is one iteration of a loop over a 256-character ASCII
+//! `<string>` by position: `s[p]`, a `<character>` compare and
+//! `next-position`, two runtime host calls. `scan + digit?` tests each
+//! character with `digit?` instead, a third.
+//!
 //! Run with `cargo bench -p interloko_compiler --features std --bench typed`.
 
 use std::hint::black_box;
@@ -365,6 +370,30 @@ define function cell-looped(d :: <integer>) => <integer>
   end;
   read-total()
 end;
+
+define function scanned(d :: <integer>) => <integer>
+  let s = \"let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = \";
+  let p = start-position(s);
+  let stop = end-position(s);
+  let n = 0;
+  while (p < stop)
+    if (s[p] = ' ') n := n + 1 end;
+    p := next-position(s, p)
+  end;
+  n
+end;
+
+define function scanned-digits(d :: <integer>) => <integer>
+  let s = \"let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = 42; let x1 = \";
+  let p = start-position(s);
+  let stop = end-position(s);
+  let n = 0;
+  while (p < stop)
+    if (digit?(s[p])) n := n + 1 end;
+    p := next-position(s, p)
+  end;
+  n
+end;
 ";
 
 /// Cases recurse as a balanced binary tree this deep and operate at its
@@ -459,6 +488,8 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("untyped passed", net("untyped-passed", "plain")),
         ("loop iteration", net("looped", "unlooped")),
         ("cell access", net("cell-looped", "looped")),
+        ("character scan", net("scanned", "unlooped")),
+        ("scan + digit?", net("scanned-digits", "unlooped")),
     ]
 }
 

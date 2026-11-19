@@ -1,0 +1,10 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: {<string-position> 1} is not of type <string-position>
+// expect: diagnostics 0
+
+// There is no position after the end: stepping past it signals.
+
+define function main() => <string-position>
+  let s = "a";
+  next-position(s, end-position(s))
+end;

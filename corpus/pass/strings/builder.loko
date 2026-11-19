@@ -1,0 +1,13 @@
+// expect: run "ab-c!"
+// expect: diagnostics 0
+
+// A `<string-builder>` collects characters and strings; `as(<string>, b)`
+// takes its text without copying.
+
+define function main() => <string>
+  let b = make(<string-builder>);
+  add!(b, 'a');
+  add!(b, "b-");
+  add!(add!(b, 'c'), '!');
+  if (size(b) = 5) as(<string>, b) else "no" end
+end;

@@ -94,6 +94,7 @@ pub const fn runtime_value_kind(kind: sem::ValueKind) -> Option<RuntimeValueKind
         sem::ValueKind::F32 => Some(RuntimeValueKind::F32),
         sem::ValueKind::Bool => Some(RuntimeValueKind::Bool),
         sem::ValueKind::Char => Some(RuntimeValueKind::Character),
+        sem::ValueKind::Position => Some(RuntimeValueKind::Position),
         sem::ValueKind::String(class) => Some(RuntimeValueKind::String(class)),
         sem::ValueKind::Symbol(class) => Some(RuntimeValueKind::Symbol(class)),
         sem::ValueKind::Vector(class) => Some(RuntimeValueKind::Vector(class)),

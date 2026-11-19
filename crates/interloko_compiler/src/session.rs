@@ -13475,6 +13475,7 @@ fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::F32 => "single-float".into(),
         sem::ValueKind::Bool => "boolean".into(),
         sem::ValueKind::Char => "character".into(),
+        sem::ValueKind::Position => "string-position".into(),
         sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => value_class_label(module, "string", class),
         sem::ValueKind::Symbol(class) => value_class_label(module, "symbol", class),
@@ -13529,6 +13530,7 @@ fn runtime_kind_label(module: &sem::Module, kind: runtime::ValueKind) -> String 
         runtime::ValueKind::F32 => "single-float".into(),
         runtime::ValueKind::Bool => "boolean".into(),
         runtime::ValueKind::Character => "character".into(),
+        runtime::ValueKind::Position => "string-position".into(),
         runtime::ValueKind::String(class) => value_class_label(module, "string", class),
         runtime::ValueKind::Symbol(class) => value_class_label(module, "symbol", class),
         runtime::ValueKind::Vector(class) => value_class_label(module, "vector", class),
@@ -13574,6 +13576,7 @@ fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
         sem::ValueKind::F32 => "single-float".into(),
         sem::ValueKind::Bool => "boolean".into(),
         sem::ValueKind::Char => "character".into(),
+        sem::ValueKind::Position => "string-position".into(),
         sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => format!("string(c{})", class.0),
         sem::ValueKind::Symbol(class) => format!("symbol(c{})", class.0),
@@ -13619,6 +13622,7 @@ fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
         sem::ValueKind::F32 => "single-float".into(),
         sem::ValueKind::Bool => "boolean".into(),
         sem::ValueKind::Char => "character".into(),
+        sem::ValueKind::Position => "string-position".into(),
         sem::ValueKind::Callable => "callable".into(),
         sem::ValueKind::String(class) => value_class_fingerprint(module, "string", class),
         sem::ValueKind::Symbol(class) => value_class_fingerprint(module, "symbol", class),
@@ -13679,6 +13683,7 @@ fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
         sem::ValueKind::F32 => "f32",
         sem::ValueKind::Bool => "bool",
         sem::ValueKind::Char => "character",
+        sem::ValueKind::Position => "string-position",
         sem::ValueKind::String(_)
         | sem::ValueKind::Symbol(_)
         | sem::ValueKind::Vector(_)
@@ -13703,6 +13708,7 @@ fn runtime_repr(kind: runtime::ValueKind) -> &'static str {
         runtime::ValueKind::F32 => "f32",
         runtime::ValueKind::Bool => "bool",
         runtime::ValueKind::Character => "character",
+        runtime::ValueKind::Position => "string-position",
         runtime::ValueKind::String(_)
         | runtime::ValueKind::Symbol(_)
         | runtime::ValueKind::Vector(_)
@@ -13746,7 +13752,8 @@ fn sem_slot_mutability_label(mutability: sem::SlotMutability) -> &'static str {
 
 fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
     match intrinsic {
-        sem::Intrinsic::Text(function) => sem::text_function_name(function),
+        // The symbol, unlike the name, tells overloads apart.
+        sem::Intrinsic::Text(function) => function.symbol(),
         sem::Intrinsic::CharCompare(op) => match op {
             sem::CompareOp::Eq => "character=",
             sem::CompareOp::Lt => "character<",
@@ -13755,6 +13762,14 @@ fn sem_intrinsic_label(intrinsic: sem::Intrinsic) -> &'static str {
             sem::CompareOp::Ge => "character>=",
         },
         sem::Intrinsic::CharToInteger => "as(<integer>, <character>)",
+        sem::Intrinsic::PositionCompare(op) => match op {
+            sem::CompareOp::Eq => "position=",
+            sem::CompareOp::Lt => "position<",
+            sem::CompareOp::Le => "position<=",
+            sem::CompareOp::Gt => "position>",
+            sem::CompareOp::Ge => "position>=",
+        },
+        sem::Intrinsic::PositionToInteger => "byte-offset",
         sem::Intrinsic::ObjectClass => "object-class",
         sem::Intrinsic::ClassName => "class-name",
         sem::Intrinsic::ClassDirectSuperclass => "class-direct-superclass",
@@ -23576,6 +23591,38 @@ end;
     }
 
     #[test]
+    fn a_position_from_another_string_signals_and_retries_with_the_replacement() {
+        // Offset 1 of "abc" is inside "é", so reading it signals; a
+        // replacement inside the character signals again, and the start
+        // reads 'é'.
+        let artifacts = CompilerSession::compile_source(
+            "positions.loko",
+            "define function main() => <character>\n  \
+             let s = \"é!\";\n  \
+             s[position-at(\"abc\", 1)]\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut seen = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                let report = condition.type_error().expect("a type error");
+                assert_eq!(report.kind(), Some(TypeErrorKind::Range));
+                assert_eq!(report.expected, "<string-position>");
+                assert_eq!(use_value_types(condition), [ValueType::I64]);
+                seen.push(report.value);
+                Choice::UseValue(vec![Value::I64(if seen.len() == 1 { -5 } else { 0 })])
+            });
+            assert_eq!(
+                call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes"),
+                FunctionValue::Character('é')
+            );
+            assert_eq!(seen, ["{<string-position> 1}", "-5"], "{policy:?}");
+        }
+    }
+
+    #[test]
     fn a_failed_unboxing_to_a_character_checks_its_replacement() {
         let artifacts = CompilerSession::compile_source(
             "unbox.loko",
@@ -23605,6 +23652,36 @@ end;
             // signals again for it.
             assert_eq!(values.len(), 2, "{policy:?}");
             assert_eq!(values[0], "7");
+        }
+    }
+
+    #[test]
+    fn a_failed_unboxing_to_a_position_checks_its_replacement() {
+        // A replacement no string can have would make a position that
+        // cannot be boxed, so the unboxing signals again for it.
+        let artifacts = CompilerSession::compile_source(
+            "unbox.loko",
+            "define function take(x :: <object>) => <string-position>\n  \
+             as(<string-position>, x)\nend;\n\
+             define function keep(x :: <object>) => <object>\n  x\nend;\n\
+             define function main() => <integer>\n  \
+             byte-offset(as(<string-position>, keep(take(7))))\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut breaks = 0;
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                breaks += 1;
+                assert_eq!(use_value_types(condition), [ValueType::I64]);
+                Choice::UseValue(vec![Value::I64(if breaks == 1 { -1 } else { 2 })])
+            });
+            assert_eq!(
+                call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes"),
+                FunctionValue::Integer(2)
+            );
+            assert_eq!(breaks, 2, "{policy:?}");
         }
     }
 

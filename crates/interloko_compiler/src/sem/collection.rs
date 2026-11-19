@@ -22,7 +22,7 @@
 //! names replaces the built-in generic entirely, as any definition shadows a
 //! built-in, and a slot getter of the name keeps serving its own class.
 
-use super::{BuiltinValueClass, Intrinsic};
+use super::{BuiltinValueClass, Intrinsic, TextFunction};
 
 /// A built-in collection generic.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -133,6 +133,29 @@ pub const BUILTIN_METHODS: &[BuiltinMethod] = &[
         key: Some(BuiltinValueClass::Integer),
         operation: Intrinsic::VectorRef,
         with_default: Some(Intrinsic::VectorElementOr),
+    },
+    // A string's size is its cached scalar count, and its keys are
+    // positions: no integer indexes a string.
+    BuiltinMethod {
+        function: CollectionFunction::Size,
+        collection: BuiltinValueClass::String,
+        key: None,
+        operation: Intrinsic::Text(TextFunction::StringSize),
+        with_default: None,
+    },
+    BuiltinMethod {
+        function: CollectionFunction::Element,
+        collection: BuiltinValueClass::String,
+        key: Some(BuiltinValueClass::StringPosition),
+        operation: Intrinsic::Text(TextFunction::StringElement),
+        with_default: Some(Intrinsic::Text(TextFunction::StringElementOr)),
+    },
+    BuiltinMethod {
+        function: CollectionFunction::Size,
+        collection: BuiltinValueClass::StringBuilder,
+        key: None,
+        operation: Intrinsic::Text(TextFunction::BuilderSize),
+        with_default: None,
     },
 ];
 

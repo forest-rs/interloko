@@ -1,0 +1,12 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: {<string-position> 2} is not of type <string-position>
+// expect: diagnostics 0
+
+// A position is checked where it is used: one from another string that
+// lands inside a character signals `type-error.range`.
+
+define function main() => <character>
+  let s = "é";
+  let t = "abc";
+  s[next-position(t, next-position(t, start-position(t)))]
+end;

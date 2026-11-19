@@ -1,0 +1,10 @@
+// expect: run #t
+// expect: diagnostics 0
+
+// `starts-with?` tests a prefix at a position without allocating;
+// `position-at` finds the nth character.
+
+define function main() => <boolean>
+  let s = "let x = 1";
+  if (starts-with?(s, "let")) starts-with?(s, "x =", at: position-at(s, 4)) else #f end
+end;

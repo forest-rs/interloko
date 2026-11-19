@@ -2626,6 +2626,22 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_cast(&mut self, node: &CstNode) -> Expr {
+        // `as(<string-position>, s, n)` names the position at byte offset
+        // `n` of `s`: a call of the checked text operation behind it.
+        if let [target, string, offset] = regular_arg_nodes(node).as_slice()
+            && matches!(
+                self.type_expr_from_node(target),
+                Some(TypeExpr::Named { ref name, .. }) if name == "<string-position>"
+            )
+        {
+            return Expr::Call {
+                id: self.ast_id(node),
+                callee: String::from(POSITION_FROM_OFFSET),
+                args: vec![self.lower_expr(string), self.lower_expr(offset)],
+                keywords: Vec::new(),
+                span: node.span,
+            };
+        }
         let Some((value, target)) =
             self.lower_typed_args(node, true, DiagnosticCode::AstInvalidCast)
         else {
@@ -2813,7 +2829,12 @@ impl<'tree> Lowering<'tree> {
             .child_nodes(CstKind::ArgumentKeyword)
             .next()
             .unwrap_or(node);
-        let Some((name_span, name)) = self.first_token_text(keyword_node, TokenKind::Ident) else {
+        // `end` is reserved, but names a keyword argument as any name does:
+        // `copy-sequence(s, end: q)`.
+        let Some((name_span, name)) = self
+            .first_token_text(keyword_node, TokenKind::Ident)
+            .or_else(|| self.first_token_text(keyword_node, TokenKind::End))
+        else {
             return KeywordArg {
                 id: self.ast_id(node),
                 name: String::new(),
@@ -3719,6 +3740,10 @@ fn let_pattern_definition(pattern: &LetPattern) -> DefinitionId {
 }
 
 /// The argument nodes of a call that are not keyword arguments, in order.
+/// The callee `as(<string-position>, s, n)` calls. It is not a name, so
+/// source cannot call it any other way.
+pub const POSITION_FROM_OFFSET: &str = "as(<string-position>, ...)";
+
 fn regular_arg_nodes(node: &CstNode) -> Vec<&CstNode> {
     node.child_nodes(CstKind::ArgList)
         .flat_map(|list| &list.children)

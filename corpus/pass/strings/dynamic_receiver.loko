@@ -1,0 +1,12 @@
+// expect: run 'c'
+// expect: diagnostics 0
+
+// `size` and `element` dispatch to the string methods when the receiver
+// is only known as an `<object>`.
+
+define function boxed(x :: <object>) => <object> x end;
+define function main() => <character>
+  let s = boxed("abc");
+  let p = boxed(position-at("abc", 2));
+  if (size(s) = 3) as(<character>, element(s, p)) else 'x' end
+end;

@@ -233,6 +233,7 @@ fn value_type(kind: lower::ValueKind) -> ValueType {
         lower::ValueKind::U64 => ValueType::U64,
         lower::ValueKind::Bool => ValueType::Bool,
         lower::ValueKind::Char => ValueType::U32,
+        lower::ValueKind::Position => ValueType::I64,
         lower::ValueKind::Function(_) => ValueType::Func,
         lower::ValueKind::Closure(_) => ValueType::Agg,
         lower::ValueKind::Entry => ValueType::Closure,
@@ -1706,6 +1707,9 @@ impl<'a> FunctionEmitter<'a> {
                     lower::ValueKind::Char => self
                         .builder
                         .host_sig_for(runtime::BOX_CHARACTER, runtime::box_character_signature()),
+                    lower::ValueKind::Position => self
+                        .builder
+                        .host_sig_for(runtime::BOX_POSITION, runtime::box_position_signature()),
                     // Declared at its first use, as callables box only
                     // where they cross `<object>`.
                     lower::ValueKind::Closure(_) => self.builder.host_sig_for(
@@ -2155,6 +2159,7 @@ impl<'a> FunctionEmitter<'a> {
                         runtime::UNBOX_VALUE,
                         runtime::unbox_value_signature(ValueType::U32),
                     ),
+                    lower::ValueKind::Position => self.abi.unbox_i64,
                     lower::ValueKind::Closure(None) => self.builder.host_sig_for(
                         runtime::UNBOX_VALUE,
                         runtime::unbox_value_signature(ValueType::Agg),
@@ -2165,12 +2170,17 @@ impl<'a> FunctionEmitter<'a> {
                 // of the class, a scalar's or `<function>`, so a
                 // replacement needs no check; except a character's, as a
                 // `u32` register holds more than the scalar values.
-                let recheck = (*kind == lower::ValueKind::Char).then(|| {
-                    self.builder.host_sig_for(
+                let recheck = match kind {
+                    lower::ValueKind::Char => Some(self.builder.host_sig_for(
                         runtime::CHECK_CHARACTER,
                         runtime::check_character_signature(),
-                    )
-                });
+                    )),
+                    lower::ValueKind::Position => Some(self.builder.host_sig_for(
+                        runtime::CHECK_POSITION,
+                        runtime::check_position_signature(),
+                    )),
+                    _ => None,
+                };
                 let check = CheckedCall {
                     sig,
                     recheck,
@@ -2564,22 +2574,25 @@ impl<'a> FunctionEmitter<'a> {
         self.asm.place(failed).map_err(build_error)?;
         // The condition holds the rejected value as the class it is: a
         // character's `u32` register would box as an `<integer>`.
-        let (reported, reported_type) = if check.kind == lower::ValueKind::Char {
-            let boxed = self.alloc_temp(runtime::any_type());
-            let box_character = self.builder.host_sig_for(
+        let rejected_box = match check.kind {
+            lower::ValueKind::Char => Some(self.builder.host_sig_for(
                 runtime::BOX_REJECTED_CHARACTER,
                 runtime::box_character_signature(),
-            );
-            self.asm.host_call(
-                Reg::EFFECT,
-                box_character,
-                Reg::EFFECT,
-                &[checked],
-                &[boxed],
-            );
-            (boxed, runtime::any_type())
-        } else {
-            (checked, self.register_type(checked)?)
+            )),
+            lower::ValueKind::Position => Some(self.builder.host_sig_for(
+                runtime::BOX_REJECTED_POSITION,
+                runtime::box_position_signature(),
+            )),
+            _ => None,
+        };
+        let (reported, reported_type) = match rejected_box {
+            Some(sig) => {
+                let boxed = self.alloc_temp(runtime::any_type());
+                self.asm
+                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[checked], &[boxed]);
+                (boxed, runtime::any_type())
+            }
+            None => (checked, self.register_type(checked)?),
         };
         let site = self.type_error_site(&check.type_error, span)?;
         let condition = self.shared_temp(SharedTemp::Condition, runtime::object_type());

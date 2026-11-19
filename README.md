@@ -144,7 +144,8 @@ The current slices include:
   `<select-error>` holding it, so unlike `if` and `case` the arms keep
   their values;
 - Dylan-style names, where a hyphen is always a name character: `x-1` and
-  `a-b` are single names, so subtraction is spaced (`x - 1`, `a -% b`);
+  `a-b` are single names, so subtraction is spaced (`x - 1`, `a -% b`),
+  and `?` and `!` may end one (`digit?`, `add!`);
 - `<integer>` arithmetic on 64-bit fixnums that signals a `<type-error>`
   (`type-error.overflow`) instead of wrapping when `+`, `-`, `*`, or
   negation leaves the 64-bit range (bignum promotion is planned);
@@ -312,7 +313,32 @@ The current slices include:
   changes it and so takes an explicit `as`. A method's limited parameter
   restates or widens its generic's range: unlike Dylan's DRM, methods do
   not dispatch on ranges, so a send's range check is the only one;
-- simple strings, symbols, keywords, and immutable vectors;
+- symbols, keywords, and immutable vectors;
+- strings: a `<string>` is immutable, validated UTF-8 whose header caches
+  its character count, so `size(s)` is O(1), and whether it is all ASCII;
+  a Rust host borrows its text as `&str` without a copy. Strings have no
+  integer keys. A `<string-position>` is an opaque, unboxed place between
+  characters (a byte offset with its own class, never an `<integer>`)
+  that only the string functions make: `start-position(s)`,
+  `end-position(s)`, `next-position(s, p)`, `previous-position(s, p)`,
+  `position-at(s, n)` (O(1) for ASCII text, O(n) otherwise, as its name
+  warns) and `position-after(s, prefix, p)`. `s[p]` and `element(s, p,
+  default: c)` read the character at `p`, `copy-sequence(s, start: p,
+  end: q)` copies, `starts-with?(s, prefix, at: p)` tests without
+  allocating, positions compare with `=` and `<`, and `byte-offset(p)`
+  and `as(<string-position>, s, n)` cross to byte offsets. A position is
+  checked where it is used, in bounds and on a character boundary, so one
+  from another string signals `type-error.range` with `use-value` rather
+  than splitting a character. `=` compares contents and `<` orders by
+  character; `as-uppercase` and `as-lowercase` map a whole string fully
+  (`"ß"` to `"SS"`); `concatenate` takes characters too, and `as(<string>,
+  c)` makes one. A `<string-builder>` (`make(<string-builder>)`, `add!(b,
+  c)` or `add!(b, s)`, `size(b)`) is the one mutable text type, and
+  `as(<string>, b)` takes its text without a copy, leaving it empty; a
+  builder in the image cannot change during a turn yet. Each operation is
+  a runtime host call: a loop reading a character and stepping costs about
+  220 ns per character today. Normalization and grapheme clusters are
+  left to a library;
 - Dylan's collection generics `size(collection)`, `element(collection,
   key, #key default)` and `element-setter(value, collection, key)`, and its
   element syntax: `c[k]` is `element(c, k)` and `c[k] := v` is
@@ -320,7 +346,8 @@ The current slices include:
   (`lexer.text[lexer.pos]`). They are open built-in generics, as the
   numeric operators are built-in generics: the kernel's methods come from
   `BUILTIN_METHODS` in `sem/collection.rs` (so far the immutable
-  `<vector>`'s `size` and `element`), a program adds methods for its own
+  `<vector>`'s `size` and `element`, `<string>`'s `size` and `element` by
+  position, and `<string-builder>`'s `size`), a program adds methods for its own
   classes with `define method`, a send typing resolves to a kernel method
   runs it inline, an `<object>` receiver dispatches, and a send no method
   accepts signals `<no-applicable-method>`. Each generic is sealed over the

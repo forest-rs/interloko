@@ -1,0 +1,12 @@
+// expect: run 'é'
+// expect: diagnostics 0
+
+// Positions step over whole characters, whatever their UTF-8 width, and
+// `size` is the number of characters.
+
+define function main() => <character>
+  let s = "aé😀b";
+  let p = start-position(s);
+  let q = next-position(s, p);
+  if (size(s) = 4) s[q] else 'x' end
+end;

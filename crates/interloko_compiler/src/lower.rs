@@ -243,6 +243,10 @@ pub enum ValueKind {
     /// has its own kind because a `<u32>` integer has the same register
     /// type, and the two box as different classes.
     Char,
+    /// `<string-position>`: a byte offset, held in an `i64` register. It has
+    /// its own kind because it boxes as its own class, not as an
+    /// `<integer>`.
+    Position,
     /// Internal direct function reference, optionally tied to a callable signature.
     Function(Option<CallableSigId>),
     /// First-class callable value, optionally tied to a callable signature:
@@ -5382,7 +5386,7 @@ impl<'module> BodyLowering<'module> {
             span,
         });
         for result in results.iter_mut().flatten() {
-            *result = self.check_resumed_character(*result, span)?;
+            *result = self.check_resumed_scalar(*result, span)?;
         }
         // Typing classifies none of a dispatcher's checks.
         let site = check_site_name(self.site_owner, None, span);
@@ -5447,6 +5451,7 @@ impl<'module> BodyLowering<'module> {
                         kind,
                         sem::ValueKind::Bool
                             | sem::ValueKind::Char
+                            | sem::ValueKind::Position
                             | sem::ValueKind::Callable
                             | sem::ValueKind::KnownCallable(_)
                     )
@@ -7730,6 +7735,42 @@ impl<'module> BodyLowering<'module> {
                 let op = num32_compare(sem::NumericKind::U32, op);
                 return Ok(self.num32_binary(op, lhs.reg, rhs.reg, ValueKind::Bool, span));
             }
+            sem::Intrinsic::PositionCompare(op) => {
+                let [lhs, rhs] = args else {
+                    return Err(invalid_semantic("a position comparison takes two operands"));
+                };
+                let lhs = self.lower_expr(lhs)?;
+                let rhs = self.lower_expr(rhs)?;
+                if lhs.kind != ValueKind::Position || rhs.kind != ValueKind::Position {
+                    return Err(invalid_semantic("a position comparison takes positions"));
+                }
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::I64Compare {
+                    dst: result.reg,
+                    op,
+                    lhs: lhs.reg,
+                    rhs: rhs.reg,
+                    span,
+                });
+                return Ok(result);
+            }
+            sem::Intrinsic::PositionToInteger => {
+                let [value] = args else {
+                    return Err(invalid_semantic("byte-offset takes one operand"));
+                };
+                let value = self.lower_expr(value)?;
+                if value.kind != ValueKind::Position {
+                    return Err(invalid_semantic("byte-offset takes a position"));
+                }
+                // The offset is the register's value.
+                let result = self.alloc(ValueKind::I64);
+                self.instructions.push(Instr::Move {
+                    dst: result.reg,
+                    src: value.reg,
+                    span,
+                });
+                return Ok(result);
+            }
             sem::Intrinsic::CharToInteger => {
                 let [value] = args else {
                     return Err(invalid_semantic("as(<integer>, c) takes one operand"));
@@ -7812,16 +7853,16 @@ impl<'module> BodyLowering<'module> {
                     src: value.reg,
                     span,
                 });
-                let expected = match kind {
-                    interloko_runtime::TextKind::Character
-                    | interloko_runtime::TextKind::Integer => {
-                        builtin_class(self.module, sem::BuiltinValueClass::Character)
-                            .ok_or_else(|| invalid_semantic("<character> is missing"))?
-                    }
-                    interloko_runtime::TextKind::Boolean => {
-                        return Err(invalid_semantic("a boolean argument is never checked"));
-                    }
+                // The class the argument should have named: a character, or
+                // a position in the string.
+                let expected = match function {
+                    sem::TextFunction::CharacterFromInteger
+                    | sem::TextFunction::CheckCharacter
+                    | sem::TextFunction::DigitValue => sem::BuiltinValueClass::Character,
+                    _ => sem::BuiltinValueClass::StringPosition,
                 };
+                let expected = builtin_class(self.module, expected)
+                    .ok_or_else(|| invalid_semantic("a text class is missing"))?;
                 check = Some(Box::new(TextCheck {
                     kind: value.kind,
                     type_error: type_error_site(
@@ -7838,11 +7879,20 @@ impl<'module> BodyLowering<'module> {
         if regs.len() != function.params().len() {
             return Err(invalid_semantic("a text operation has the wrong arity"));
         }
-        let result = self.alloc(match function.result() {
+        let result = match function.result() {
             interloko_runtime::TextKind::Integer => ValueKind::I64,
             interloko_runtime::TextKind::Boolean => ValueKind::Bool,
             interloko_runtime::TextKind::Character => ValueKind::Char,
-        });
+            interloko_runtime::TextKind::Position => ValueKind::Position,
+            interloko_runtime::TextKind::String => {
+                ValueKind::Object(builtin_class(self.module, sem::BuiltinValueClass::String))
+            }
+            interloko_runtime::TextKind::Builder => ValueKind::Object(builtin_class(
+                self.module,
+                sem::BuiltinValueClass::StringBuilder,
+            )),
+        };
+        let result = self.alloc(result);
         self.instructions.push(Instr::TextCall {
             dst: result.reg,
             function,
@@ -7901,34 +7951,43 @@ impl<'module> BodyLowering<'module> {
         });
         results
             .into_iter()
-            .map(|result| self.check_resumed_character(result, span))
+            .map(|result| self.check_resumed_scalar(result, span))
             .collect()
     }
 
-    /// Checks that `value`, a result a signal resumed with, is a scalar
-    /// value when it is a `<character>`: a `use-value` restart can supply
-    /// any `u32`, which the register type does not rule out. A value that is
+    /// Checks a result a signal resumed with when its register type does
+    /// not establish its class: a `<character>` must be a scalar value and
+    /// a `<string-position>` an offset some string can have, while a
+    /// `use-value` restart can supply any `u32` or `i64`. A value that is
     /// not one signals a `type-error.entry` whose replacement is checked
     /// again. Any other value is returned as it is.
-    fn check_resumed_character(&mut self, value: Value, span: Span) -> Result<Value, LowerError> {
-        if value.kind != ValueKind::Char {
-            return Ok(value);
-        }
-        let result = self.alloc(ValueKind::Char);
-        let copy = self.alloc(ValueKind::Char);
+    fn check_resumed_scalar(&mut self, value: Value, span: Span) -> Result<Value, LowerError> {
+        let (function, class) = match value.kind {
+            ValueKind::Char => (
+                sem::TextFunction::CheckCharacter,
+                sem::BuiltinValueClass::Character,
+            ),
+            ValueKind::Position => (
+                sem::TextFunction::CheckPositionValue,
+                sem::BuiltinValueClass::StringPosition,
+            ),
+            _ => return Ok(value),
+        };
+        let result = self.alloc(value.kind);
+        let copy = self.alloc(value.kind);
         self.instructions.push(Instr::Move {
             dst: copy.reg,
             src: value.reg,
             span,
         });
-        let class = builtin_class(self.module, sem::BuiltinValueClass::Character)
-            .ok_or_else(|| invalid_semantic("<character> is missing"))?;
+        let class = builtin_class(self.module, class)
+            .ok_or_else(|| invalid_semantic("a text class is missing"))?;
         self.instructions.push(Instr::TextCall {
             dst: result.reg,
-            function: sem::TextFunction::CheckCharacter,
+            function,
             args: vec![copy.reg],
             check: Some(Box::new(TextCheck {
-                kind: ValueKind::Char,
+                kind: value.kind,
                 type_error: type_error_site(
                     TypeErrorKind::Entry,
                     class_expected(class),
@@ -8676,7 +8735,8 @@ impl<'module> BodyLowering<'module> {
                 | ValueKind::F64
                 | ValueKind::F32
                 | ValueKind::Bool
-                | ValueKind::Char,
+                | ValueKind::Char
+                | ValueKind::Position,
             ) => {
                 let class = scalar_concrete_class(self.module, kind)
                     .ok_or_else(|| invalid_semantic("a number class is missing"))?;
@@ -9901,6 +9961,7 @@ fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
         sem::ValueKind::F32 => Ok(ValueKind::F32),
         sem::ValueKind::Bool => Ok(ValueKind::Bool),
         sem::ValueKind::Char => Ok(ValueKind::Char),
+        sem::ValueKind::Position => Ok(ValueKind::Position),
         sem::ValueKind::String(class)
         | sem::ValueKind::Symbol(class)
         | sem::ValueKind::Vector(class) => Ok(ValueKind::Object(Some(class))),
@@ -9947,9 +10008,10 @@ fn contracts(module: &sem::Module) -> Contracts {
 const fn value_type_of_kind(kind: ValueKind) -> Option<execution_tape::program::ValueType> {
     use execution_tape::program::ValueType;
     match kind {
-        ValueKind::I64 => Some(ValueType::I64),
+        ValueKind::I64 | ValueKind::Position => Some(ValueType::I64),
         ValueKind::Bool => Some(ValueType::Bool),
         ValueKind::Char => Some(ValueType::U32),
+        ValueKind::Object(_) => Some(interloko_runtime::object_type()),
         _ => None,
     }
 }
@@ -9961,9 +10023,9 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> Option<RuntimeOp> {
     Some(match intrinsic {
         sem::Intrinsic::Text(_)
         | sem::Intrinsic::CharCompare(_)
-        | sem::Intrinsic::CharToInteger => {
-            return None;
-        }
+        | sem::Intrinsic::CharToInteger
+        | sem::Intrinsic::PositionCompare(_)
+        | sem::Intrinsic::PositionToInteger => return None,
         sem::Intrinsic::ObjectClass => RuntimeOp::ObjectClass,
         sem::Intrinsic::ClassName => RuntimeOp::ClassName,
         sem::Intrinsic::ClassDirectSuperclass => RuntimeOp::ClassDirectSuperclass,
@@ -10060,6 +10122,7 @@ fn dispatcher_param_kind(
         Some(sem::ValueKind::F32) => ValueKind::F32,
         Some(sem::ValueKind::Bool) => ValueKind::Bool,
         Some(sem::ValueKind::Char) => ValueKind::Char,
+        Some(sem::ValueKind::Position) => ValueKind::Position,
         Some(sem::ValueKind::Callable) => ValueKind::Closure(None),
         None if object_handle => ValueKind::Object(None),
         None => ValueKind::Any,
@@ -10094,7 +10157,7 @@ const fn num32_compare(kind: sem::NumericKind, op: sem::CompareOp) -> Num32Binar
 const fn is_unboxed(kind: ValueKind) -> bool {
     matches!(
         kind,
-        ValueKind::Bool | ValueKind::Char | ValueKind::Closure(_)
+        ValueKind::Bool | ValueKind::Char | ValueKind::Position | ValueKind::Closure(_)
     ) || is_unboxed_number(kind)
 }
 
@@ -10128,6 +10191,9 @@ fn scalar_kind_for_class(module: &sem::Module, class: sem::ClassId) -> Option<Va
             kind: sem::BuiltinValueClass::Character,
         } => Some(ValueKind::Char),
         sem::ClassOrigin::BuiltinValue {
+            kind: sem::BuiltinValueClass::StringPosition,
+        } => Some(ValueKind::Position),
+        sem::ClassOrigin::BuiltinValue {
             kind: sem::BuiltinValueClass::Function,
         } => Some(ValueKind::Closure(None)),
         _ => None,
@@ -10146,6 +10212,7 @@ fn scalar_concrete_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         ValueKind::F32 => builtin_class(module, sem::BuiltinValueClass::SingleFloat),
         ValueKind::Bool => builtin_class(module, sem::BuiltinValueClass::Boolean),
         ValueKind::Char => builtin_class(module, sem::BuiltinValueClass::Character),
+        ValueKind::Position => builtin_class(module, sem::BuiltinValueClass::StringPosition),
         ValueKind::Closure(_) => builtin_class(module, sem::BuiltinValueClass::Function),
         _ => None,
     }
@@ -10163,6 +10230,7 @@ fn is_scalar_value_class(module: &sem::Module, kind: ValueKind, class: sem::Clas
         ValueKind::F32 => sem::BuiltinValueClass::SingleFloat,
         ValueKind::Bool => sem::BuiltinValueClass::Boolean,
         ValueKind::Char => sem::BuiltinValueClass::Character,
+        ValueKind::Position => sem::BuiltinValueClass::StringPosition,
         ValueKind::Closure(_) => sem::BuiltinValueClass::Function,
         _ => return false,
     };
@@ -10189,6 +10257,7 @@ fn lowered_runtime_class(module: &sem::Module, kind: ValueKind) -> Option<sem::C
         | ValueKind::U64
         | ValueKind::Bool
         | ValueKind::Char
+        | ValueKind::Position
         | ValueKind::Function(_)
         | ValueKind::Closure(_)
         | ValueKind::Entry
@@ -10313,6 +10382,7 @@ fn kind_expected(module: &sem::Module, kind: ValueKind) -> TypeObject {
         ValueKind::F32 => sem::BuiltinValueClass::SingleFloat,
         ValueKind::Bool => sem::BuiltinValueClass::Boolean,
         ValueKind::Char => sem::BuiltinValueClass::Character,
+        ValueKind::Position => sem::BuiltinValueClass::StringPosition,
         _ => sem::BuiltinValueClass::Integer,
     };
     module
@@ -10502,6 +10572,7 @@ fn shape_text(signatures: &[CallableSignature], kind: ValueKind, full: bool, tex
         ValueKind::U64 => "q",
         ValueKind::Bool => "b",
         ValueKind::Char => "c",
+        ValueKind::Position => "p",
         ValueKind::Object(_)
         | ValueKind::ClassObject(_)
         | ValueKind::GenericFunctionObject(_)
@@ -10542,7 +10613,7 @@ fn signature_label(
         ValueKind::I64 => String::from("<integer>"),
         ValueKind::Closure(Some(inner)) => signature_label(module, signatures, inner),
         ValueKind::Closure(None) => String::from("<callable>"),
-        ValueKind::Bool | ValueKind::Char => {
+        ValueKind::Bool | ValueKind::Char | ValueKind::Position => {
             format!("{}", kind_expected(module, *kind).display(module))
         }
         ValueKind::Object(Some(class)) => format!("{}", class_expected(class).display(module)),
@@ -11607,6 +11678,7 @@ impl Module {
             ValueKind::U64 => write!(f, "u64"),
             ValueKind::Bool => write!(f, "bool"),
             ValueKind::Char => write!(f, "char"),
+            ValueKind::Position => write!(f, "position"),
             ValueKind::Aggregate => write!(f, "agg"),
             ValueKind::Exn => write!(f, "exn"),
             ValueKind::Function(Some(sig)) => {
