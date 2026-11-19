@@ -4292,6 +4292,23 @@ impl<'module> BodyLowering<'module> {
     /// frame's own arguments and returns the results, so the frame's caller
     /// sees an ordinary return from the newer code. Parameters live in the
     /// input registers, which the body never writes.
+    /// Opens a protected region catching `catches`, starting it at a block
+    /// of its own.
+    ///
+    /// The tape keeps a register's facts (such as the known shape of a
+    /// callable value) along an exceptional edge only when the block that
+    /// raises does not write the register, since it cannot tell whether a
+    /// write in that block came before the raise. A region that began in
+    /// the middle of a block would share that block with code before it, so
+    /// a callable made just before a `handle` or `block` would lose its
+    /// shape on the way to the handler and could not be called after it.
+    fn enter_region(&mut self, catches: Vec<Catch>, span: Span) {
+        let start = self.alloc_label();
+        self.instructions.push(Instr::Jump { label: start, span });
+        self.instructions.push(Instr::Label { label: start });
+        self.instructions.push(Instr::EnterRegion { catches });
+    }
+
     fn lower_retryable_block(
         &mut self,
         block: &sem::Block,
@@ -4792,7 +4809,7 @@ impl<'module> BodyLowering<'module> {
         catches.push(Catch::All {
             target: unwind_label,
         });
-        self.instructions.push(Instr::EnterRegion { catches });
+        self.enter_region(catches, span);
         if let (Some(sem_exit), Some(bound)) = (exit_local, exit) {
             self.exits.push((sem_exit, bound));
         }
@@ -7593,8 +7610,8 @@ impl<'module> BodyLowering<'module> {
         let restart_label = self.alloc_label();
         let unwind_label = self.alloc_label();
         let join_label = self.alloc_label();
-        self.instructions.push(Instr::EnterRegion {
-            catches: vec![
+        self.enter_region(
+            vec![
                 Catch::Tag {
                     tag: ControlTag::Restart,
                     target: restart_label,
@@ -7603,7 +7620,8 @@ impl<'module> BodyLowering<'module> {
                     target: unwind_label,
                 },
             ],
-        });
+            span,
+        );
         let body_values = self.lower_results_expr(body)?;
         self.instructions.push(Instr::LeaveRegion);
         if body_values.len() != results.len() {

@@ -1,0 +1,45 @@
+// expect: run 42435304
+// expect: diagnostics 0
+// expect: dump lowered contains region.enter
+
+// A callable value made before a `handle` or a `block` is called after
+// it. The handler and cleanup paths rejoin the normal path, and each
+// region starts a code block of its own, so the value's known shape
+// reaches the call along every path.
+
+define class <oops> (<error>)
+end;
+
+define function closure-across-handle() => <integer>
+  let f = function (d :: <integer>) => <integer> d end;
+  let r = handle signal(make(<oops>)) with restart c :: <oops> 40 end;
+  f(2) + r
+end;
+
+define function typed-across-handle(f :: callable(<integer>) => <integer>) => <integer>
+  let g :: callable(<integer>) => <integer> = f;
+  let r = handle signal(make(<oops>)) with restart c :: <oops> 40 end;
+  g(3) + r
+end;
+
+define function boxed-across-handle() => <integer>
+  let o :: <object> = function (d :: <integer>) => <integer> d * 10 end;
+  let r = handle signal(make(<oops>)) with restart c :: <oops> 40 end;
+  let f :: <function> = as(<function>, o);
+  let ten :: <integer> = apply(f, 1);
+  ten + r
+end;
+
+define function across-blocks() => <integer>
+  let f = function (d :: <integer>) => <integer> d end;
+  let r = block () 100 cleanup 0 end;
+  let s = block (out) out(200) end;
+  f(4) + r + s
+end;
+
+define function main() => <integer>
+  closure-across-handle() * 1000000
+    + typed-across-handle(function (d :: <integer>) => <integer> d end) * 10000
+    + boxed-across-handle() * 100
+    + across-blocks()
+end;
