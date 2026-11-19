@@ -4741,6 +4741,26 @@ impl<'module> BodyLowering<'module> {
                 Instr::Label { label: unmatched },
             ]);
         }
+        // An adapter passes every keyword of its signature, marking those
+        // its caller left out: only a keyword actually passed is unknown.
+        let absent = self.alloc(ValueKind::Bool);
+        let unknown = self.alloc_label();
+        self.instructions.extend([
+            Instr::RuntimeCall {
+                dst: absent.reg,
+                op: RuntimeOp::IsKeywordAbsent,
+                args: vec![value.reg],
+                kind: ValueKind::Bool,
+                span,
+            },
+            Instr::Branch {
+                cond: absent.reg,
+                then_label: next,
+                else_label: unknown,
+                span,
+            },
+            Instr::Label { label: unknown },
+        ]);
         self.signal_unknown_keyword(name.reg, span)?;
         self.instructions.extend([
             Instr::Jump { label: next, span },

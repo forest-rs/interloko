@@ -12892,6 +12892,17 @@ impl Lowering {
             ast::TypeExpr::Callable { signature, .. } => {
                 let params = self.resolve_result_types(&signature.params, diagnostics);
                 let results = self.resolve_result_types(&signature.results.values, diagnostics);
+                for (index, (name, ty)) in signature.keywords.iter().enumerate() {
+                    if signature.keywords[..index]
+                        .iter()
+                        .any(|(earlier, _)| earlier == name)
+                    {
+                        diagnostics.push(
+                            Diagnostic::error(ty.span(), DiagnosticCode::DuplicateKeywordArgument)
+                                .with_arg(DiagnosticArg::text("keyword", name.clone())),
+                        );
+                    }
+                }
                 let keyword_types = signature
                     .keywords
                     .iter()
