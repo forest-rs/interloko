@@ -10989,9 +10989,6 @@ fn lowered_function_kind_label(kind: lower::FunctionKind) -> String {
         lower::FunctionKind::Function(id) => format!("function:f{}", id.0),
         lower::FunctionKind::Method(id) => format!("method:m{}", id.0),
         lower::FunctionKind::Dispatcher(id) => format!("dispatcher generic:g{}", id.0),
-        lower::FunctionKind::SlotAccessor { class, slot, .. } => {
-            format!("accessor c{}.s{}", class.0, slot.0)
-        }
         lower::FunctionKind::CallableThunk { callable } => {
             format!("callable-thunk {callable:?}")
         }
@@ -14148,16 +14145,6 @@ fn sem_callable_label(module: &sem::Module, callable: sem::KnownCallable) -> Str
                 |generic| format!("generic {}", generic.name),
             )
         }
-        sem::KnownCallable::SlotAccessor { class, slot, .. } => module
-            .classes
-            .get(class.0 as usize)
-            .and_then(|class| {
-                class
-                    .effective_slots
-                    .get(slot.0 as usize)
-                    .map(|slot| format!("accessor {}.{}", class.name, slot.name))
-            })
-            .unwrap_or_else(|| format!("accessor c{}.s{}", class.0, slot.0)),
     }
 }
 
@@ -14165,9 +14152,6 @@ fn sem_callable_label_for_expr(callable: sem::KnownCallable) -> String {
     match callable {
         sem::KnownCallable::DirectFunction(function) => format!("function f{}", function.0),
         sem::KnownCallable::GenericFunction(generic) => format!("generic g{}", generic.0),
-        sem::KnownCallable::SlotAccessor { class, slot, .. } => {
-            format!("accessor c{}.s{}", class.0, slot.0)
-        }
     }
 }
 
@@ -14183,25 +14167,6 @@ fn sem_callable_fingerprint(module: &sem::Module, callable: sem::KnownCallable) 
             module.generics.get(generic.0 as usize).map_or_else(
                 || format!("generic#{}", generic.0),
                 |generic| format!("generic#{}", generic.definition.raw()),
-            )
-        }
-        sem::KnownCallable::SlotAccessor {
-            accessor,
-            class,
-            slot,
-        } => {
-            let class_definition = module
-                .classes
-                .get(class.0 as usize)
-                .map_or(0, |class| class.definition.raw());
-            let slot_definition = module
-                .classes
-                .get(class.0 as usize)
-                .and_then(|class| class.effective_slots.get(slot.0 as usize))
-                .map_or(0, |slot| slot.definition.raw());
-            format!(
-                "accessor#{}:{class_definition}.{slot_definition}",
-                accessor.raw()
             )
         }
     }
@@ -14815,6 +14780,7 @@ fn sem_generic_origin_label(origin: sem::GenericFunctionOrigin) -> String {
             format!("collection({})", function.name())
         }
         sem::GenericFunctionOrigin::BuiltIn { .. } => "built-in".into(),
+        sem::GenericFunctionOrigin::SlotGetter { .. } => "slot-getter".into(),
     }
 }
 
@@ -14828,6 +14794,9 @@ fn sem_method_origin_label(origin: sem::MethodOrigin) -> String {
         sem::MethodOrigin::Numeric { operator } => format!("numeric({})", operator.name()),
         sem::MethodOrigin::Collection { function } => format!("collection({})", function.name()),
         sem::MethodOrigin::BuiltIn => "built-in".into(),
+        sem::MethodOrigin::SlotGetter { class, slot } => {
+            format!("slot-getter(c{}.s{})", class.0, slot.0)
+        }
     }
 }
 

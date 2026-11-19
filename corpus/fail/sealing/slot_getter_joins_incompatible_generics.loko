@@ -1,0 +1,22 @@
+// expect: diagnostics 2
+// expect: diagnostic code sem.generic-method-arity-mismatch
+// expect: diagnostic code sem.generic-method-result-type-mismatch
+
+// A slot's getter joins the program's generic of its name as a method, so
+// that generic must take one receiver and may answer what the slot holds.
+
+define generic power (x) => <string>;
+
+define class <infix> (<object>)
+  slot power :: <integer>, init-value: 1;
+end;
+
+define generic name (x, y);
+
+define class <named> (<object>)
+  slot name :: <string>, init-value: "a";
+end;
+
+define function main() => <integer>
+  0
+end;

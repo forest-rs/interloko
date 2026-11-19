@@ -1,0 +1,21 @@
+// expect: run 102
+// expect: diagnostics 0
+
+// An `<integer>` slot named `size` joins the kernel's `size` generic, so
+// `size(x)` and `x.size` of an `<object>` dispatch to it as to a
+// collection's.
+
+define class <bag> (<object>)
+  slot size :: <integer>, init-value: 3;
+end;
+
+define class <box> (<object>)
+  slot size :: <integer>, init-value: 4;
+end;
+
+define function main() => <integer>
+  let things = #[make(<bag>), make(<box>), #[1, 2]];
+  let total = 0;
+  for (thing in things) total := total + size(thing) * 10 + thing.size end;
+  total + size(make(<bag>))
+end;

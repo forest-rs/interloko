@@ -1,0 +1,22 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.method-overrides-slot-getter
+
+// A getter is sealed over the classes declaring its slot, as reads of a
+// receiver of known class read the slot directly: a method for a subclass
+// would override it.
+
+define generic power (x);
+
+define class <infix> (<object>)
+  slot power :: <integer>, init-value: 1;
+end;
+
+define class <sub> (<infix>) end;
+
+define method power (x :: <sub>) => <integer>
+  2
+end;
+
+define function main() => <integer>
+  power(make(<sub>))
+end;

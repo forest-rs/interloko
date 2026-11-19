@@ -271,11 +271,24 @@ The current slices include:
   other operand may, so `x + if (c) 1 else 2 end`, `f(select (k) … end)`
   and `begin … end[0]` work. One that produces no values, such as an `if`
   without `else`, has no value to give an operator or argument;
-- nominal classes with typed slots, init keywords, inherited slots, and slot
-  assignment through setter generics. A slot's `init-value:` default may be
-  any expression, a `begin … end` body with its own `let`s, loops and
-  closures included; it runs afresh at each `make` that takes it (a
-  literal default is computed in place);
+- nominal classes with typed slots, init keywords and inherited slots. A
+  slot's `init-value:` default may be any expression, a `begin … end` body
+  with its own `let`s, loops and closures included; it runs afresh at each
+  `make` that takes it (a literal default is computed in place);
+- slot getters and setters that are generic functions, as in Dylan: every
+  class declaring a slot `power` gives the generic `power` a method reading
+  it (and `power-setter` one writing it), so `x.power` of an `<object>`
+  holding any of them dispatches on its class, through a guarded link that
+  caches the method the class selects, and the getter is a value like any
+  generic. A receiver of a class with the slot reads or writes it directly:
+  a getter is sealed over the classes declaring its slot, as Dylan's
+  `sealed slot` is, so a method for one of them or a subclass is refused
+  (`sem.method-overrides-slot-getter`), while a method for another class
+  joins it. A program's own generic of the name takes the getters as
+  methods, and a function or constant of the name leaves the getter to
+  receivers of the slot's classes. An `<integer>` slot named `size` joins
+  the kernel's `size`; a slot named for another collection generic, such
+  as `element`, serves its own classes only;
 - generic functions and multi-argument method dispatch over nominal classes;
 - Dylan's keyword parameters: `define function scale (x, #key by :: <integer>
   = 2, plus = 0)`, called as `scale(3)`, `scale(3, by: 10)` or `scale(3,

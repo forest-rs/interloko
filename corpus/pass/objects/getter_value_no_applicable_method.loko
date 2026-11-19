@@ -1,10 +1,8 @@
-// expect: runtime code type-error.entry
+// expect: runtime code dispatch.no-applicable-method
 // expect: diagnostics 0
-// expect: dump lowered contains radius#closure
-// expect: dump lowered contains as <circle>
 
-// A slot accessor taken as a value reads its slot at a fixed offset, so its
-// callable thunk checks the receiver's class first.
+// A slot's getter taken as a value is its generic, so calling it on an
+// instance of a class without the slot finds no method.
 
 define class <circle> (<object>)
   slot radius :: <integer>;

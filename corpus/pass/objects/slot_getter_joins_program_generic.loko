@@ -1,0 +1,21 @@
+// expect: run 32
+// expect: diagnostics 0
+
+// A slot's getter joins the program's own generic of its name, beside
+// methods for other classes.
+
+define generic power (x) => <integer>;
+
+define class <infix> (<object>)
+  slot power :: <integer>, init-value: 1;
+end;
+
+define method power (x :: <string>) => <integer>
+  size(x)
+end;
+
+define function main() => <integer>
+  let o :: <object> = "abc";
+  let p :: <object> = make(<infix>);
+  power(o) * 10 + power(p) + power(make(<infix>))
+end;

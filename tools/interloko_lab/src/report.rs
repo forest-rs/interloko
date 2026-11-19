@@ -1811,6 +1811,9 @@ fn method_origin_label(origin: MethodOrigin) -> String {
             format!("kernel collection method for `{}`", function.name())
         }
         MethodOrigin::BuiltIn => "kernel method of a built-in function".into(),
+        MethodOrigin::SlotGetter { class, slot } => {
+            format!("synthesized getter for c{}.s{}", class.0, slot.0)
+        }
     }
 }
 
