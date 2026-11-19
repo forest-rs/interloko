@@ -321,7 +321,7 @@ define function closure-tree(f :: <callable>, d :: <integer>) => <integer>
 end;
 
 define function closure-call(d :: <integer>) => <integer>
-  closure-tree(function (n :: <integer>) => <integer> n + 1 end, d)
+  closure-tree(method (n :: <integer>) => <integer> n + 1 end, d)
 end;
 
 define function mismatched-tree(f :: <callable>, x :: <object>, d :: <integer>) => <integer>
@@ -372,7 +372,7 @@ end;
 
 define function cell-looped(d :: <integer>) => <integer>
   let total = 0;
-  let read-total = function () => <integer> total end;
+  let read-total = method () => <integer> total end;
   let i = 0;
   while (i < 256)
     total := total + i;

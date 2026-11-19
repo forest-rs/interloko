@@ -519,7 +519,7 @@ impl BaseLokoCstProjector<'_> {
                 .iter()
                 .find(|child| child.is_rule("expression"))
                 .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr)),
-            "function-expression" => self.build_callable(node, CstKind::FunctionExpr),
+            "method-expression" => self.build_callable(node, CstKind::MethodExpr),
             "vector-expression" => self.build_vector(node),
             "call-expression" => self.build_call(node),
             "argument-list" => self.build_argument_list(node),
@@ -1293,7 +1293,7 @@ impl BaseLokoCstProjector<'_> {
                 | "negative-expression"
                 | "postfix-expression"
                 | "primary-expression"
-                | "function-expression"
+                | "method-expression"
                 | "parenthesized-expression"
                 | "vector-expression"
                 | "call-expression"

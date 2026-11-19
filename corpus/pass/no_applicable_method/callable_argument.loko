@@ -14,5 +14,5 @@ define method scale(x :: <integer>) => <integer>
 end;
 
 define function main() => <integer>
-  scale(function (x :: <integer>) => <integer> x + 1 end)
+  scale(method (x :: <integer>) => <integer> x + 1 end)
 end;

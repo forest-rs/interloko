@@ -17551,7 +17551,7 @@ mod tests {
              define method area(s :: <shape>)\n  1\nend;\n\
              define method area(c :: <circle>)\n  7\nend;\n\
              define function main() => <integer>\n  \
-             let maker :: callable() => <shape> = function () => <shape> make(<circle>) end;\n  \
+             let maker :: callable() => <shape> = method () => <shape> make(<circle>) end;\n  \
              let s :: <shape> = make(<circle>);\n  \
              area(maker()) + area(s)\nend;",
             RuntimeMode::RunMain,
@@ -18880,7 +18880,7 @@ mod tests {
             define generic area(x);\n\
             define method area(c :: <circle>) => <integer>\n  7\nend;\n\
             define function main() => <integer>\n  \
-            let f :: <callable> = function () => <integer>\n    area(make(<circle>))\n  end;\n  \
+            let f :: <callable> = method () => <integer>\n    area(make(<circle>))\n  end;\n  \
             area(make(<circle>))\nend;";
         let artifacts =
             CompilerSession::compile_source("closure.loko", source, RuntimeMode::CompileOnly);
@@ -20857,13 +20857,13 @@ mod tests {
         let before = CompilerSession::compile_source(
             "closure.loko",
             "define function main()\n  \
-             let f = function (x :: <integer>) => <integer> x + 1 end;\n  apply(f, 2)\nend;",
+             let f = method (x :: <integer>) => <integer> x + 1 end;\n  apply(f, 2)\nend;",
             RuntimeMode::CompileOnly,
         );
         let after = CompilerSession::compile_source(
             "closure.loko",
             "define function main()\n  \
-             let f = function (x :: <integer>) => <integer> x + 2 end;\n  apply(f, 2)\nend;",
+             let f = method (x :: <integer>) => <integer> x + 2 end;\n  apply(f, 2)\nend;",
             RuntimeMode::CompileOnly,
         );
         assert!(!before.has_errors());
@@ -23462,7 +23462,7 @@ end;
              define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>\n  \
              apply(f, g)\nend;\n\
              define function main() => <integer>\n  \
-             apply-untyped(twice, function (x :: <integer>) => <double-float> 1.5 end)\nend;";
+             apply-untyped(twice, method (x :: <integer>) => <double-float> 1.5 end)\nend;";
         let runs = breaks_under_each_policy(source, |seen, condition| {
             assert_eq!(use_value_types(condition), [ValueType::I64]);
             Choice::UseValue(vec![Value::I64(i64::try_from(seen).unwrap_or(0) + 5)])
@@ -24108,7 +24108,7 @@ end;
                 "300",
             ),
             (
-                "apply(function (n :: limited(<integer>, max: 9)) n end, x) + 0",
+                "apply(method (n :: limited(<integer>, max: 9)) n end, x) + 0",
                 ("typing", "feed"),
                 "300",
             ),

@@ -6,7 +6,7 @@
 
 define constant $two :: <integer> = block ()
   let n = 0;
-  let add = function () => <integer> n := n + 1 end;
+  let add = method () => <integer> n := n + 1 end;
   add();
   add();
   n

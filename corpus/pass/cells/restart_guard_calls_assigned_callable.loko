@@ -8,9 +8,9 @@ define class <oops> (<error>)
 end;
 
 define function main() => <integer>
-  let ok :: callable() => <boolean> = function () => <boolean> #f end;
+  let ok :: callable() => <boolean> = method () => <boolean> #f end;
   handle block ()
-    ok := function () => <boolean> #t end;
+    ok := method () => <boolean> #t end;
     signal(make(<oops>))
   end
   with restart c :: <oops> when ok() => 40 end

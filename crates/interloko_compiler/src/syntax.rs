@@ -415,8 +415,8 @@ pub enum CstKind {
     SelectClause,
     /// Recoverable condition handler expression.
     HandleExpr,
-    /// Anonymous function expression.
-    FunctionExpr,
+    /// Anonymous `method (params) => results body end` expression.
+    MethodExpr,
     /// Restart clause in a handler expression.
     RestartClause,
     /// Dylan-style `block` expression.
@@ -737,7 +737,7 @@ const fn cst_kind_tag(kind: CstKind) -> u64 {
         CstKind::KeywordExpr => 26,
         CstKind::VectorExpr => 27,
         CstKind::UnaryExpr => 28,
-        CstKind::FunctionExpr => 31,
+        CstKind::MethodExpr => 31,
         CstKind::SlotKeyword => 32,
         CstKind::ArgumentKeyword => 33,
         CstKind::TypeDefinitionName => 34,

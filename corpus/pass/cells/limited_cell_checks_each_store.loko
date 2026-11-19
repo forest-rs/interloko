@@ -6,7 +6,7 @@
 
 define function main() => <integer>
   let digit :: limited(<integer>, min: 0, max: 9) = 0;
-  let set-digit = function (d :: <integer>) => <integer> digit := d end;
+  let set-digit = method (d :: <integer>) => <integer> digit := d end;
   set-digit(7);
   set-digit(12);
   digit

@@ -224,7 +224,7 @@ fn checking_distributes_over_conditional_operands() {
 fn closure_bodies_are_checked_under_their_enclosing_definition() {
     let (module, artifact) = decisions_for(&format!(
         "{SHAPES}define function main()\n  \
-         let f :: <callable> = function () => <integer>\n    area(make(<shape>))\n  end;\n  0\nend;"
+         let f :: <callable> = method () => <integer>\n    area(make(<shape>))\n  end;\n  0\nend;"
     ));
     let decisions = main_decisions(&module, &artifact);
     assert_eq!(decisions.len(), 1);
@@ -1043,10 +1043,10 @@ fn captures_carry_and_narrow_the_facts_of_their_sources() {
     let (module, artifact) = decisions_for(&format!(
         "{WHOLE}define function outer(x :: <object>) => <integer>\n  \
          if (instance?(x, <integer>))\n    block ()\n      \
-         let f :: <callable> = function () => <integer>\n        whole(x)\n      end;\n      0\n    \
+         let f :: <callable> = method () => <integer>\n        whole(x)\n      end;\n      0\n    \
          end\n  else 0 end\nend;\n\
          define function inner(x :: <object>) => <integer>\n  \
-         let f :: <callable> = function () => <integer>\n    \
+         let f :: <callable> = method () => <integer>\n    \
          if (instance?(x, <integer>)) whole(x) else 0 end\n  end;\n  0\nend;"
     ));
     for name in ["outer", "inner"] {
@@ -1422,7 +1422,7 @@ fn type_of_a_capture_is_its_source_fact_where_the_closure_is_made() {
     let source = format!(
         "{WHOLE}define function outer(x :: <object>) => <integer>\n  \
          if (instance?(x, <integer>))\n    block ()\n      \
-         let f :: <callable> = function () => <integer>\n        whole(x)\n      end;\n      0\n    \
+         let f :: <callable> = method () => <integer>\n        whole(x)\n      end;\n      0\n    \
          end\n  else 0 end\nend;"
     );
     let (module, artifact) = decisions_for(&source);
@@ -2709,7 +2709,7 @@ fn a_shared_local_is_read_at_its_declared_type() {
     let (module, artifact) = decisions_for(
         "define function f() => <i32>\n  \
          let n = 1;\n  \
-         let bump = function () => <integer> n := n + 1 end;\n  \
+         let bump = method () => <integer> n := n + 1 end;\n  \
          let m = 1;\n  \
          as(<i32>, n) + as(<i32>, m)\nend;",
     );
@@ -2734,7 +2734,7 @@ fn a_shared_capture_is_bound_at_its_declared_type() {
     let (module, artifact) = decisions_for(
         "define function main() => <integer>\n  \
          let n = 0;\n  \
-         let read = function () => <integer> n end;\n  \
+         let read = method () => <integer> n end;\n  \
          n := 7;\n  \
          read()\nend;",
     );

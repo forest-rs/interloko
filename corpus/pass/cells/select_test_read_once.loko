@@ -6,9 +6,9 @@
 
 define function main() => <integer>
   let t :: callable(<integer>, <integer>) => <boolean>
-    = function (a :: <integer>, b :: <integer>) => <boolean> #f end;
-  let swap = function () => <integer>
-    t := function (a :: <integer>, b :: <integer>) => <boolean> #t end;
+    = method (a :: <integer>, b :: <integer>) => <boolean> #f end;
+  let swap = method () => <integer>
+    t := method (a :: <integer>, b :: <integer>) => <boolean> #t end;
     5
   end;
   select (1 by t)

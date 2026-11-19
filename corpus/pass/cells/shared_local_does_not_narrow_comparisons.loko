@@ -8,7 +8,7 @@
 
 define function pick(y :: limited(<integer>, min: 0, max: 1000)) => <integer>
   let n = 0;
-  let bump = function () => <integer>
+  let bump = method () => <integer>
     n := 1000;
     0
   end;

@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code syntax.expected-token
+
+// Loko's anonymous functions are Dylan's: `method (x) … end`. The
+// `function` keyword only starts a `define function`, so
+// `function (x) … end` is not an expression.
+
+define function main() => <integer>
+  let f = function (x :: <integer>) => <integer> x + 1 end;
+  f(1)
+end;

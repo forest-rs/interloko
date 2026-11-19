@@ -628,10 +628,10 @@ fn multiline_definitions_finish_from_parser_state_without_semicolons() {
 #[test]
 fn multiline_definitions_wait_for_every_end_closed_form() {
     // Each line ending in `end` closes a nested form, not the definition:
-    // the conditionals, an anonymous `function`, and `block`.
+    // the conditionals, an anonymous `method`, and `block`.
     let (stdout, stderr) = run_repl(
         "define function main()\n\
-           let pick = function (n :: <integer>) => <integer>\n\
+           let pick = method (n :: <integer>) => <integer>\n\
              case\n\
                n < 0 => 0;\n\
                otherwise => if (n < 10) 1 else 2 end\n\

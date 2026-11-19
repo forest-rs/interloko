@@ -118,6 +118,8 @@ The current slices include:
   declares none, so `let n = 0; n := "s"` is an error, and a limited local
   checks each value assigned to it. Parameters, block exits and constants
   are not assignable;
+- Dylan's anonymous functions, `method (params) => results body end`,
+  which take the parameter and result annotations a `define function` does;
 - closures that share assigned locals: a `let` local that is assigned and
   that a closure refers to lives in a heap cell its frame and every
   capturing closure use, so counters, accumulators and callbacks that

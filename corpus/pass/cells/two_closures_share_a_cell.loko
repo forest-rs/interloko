@@ -6,8 +6,8 @@
 
 define function main() => <integer>
   let balance = 0;
-  let deposit = function (amount :: <integer>) => <integer> balance := balance + amount end;
-  let read = function () => <integer> balance end;
+  let deposit = method (amount :: <integer>) => <integer> balance := balance + amount end;
+  let read = method () => <integer> balance end;
   deposit(40);
   balance := balance + 1;
   deposit(1);

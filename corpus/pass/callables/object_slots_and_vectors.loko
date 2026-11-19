@@ -15,7 +15,7 @@ end;
 
 define function main() => <integer>
   let cell = make(<cell>, item: twice);
-  let steps = #[function (x :: <integer>) => <integer> x + 1 end, cell.item];
+  let steps = #[method (x :: <integer>) => <integer> x + 1 end, cell.item];
   let first :: <integer> = apply(as(<function>, vector-ref(steps, 0)), 20);
   apply(as(<function>, vector-ref(steps, 1)), first)
 end;

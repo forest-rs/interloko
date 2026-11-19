@@ -11,7 +11,7 @@
 // expect: dump tape contains call.indirect
 
 define function make-adder(n :: <integer>) => <callable>
-  function (x :: <integer>) => <integer>
+  method (x :: <integer>) => <integer>
     x + n
   end
 end;

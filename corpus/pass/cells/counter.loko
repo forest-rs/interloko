@@ -13,7 +13,7 @@
 
 define function make-counter() => callable() => <integer>
   let count = 0;
-  function () => <integer>
+  method () => <integer>
     count := count + 1
   end
 end;

@@ -22,9 +22,9 @@ end;
 
 define function main() => <integer>
   let w :: <integer> = 5i32;
-  let bump = function (x :: <u32>) => <u32> x +% 1 end;
+  let bump = method (x :: <u32>) => <u32> x +% 1 end;
   let twice :: callable(<single-float>) => <single-float> =
-    function (y :: <single-float>) => <single-float> y * 2.0 end;
+    method (y :: <single-float>) => <single-float> y * 2.0 end;
   w + widen(3) + total(4i32) + as(<integer>, pick(#f))
     + as(<integer>, bump(3)) + as(<integer>, apply(bump, 4)) + as(<integer>, twice(0.0))
 end;

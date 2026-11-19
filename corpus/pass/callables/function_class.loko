@@ -9,6 +9,6 @@ define function twice(x :: <integer>) => <integer>
 end;
 
 define function main() => <string>
-  let held :: <object> = function (x :: <integer>) => <integer> x + 1 end;
+  let held :: <object> = method (x :: <integer>) => <integer> x + 1 end;
   if (class-of(twice) = <function>) class-name(object-class(held)) else "no" end
 end;

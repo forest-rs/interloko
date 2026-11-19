@@ -5,6 +5,6 @@
 // does not stand in for an `<integer>` one, even though `<i32>` values are
 // integers: callers could pass integers outside its range.
 define function main() => <integer>
-  let f :: callable(<integer>) => <integer> = function (x :: <i32>) => <integer> x end;
+  let f :: callable(<integer>) => <integer> = method (x :: <i32>) => <integer> x end;
   f(5)
 end;

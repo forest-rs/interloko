@@ -17,5 +17,5 @@ define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>
 end;
 
 define function main() => <integer>
-  apply-untyped(twice, function (x :: <integer>) => <double-float> 1.5 end)
+  apply-untyped(twice, method (x :: <integer>) => <double-float> 1.5 end)
 end;
