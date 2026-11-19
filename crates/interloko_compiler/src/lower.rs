@@ -3396,8 +3396,9 @@ impl<'module> Lowering<'module> {
     ) -> Result<Function, LowerError> {
         self.lower_known_callable_boxed_thunk(&self.generic_thunk(generic)?, boxed, false)
     }
-    /// Lowers the typed entry of the callable values of a function, generic
-    /// or slot accessor: it takes the arguments at the target's own kinds,
+
+    /// Lowers the typed entry of the callable values of a function or
+    /// generic: it takes the arguments at the target's own kinds,
     /// checks the parameter types the target relies on that a typed
     /// caller's register types do not establish, and calls the target.
     fn lower_known_callable_thunk(
@@ -3760,8 +3761,8 @@ impl<'module> Lowering<'module> {
         })
     }
 
-    /// Lowers the boxed entry of the callable values of a function, generic
-    /// or slot accessor: under the boxed callable ABI ([`BOXED_WIRE`]),
+    /// Lowers the boxed entry of the callable values of a function or
+    /// generic: under the boxed callable ABI ([`BOXED_WIRE`]),
     /// it checks and unboxes each argument as the target takes it
     /// ([`BodyLowering::unwire`]), adapting a typed callable to its
     /// signature, calls the target, and boxes the results.
@@ -6934,7 +6935,7 @@ impl<'module> BodyLowering<'module> {
     /// is checked as an indirect entry checks a parameter, and a limited
     /// one for its range; a replacement that fails signals a `<type-error>`
     /// whose own replacement is checked again. A result sem knows to be a
-    /// particular function, generic or accessor has that callable as its
+    /// particular function or generic has that callable as its
     /// only value, which no check of a closure could establish, so the
     /// restart supplies no value for it and the dispatcher returns the
     /// callable itself. Other results are whatever their register kind

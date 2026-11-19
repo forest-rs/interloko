@@ -890,21 +890,26 @@ impl GenericFunctionOrigin {
                 .slot_getter_overridden(generic, specializers)
                 .is_none(),
             Self::BuiltIn { generic } => {
+                // The kernel's classes are the built-in's own, which a call
+                // runs inline where typing knows them, so only a class of
+                // the program's may take a method.
+                let kernel_only = module.specializes_on_kernel_classes(specializers);
                 // A method whose specializers may all meet a kernel
                 // method's would override it for those arguments.
-                !module.methods.iter().any(|kernel| {
-                    kernel.generic == generic
-                        && kernel.origin == MethodOrigin::BuiltIn
-                        && kernel.specializers.len() == specializers.len()
-                        && kernel.specializers.iter().zip(specializers).all(
-                            |(kernel, specializer)| match (kernel, specializer) {
-                                (Some(kernel), Some(class)) => {
-                                    module.classes_may_overlap(*kernel, *class)
-                                }
-                                _ => true,
-                            },
-                        )
-                })
+                !kernel_only
+                    && !module.methods.iter().any(|kernel| {
+                        kernel.generic == generic
+                            && kernel.origin == MethodOrigin::BuiltIn
+                            && kernel.specializers.len() == specializers.len()
+                            && kernel.specializers.iter().zip(specializers).all(
+                                |(kernel, specializer)| match (kernel, specializer) {
+                                    (Some(kernel), Some(class)) => {
+                                        module.classes_may_overlap(*kernel, *class)
+                                    }
+                                    _ => true,
+                                },
+                            )
+                    })
             }
             Self::Numeric { .. } => {
                 let Some(real) = module.builtin_value_class(BuiltinValueClass::Real) else {
@@ -987,23 +992,46 @@ pub enum MethodSelection {
 
 impl Module {
     /// The class whose slot's getter a method of `generic` specialized on
-    /// `specializers` would override, when there is one: a class with a
-    /// getter method of `generic` that the method's first specializer is,
-    /// or is a subclass of.
+    /// `specializers` would override, when there is one: a getter takes one
+    /// receiver, so a method of a one-parameter generic named for a slot,
+    /// specialized on a class with that slot, declared or inherited, would
+    /// take its receivers from the slot's getter, which a read of a
+    /// receiver of known class skips. This holds whether the getter is the
+    /// generic's method, as a slot's getter is of its own generic, or
+    /// serves its class beside the generic, as a slot named for a kernel
+    /// collection generic does.
     #[must_use]
     pub fn slot_getter_overridden(
         &self,
         generic: GenericFunctionId,
         specializers: &[MethodSpecializer],
     ) -> Option<ClassId> {
+        let generic = self.generics.get(generic.0 as usize)?;
+        if generic.arity.saturating_sub(generic.keywords.len()) != 1 {
+            return None;
+        }
         let class = specializers.first().copied().flatten()?;
-        self.methods.iter().find_map(|method| match method.origin {
-            MethodOrigin::SlotGetter { class: owner, .. }
-                if method.generic == generic && self.is_same_or_subclass(class, owner) =>
-            {
-                Some(owner)
-            }
-            _ => None,
+        self.classes
+            .get(class.0 as usize)?
+            .effective_slots
+            .iter()
+            .find(|slot| slot.accessor.name == generic.name)
+            .map(|slot| slot.source_class)
+    }
+
+    /// Whether every one of `specializers` is a class of the kernel's:
+    /// `<object>` or a built-in value class.
+    #[must_use]
+    pub fn specializes_on_kernel_classes(&self, specializers: &[MethodSpecializer]) -> bool {
+        specializers.iter().all(|specializer| {
+            specializer.is_none_or(|class| {
+                self.classes.get(class.0 as usize).is_none_or(|class| {
+                    matches!(
+                        class.origin,
+                        ClassOrigin::ObjectRoot | ClassOrigin::BuiltinValue { .. }
+                    )
+                })
+            })
         })
     }
 
@@ -1880,8 +1908,15 @@ fn check_collection_method_overrides(module: &mut Module) {
         if let Some(specializer) = method.specializers.get(index).copied().flatten() {
             let _ = module.write_class(&mut class, specializer);
         }
+        let code = if matches!(generic.origin, GenericFunctionOrigin::BuiltIn { .. })
+            && module.specializes_on_kernel_classes(&method.specializers)
+        {
+            DiagnosticCode::BuiltInMethodOnKernelClass
+        } else {
+            DiagnosticCode::CollectionMethodOverridesKernel
+        };
         diagnostics.push(
-            Diagnostic::error(method.span, DiagnosticCode::CollectionMethodOverridesKernel)
+            Diagnostic::error(method.span, code)
                 .with_arg(DiagnosticArg::text("function", generic.name.clone()))
                 .with_arg(DiagnosticArg::text("class", class)),
         );
@@ -3294,6 +3329,9 @@ pub struct Function {
     /// `define strict function`: typing must prove the checks the compiler
     /// inserts into the body (see [`crate::typing`]).
     pub strict: bool,
+    /// Whether the kernel made the function, the value a built-in such as
+    /// `digit?` is, rather than the program defining it.
+    pub kernel: bool,
     /// Source span.
     pub span: Span,
 }
@@ -7195,6 +7233,66 @@ impl Lowering {
         Some(id)
     }
 
+    /// Why the getter of `slot`, declared by `class`, cannot be a method of
+    /// `generic`, whose contract a program may declare: its receiver
+    /// parameter must admit `class`, and its result must admit what the
+    /// slot holds, its range and callable signature included.
+    fn getter_contract_mismatch(
+        &self,
+        generic: GenericFunctionId,
+        class: ClassId,
+        slot: &EffectiveSlot,
+    ) -> Option<Diagnostic> {
+        let symbol = self.generic_symbols.get(generic.0 as usize)?;
+        let name = slot.accessor.name.clone();
+        if let Some(expected) = symbol.param_kinds.first().copied().flatten()
+            && !self.generic_specializer_matches(expected, Some(class))
+        {
+            return Some(
+                Diagnostic::error(
+                    slot.span,
+                    DiagnosticCode::GenericMethodSpecializerTypeMismatch,
+                )
+                .with_arg(DiagnosticArg::text("method", name))
+                .with_arg(DiagnosticArg::unsigned("argument_index", 1))
+                .with_arg(DiagnosticArg::text(
+                    "actual",
+                    self.method_specializer_label(Some(class)),
+                ))
+                .with_arg(DiagnosticArg::text("expected", self.kind_name(expected))),
+            );
+        }
+        let expected = symbol.return_annotation.clone()?;
+        let range_holds = match (symbol.return_ranges.first().copied().flatten(), slot.range) {
+            (None, _) => true,
+            (Some(declared), Some(held)) => declared.includes(held),
+            (Some(_), None) => false,
+        };
+        let signature_holds = match symbol.return_callable_sigs.first().cloned().flatten() {
+            None => true,
+            Some(declared) => {
+                self.callable_signatures_match(Some(&declared), slot.callable_signature.as_ref())
+            }
+        };
+        if self.result_kinds_match(&expected, &[slot.kind]) && range_holds && signature_holds {
+            return None;
+        }
+        let declared = match (
+            symbol.return_ranges.first().copied().flatten(),
+            symbol.return_callable_sigs.first().cloned().flatten(),
+        ) {
+            (Some(range), _) => limited_type_name(range),
+            (None, Some(signature)) => self.callable_signature_name(&signature),
+            (None, None) => self.result_kinds_name(&expected),
+        };
+        Some(
+            Diagnostic::error(slot.span, DiagnosticCode::GenericMethodResultTypeMismatch)
+                .with_arg(DiagnosticArg::text("method", name))
+                .with_arg(DiagnosticArg::text("actual", slot.type_name.clone()))
+                .with_arg(DiagnosticArg::text("expected", declared)),
+        )
+    }
+
     /// Whether values of `kind` are of a class with a slot whose getter is
     /// `name`, declared or inherited.
     fn declares_slot(&self, kind: ValueKind, name: &str) -> bool {
@@ -7233,23 +7331,10 @@ impl Lowering {
             {
                 continue;
             }
-            // A program's generic declares what its methods return, the
-            // getter's included.
-            if let Some(expected) = self
-                .generic_symbols
-                .get(generic.0 as usize)
-                .and_then(|symbol| symbol.return_annotation.clone())
-                && !self.result_kinds_match(&expected, &[slot.kind])
-            {
-                self.diagnostics.push(
-                    Diagnostic::error(slot.span, DiagnosticCode::GenericMethodResultTypeMismatch)
-                        .with_arg(DiagnosticArg::text("method", slot.accessor.name.clone()))
-                        .with_arg(DiagnosticArg::text("actual", self.kind_name(slot.kind)))
-                        .with_arg(DiagnosticArg::text(
-                            "expected",
-                            self.result_kinds_name(&expected),
-                        )),
-                );
+            // A program's generic declares what its methods take and
+            // return, the getter's included.
+            if let Some(diagnostic) = self.getter_contract_mismatch(generic, class, &slot) {
+                self.diagnostics.push(diagnostic);
                 continue;
             }
             let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
@@ -8307,8 +8392,10 @@ impl Lowering {
                 self.methods.push(method);
             }
             self.collect_slot_setter_methods();
+            self.collect_slot_getter_methods();
             self.collect_numeric_methods();
             self.collect_collection_methods();
+            self.collect_built_in_methods();
             self.refresh_inferred_generic_results();
             self.lower_slot_defaults(module);
             self.lower_constants(module);
@@ -8443,7 +8530,18 @@ impl Lowering {
         let _ = self.collection_generic_named(&method.name);
         let _ = self.built_in_generic_named(&method.name);
         let _ = self.slot_getter_named(&method.name);
-        let generic_symbol = self.resolve_generic(&method.name).cloned();
+        // A kernel generic the compiler's own code made, as `c[k]` makes
+        // `element`, is no method's generic where a function, constant or
+        // host function of the program takes its name.
+        let generic_symbol = self
+            .resolve_generic(&method.name)
+            .filter(|symbol| {
+                !self.is_kernel_generic(symbol.id)
+                    || (self.resolve_function(&method.name).is_none()
+                        && self.resolve_host_function(&method.name).is_none()
+                        && self.resolve_constant(&method.name).is_none())
+            })
+            .cloned();
         let generic = generic_symbol
             .as_ref()
             .map(|symbol| symbol.id)
@@ -8851,6 +8949,7 @@ impl Lowering {
             entry_checks: Vec::new(),
             keywords: self.keyword_params(self.keyword_functions.iter(), &function.name),
             strict: function.strict,
+            kernel: false,
             span: function.span,
         }
     }
@@ -9852,6 +9951,20 @@ impl Lowering {
                 span,
             );
         }
+        if !self.program_defines(callee)
+            && built_in::names_built_in(callee)
+            && self.has_accessor(callee)
+        {
+            return self.lower_getter_or_built_in_call(
+                ctx,
+                id,
+                callee,
+                args,
+                keywords,
+                expected_results,
+                span,
+            );
+        }
         if self.program_defines(callee) {
             return self.lower_definition_call(
                 ctx,
@@ -9880,7 +9993,65 @@ impl Lowering {
     fn program_defines(&self, name: &str) -> bool {
         self.shadows_collection_generic(name)
             || self.resolve_constant(name).is_some()
-            || (CollectionFunction::from_name(name).is_none() && self.has_accessor(name))
+            || (CollectionFunction::from_name(name).is_none()
+                && !built_in::names_built_in(name)
+                && self.has_accessor(name))
+    }
+
+    /// Lowers a call of `callee`, a built-in's name that a slot's getter
+    /// has too and no other definition of the program takes. The getter
+    /// serves a call of one receiver of a class with the slot, read
+    /// directly; every other call is the built-in's, so a class with a
+    /// slot `apply` or `make` leaves `apply(f, x)` and `make(<c>)` alone.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_getter_or_built_in_call(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        callee: &str,
+        args: &[ast::Expr],
+        keywords: &[ast::KeywordArg],
+        expected_results: Option<&[ValueKind]>,
+        span: Span,
+    ) -> Expr {
+        let ([receiver], []) = (args, keywords) else {
+            return self.lower_built_in_call(
+                ctx,
+                id,
+                callee,
+                args,
+                keywords,
+                expected_results,
+                span,
+            );
+        };
+        let value = self.lower_expr(ctx, receiver);
+        if self.declares_slot(self.expr_kind(&value), callee) {
+            return self.lower_accessor_call(ctx, value, callee, span);
+        }
+        // The built-in reads the receiver, evaluated once, from a local
+        // whose name source cannot spell.
+        let scope = ctx.scope_start();
+        let name = format!("{callee} argument@{}", span.start);
+        let bound = self.bind_hidden_local(ctx, id, &name, value, receiver.span());
+        let arg = ast::Expr::Name {
+            id,
+            name,
+            span: receiver.span(),
+        };
+        let call =
+            self.lower_built_in_call(ctx, id, callee, &[arg], keywords, expected_results, span);
+        ctx.hide_locals_from(scope);
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements: vec![Statement::Let(bound)],
+                result: call,
+                span,
+            }),
+            cleanup: None,
+            span,
+        }
     }
 
     /// Lowers a call of `callee`, a definition of the program.
@@ -11264,6 +11435,9 @@ impl Lowering {
     /// generic when it has several (see the `built_in` module). `None`
     /// when `name` is no built-in with a value.
     fn built_in_value(&mut self, name: &str) -> Option<KnownCallable> {
+        if self.program_defines(name) {
+            return None;
+        }
         let overloads = built_in::overloads(name)?;
         Some(match overloads.as_slice() {
             [params] => KnownCallable::DirectFunction(self.built_in_function(name, params)),
@@ -11373,6 +11547,7 @@ impl Lowering {
                 entry_checks: Vec::new(),
                 keywords: Vec::new(),
                 strict: false,
+                kernel: true,
                 span: Span::default(),
             },
         ));
@@ -11520,6 +11695,10 @@ impl Lowering {
         let mut kinds = Vec::new();
         let mut args = Vec::new();
         let id = AstNodeId::generated(self.source_file, BUILT_IN_TAG, name, 0, 0);
+        debug_assert!(
+            params.len() <= BUILT_IN_PARAMS.len(),
+            "a built-in takes at most as many parameters as have names"
+        );
         for (param, type_name) in BUILT_IN_PARAMS.iter().zip(params) {
             let kind = self.resolve_type_name(type_name, false, span);
             locals.push(ctx.add_local(

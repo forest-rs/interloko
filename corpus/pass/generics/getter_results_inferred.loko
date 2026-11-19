@@ -1,0 +1,24 @@
+// expect: runtime code dispatch.no-applicable-method
+// expect: diagnostics 0
+
+// An open generic's result is inferred from all its methods, slot getters
+// included, so `power(x)` may be the slot's `<integer>`, which `size`
+// then dispatches on, finding no method.
+
+define generic power (x);
+
+define class <a> (<object>)
+  slot power :: <integer>, init-value: 3;
+end;
+
+define method power (x :: <string>) "str" end;
+
+define generic use (x);
+
+define method use (x :: <object>) => <integer>
+  size(power(x))
+end;
+
+define function main() => <integer>
+  use(make(<a>))
+end;

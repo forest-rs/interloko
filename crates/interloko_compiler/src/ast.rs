@@ -4063,7 +4063,6 @@ fn let_pattern_definition(pattern: &LetPattern) -> DefinitionId {
     }
 }
 
-/// The argument nodes of a call that are not keyword arguments, in order.
 /// The kernel-only name `collection[key]` calls, the kernel's `element`
 /// generic: a `%` cannot appear in a source name, so a program's own
 /// `element` does not take element syntax from it, as Dylan's `[]` always
@@ -4078,6 +4077,7 @@ pub const KERNEL_ELEMENT_SETTER: &str = "%element-setter";
 /// source cannot call it any other way.
 pub const POSITION_FROM_OFFSET: &str = "as(<string-position>, ...)";
 
+/// The argument nodes of a call that are not keyword arguments, in order.
 fn regular_arg_nodes(node: &CstNode) -> Vec<&CstNode> {
     node.child_nodes(CstKind::ArgList)
         .flat_map(|list| &list.children)

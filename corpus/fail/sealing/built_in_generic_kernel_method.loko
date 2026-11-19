@@ -1,13 +1,15 @@
-// expect: diagnostic code sem.collection-method-overrides-kernel
-// expect: diagnostic contains `sqrt` already has the kernel's method for <double-float>
+// expect: diagnostic code sem.built-in-method-on-kernel-class
+// expect: diagnostic contains a method may join it only for a class of the program's, not <integer>
 
-// The built-in generic `sqrt` is sealed over the classes of its kernel
-// methods, so a program's method for `<double-float>` would override one.
+// The built-in generic `sqrt` is sealed over the kernel's classes, whose
+// calls its own overloads serve inline, so a program's method may join it
+// only for a class of its own: not even for `<integer>`, which no overload
+// takes.
 
-define method sqrt (s :: <double-float>) => <double-float>
-  s
+define method sqrt (n :: <integer>) => <double-float>
+  as(<double-float>, n)
 end;
 
-define function main() => <double-float>
-  sqrt(4.0)
+define function main() => <integer>
+  0
 end;

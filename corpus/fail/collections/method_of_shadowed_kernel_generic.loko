@@ -1,0 +1,20 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.unresolved-generic
+
+// A program's own `size` function takes the name from the kernel's `size`
+// generic, so a method of `size` has no generic to join, even where the
+// compiler's own iteration made the kernel's generic.
+
+define function size (x :: <object>) => <integer> 99 end;
+
+define class <seq> (<sequence>)
+  slot n :: <integer>, init-value: 3;
+end;
+
+define method size (c :: <seq>) => <integer> c.n end;
+
+define function main() => <integer>
+  let total = 0;
+  for (x :: <integer> in #[1, 2, 3]) total := total + x end;
+  total
+end;

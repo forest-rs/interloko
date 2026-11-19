@@ -1,0 +1,19 @@
+// expect: run 18
+// expect: diagnostics 0
+
+// A slot named like a built-in serves a call of one receiver of its class;
+// every other call of the name is the built-in's, so a class with slots
+// `make` and `apply` can still be made, and `apply` still applies.
+
+define class <prefix> (<object>)
+  slot make :: <integer>, init-value: 4;
+  constant slot apply :: callable(<integer>) => <integer>, required-init-keyword: apply:;
+end;
+
+define function twice (x :: <integer>) => <integer> x * 2 end;
+
+define function main() => <integer>
+  let p = make(<prefix>, apply: twice);
+  let r :: <integer> = apply(twice, 4);
+  r + p.apply(1) + make(p) + p.make
+end;
