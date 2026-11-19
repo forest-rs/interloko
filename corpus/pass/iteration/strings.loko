@@ -1,0 +1,29 @@
+// expect: run 1303
+// expect: diagnostics 0
+
+// A `<string>` is a `<sequence>` whose iteration states are
+// `<string-position>`s: `for` visits each character, whatever its UTF-8
+// width, whether the string's class is known or only `<object>`.
+
+define function count(c :: <object>) => <integer>
+  let n = 0;
+  for (x in c) n := n + 1 end;
+  n
+end;
+
+define function letters(s :: <string>) => <integer>
+  let n = 0;
+  for (x in s)
+    if (alphabetic?(as(<character>, x))) n := n + 1 end
+  end;
+  n
+end;
+
+define function sequence?(x :: <object>) => <boolean>
+  instance?(x, <sequence>)
+end;
+
+define function main() => <integer>
+  let bonus = if (sequence?("x")) 1000 else 0 end;
+  count("aé😀") * 100 + letters("a1b2c") + bonus
+end;
