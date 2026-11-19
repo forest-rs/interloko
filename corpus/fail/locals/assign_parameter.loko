@@ -1,0 +1,15 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.assignment-target-not-assignable
+// expect: diagnostic contains `n` is a parameter and cannot be assigned; only `let` locals can
+
+// Only `let` locals may be assigned; bind a parameter's value to one to
+// change it.
+
+define function twice(n :: <integer>) => <integer>
+  n := n * 2;
+  n
+end;
+
+define function main() => <integer>
+  twice(21)
+end;

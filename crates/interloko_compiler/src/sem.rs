@@ -7,7 +7,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::ast;
-use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode};
+use crate::diagnostic::{Diagnostic, DiagnosticArg, DiagnosticCode, DiagnosticLabel};
 use crate::identity::{DefinitionId, DefinitionKind, SourceFileId};
 use crate::promotion;
 use crate::syntax::{self, Span};
@@ -1233,7 +1233,9 @@ impl Module {
             | Expr::IntrinsicCall { result_kind, .. }
             | Expr::HostCall { result_kind, .. }
             | Expr::AccessorCall { result_kind, .. }
-            | Expr::SlotWrite { result_kind, .. } => *result_kind,
+            | Expr::SlotWrite { result_kind, .. }
+            | Expr::AssignLocal { result_kind, .. } => *result_kind,
+            Expr::Loop { .. } => scalar_result_kind(&[]),
             Expr::ClassObject { class, .. } | Expr::ClassOf { class, .. } => {
                 ValueKind::ClassObject(*class)
             }
@@ -1318,6 +1320,7 @@ impl Module {
                 ..
             } => join(&self.expr_kinds(&body.result), &exit.result_kinds),
             Expr::Block { body, .. } => self.expr_kinds(&body.result),
+            Expr::Loop { .. } => Vec::new(),
             _ => vec![self.expr_kind(expr)],
         }
     }
@@ -1552,8 +1555,11 @@ impl<'a> SiteNumbering<'a> {
     }
 
     fn block(&mut self, block: &mut Block) {
-        for binding in &mut block.lets {
-            self.expr(&mut binding.value);
+        for statement in &mut block.statements {
+            match statement {
+                Statement::Let(binding) => self.expr(&mut binding.value),
+                Statement::Expr(expr) => self.expr(expr),
+            }
         }
         self.expr(&mut block.result);
     }
@@ -1723,6 +1729,11 @@ impl<'a> SiteNumbering<'a> {
                     self.block(cleanup);
                 }
             }
+            Expr::AssignLocal { value, .. } => self.expr(value),
+            Expr::Loop { test, body, .. } => {
+                self.expr(test);
+                self.block(body);
+            }
             Expr::ConstI64 { .. }
             | Expr::ConstF64 { .. }
             | Expr::Const32 { .. }
@@ -1745,7 +1756,7 @@ impl Block {
     /// An empty block standing in for one that is temporarily moved out.
     const fn placeholder() -> Self {
         Self {
-            lets: Vec::new(),
+            statements: Vec::new(),
             result: Expr::Error {
                 span: Span { start: 0, end: 0 },
             },
@@ -2788,6 +2799,10 @@ pub struct Local {
     /// it. For a parameter, callers check their arguments, and an indirect
     /// entry checks what it is passed.
     pub range: Option<IntRange>,
+    /// Whether some `:=` assigns this local after its binding. An assigned
+    /// local holds different values over its lifetime: only a `let` local
+    /// may be assigned, and no closure captures one.
+    pub assigned: bool,
     /// Source span of the binding name.
     pub span: Span,
 }
@@ -2795,12 +2810,80 @@ pub struct Local {
 /// Semantic function or method body.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Block {
-    /// Local `let` bindings.
-    pub lets: Vec<Let>,
+    /// `let` bindings and expressions evaluated for effect, in order.
+    pub statements: Vec<Statement>,
     /// Final result expression.
     pub result: Expr,
     /// Source span.
     pub span: Span,
+}
+
+impl Block {
+    /// The body's `let` bindings, in order.
+    pub fn lets(&self) -> impl Iterator<Item = &Let> {
+        self.statements
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::Let(binding) => Some(binding),
+                Statement::Expr(_) => None,
+            })
+    }
+
+    /// Visits the expressions this body evaluates directly, in order: each
+    /// statement's, then the result.
+    pub fn for_each_expr<'e>(&'e self, mut visit: impl FnMut(&'e Expr)) {
+        for statement in &self.statements {
+            match statement {
+                Statement::Let(binding) => visit(&binding.value),
+                Statement::Expr(expr) => visit(expr),
+            }
+        }
+        visit(&self.result);
+    }
+
+    /// The locals an assignment in this body assigns; see
+    /// [`Expr::assigned_locals`].
+    #[must_use]
+    pub fn assigned_locals(&self) -> Vec<LocalId> {
+        let mut out = Vec::new();
+        self.for_each_expr(|expr| expr.collect_assigned(&mut out));
+        out
+    }
+}
+
+/// One statement of a semantic body, before its result expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Statement {
+    /// A `let` binding.
+    Let(Let),
+    /// An expression evaluated for its effects; its values are discarded.
+    Expr(Expr),
+}
+
+/// When a conditional loop runs its body.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LoopKind {
+    /// `while`: the body runs while the test is `#t`.
+    While,
+    /// `until`: the body runs until the test is `#t`.
+    Until,
+}
+
+impl LoopKind {
+    /// The test outcome that runs the body once more.
+    #[must_use]
+    pub const fn continues_on(self) -> bool {
+        matches!(self, Self::While)
+    }
+}
+
+impl From<ast::LoopKind> for LoopKind {
+    fn from(value: ast::LoopKind) -> Self {
+        match value {
+            ast::LoopKind::While => Self::While,
+            ast::LoopKind::Until => Self::Until,
+        }
+    }
 }
 
 /// Semantic `let` binding.
@@ -3776,6 +3859,36 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Assignment of a `let` local, `name := value`, whose value is the
+    /// local's new value.
+    ///
+    /// The value already has the local's category and, for a limited
+    /// local, passed its range check.
+    AssignLocal {
+        /// Assigned local.
+        local: LocalId,
+        /// The local's declared category, which is the result's.
+        result_kind: ValueKind,
+        /// The local's typed callable signature, when it has one.
+        callable_signature: Option<CallableSignature>,
+        /// Assigned value.
+        value: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Conditional loop: evaluates `test` and, while it asks for another
+    /// iteration, the body. Produces no values.
+    Loop {
+        /// Whether the body runs while or until the test is `#t`.
+        kind: LoopKind,
+        /// `<boolean>` test, evaluated before each iteration.
+        test: Box<Expr>,
+        /// Body evaluated for effect; its locals are scoped to one
+        /// iteration.
+        body: Box<Block>,
+        /// Source span.
+        span: Span,
+    },
     /// Conditional expression.
     If {
         /// Boolean condition.
@@ -3829,6 +3942,132 @@ pub enum Expr {
 }
 
 impl Expr {
+    /// Visits this expression's direct subexpressions in evaluation order,
+    /// including those of the bodies it contains. A closure's body is code
+    /// of its own and is not visited.
+    pub fn for_each_child<'e>(&'e self, mut visit: impl FnMut(&'e Self)) {
+        match self {
+            Self::VectorLiteral {
+                elements: items, ..
+            }
+            | Self::Values { values: items, .. }
+            | Self::IntrinsicCall { args: items, .. }
+            | Self::HostCall { args: items, .. }
+            | Self::DirectCall { args: items, .. }
+            | Self::GenericCall { args: items, .. }
+            | Self::FloatCall { args: items, .. } => items.iter().for_each(visit),
+            Self::CallableCall { callable, args, .. } => {
+                visit(callable);
+                args.iter().for_each(visit);
+            }
+            Self::Convert { value: inner, .. }
+            | Self::CheckRange { value: inner, .. }
+            | Self::Negate { value: inner, .. }
+            | Self::Signal {
+                condition: inner, ..
+            }
+            | Self::ClassOf { object: inner, .. }
+            | Self::InstanceOf { value: inner, .. }
+            | Self::InstanceOfLimited { value: inner, .. }
+            | Self::Cast { value: inner, .. }
+            | Self::AccessorCall {
+                receiver: inner, ..
+            }
+            | Self::AssignLocal { value: inner, .. }
+            | Self::Discard { value: inner, .. } => visit(inner),
+            Self::MakeObject { class, fields, .. } => {
+                visit(class);
+                fields.iter().for_each(|field| visit(&field.value));
+            }
+            Self::MakeRuntimeClass {
+                class,
+                init_args,
+                candidates,
+                ..
+            } => {
+                visit(class);
+                init_args.iter().for_each(|arg| visit(&arg.value));
+                candidates
+                    .iter()
+                    .flat_map(|candidate| &candidate.defaults)
+                    .for_each(|field| visit(&field.value));
+            }
+            Self::SlotWrite {
+                receiver: lhs,
+                value: rhs,
+                ..
+            }
+            | Self::Binary { lhs, rhs, .. }
+            | Self::Compare { lhs, rhs, .. }
+            | Self::MixedCompare { lhs, rhs, .. }
+            | Self::ValueEqual { lhs, rhs, .. }
+            | Self::Identical { lhs, rhs, .. } => {
+                visit(lhs);
+                visit(rhs);
+            }
+            Self::Loop { test, body, .. } => {
+                visit(test);
+                body.for_each_expr(visit);
+            }
+            Self::If {
+                condition,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                visit(condition);
+                visit(then_branch);
+                visit(else_branch);
+            }
+            Self::Handle { body, restart, .. } => {
+                visit(body);
+                if let Some(guard) = &restart.guard {
+                    visit(guard);
+                }
+                visit(&restart.body);
+            }
+            Self::Block { body, cleanup, .. } => {
+                body.for_each_expr(&mut visit);
+                if let Some(cleanup) = cleanup {
+                    cleanup.for_each_expr(&mut visit);
+                }
+            }
+            Self::Closure { .. }
+            | Self::ConstI64 { .. }
+            | Self::ConstF64 { .. }
+            | Self::Const32 { .. }
+            | Self::ConstBool { .. }
+            | Self::StringLiteral { .. }
+            | Self::SymbolLiteral { .. }
+            | Self::Local { .. }
+            | Self::Capture { .. }
+            | Self::ConstantRef { .. }
+            | Self::ClassObject { .. }
+            | Self::TypeObject { .. }
+            | Self::KnownCallable { .. }
+            | Self::GenericFunctionObject { .. }
+            | Self::Error { .. } => {}
+        }
+    }
+
+    /// The locals an assignment in this expression assigns, outside any
+    /// closure in it (a closure cannot assign what it captures), each once.
+    #[must_use]
+    pub fn assigned_locals(&self) -> Vec<LocalId> {
+        let mut out = Vec::new();
+        self.collect_assigned(&mut out);
+        out
+    }
+
+    fn collect_assigned(&self, out: &mut Vec<LocalId>) {
+        if let Self::AssignLocal { local, .. } = self
+            && !out.contains(local)
+        {
+            out.push(*local);
+        }
+        self.for_each_child(|child| child.collect_assigned(out));
+    }
+
     /// Returns this expression's source span.
     #[must_use]
     pub const fn span(&self) -> Span {
@@ -3872,6 +4111,8 @@ impl Expr {
             | Self::MixedCompare { span, .. }
             | Self::ValueEqual { span, .. }
             | Self::Identical { span, .. }
+            | Self::AssignLocal { span, .. }
+            | Self::Loop { span, .. }
             | Self::If { span, .. }
             | Self::Discard { span, .. }
             | Self::Handle { span, .. }
@@ -4173,6 +4414,12 @@ struct FunctionContext {
     /// Definitions of the block exit procedures bound in this body or, for
     /// a closure, an enclosing one.
     exit_definitions: Vec<DefinitionId>,
+    /// The `let` locals, which `:=` may assign.
+    assignable: Vec<LocalId>,
+    /// Locals closures created here capture, with the span of the closure.
+    captured: Vec<(LocalId, Span)>,
+    /// Locals `:=` assigns, with the span of their first assignment.
+    assignments: Vec<(LocalId, Span)>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -4206,6 +4453,9 @@ impl FunctionContext {
             captures: Vec::new(),
             active_restarts: Vec::new(),
             exit_definitions: Vec::new(),
+            assignable: Vec::new(),
+            captured: Vec::new(),
+            assignments: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -4218,6 +4468,9 @@ impl FunctionContext {
             captures: Vec::new(),
             active_restarts: Vec::new(),
             exit_definitions,
+            assignable: Vec::new(),
+            captured: Vec::new(),
+            assignments: Vec::new(),
             diagnostics: Vec::new(),
         }
     }
@@ -4259,6 +4512,7 @@ impl FunctionContext {
             kind,
             callable_signature,
             range: None,
+            assigned: false,
             span,
         });
         self.visible_locals.push(true);
@@ -4270,6 +4524,57 @@ impl FunctionContext {
     fn limit_local(&mut self, local: LocalId, range: Option<IntRange>) {
         if let Some(local) = self.locals.get_mut(local.0 as usize) {
             local.range = range;
+        }
+    }
+
+    /// Lets `:=` assign `local`, a `let` local.
+    fn allow_assignment(&mut self, local: LocalId) {
+        self.assignable.push(local);
+    }
+
+    /// Records that `:=` assigns `local` at `span`. Captures copy a value
+    /// when their closure is made, so a closure capturing an assigned local
+    /// would read a stale copy; that is reported instead.
+    fn note_assignment(&mut self, local: LocalId, span: Span) {
+        let Some(binding) = self.locals.get_mut(local.0 as usize) else {
+            return;
+        };
+        binding.assigned = true;
+        let name = binding.name.clone();
+        // Captures before the first assignment are reported once, here;
+        // later ones when they are made.
+        if self
+            .assignments
+            .iter()
+            .any(|(assigned, _)| *assigned == local)
+        {
+            return;
+        }
+        self.assignments.push((local, span));
+        let closures = self
+            .captured
+            .iter()
+            .filter(|(captured, _)| *captured == local)
+            .map(|(_, closure)| *closure)
+            .collect::<Vec<_>>();
+        for closure in closures {
+            self.diagnostics
+                .push(assigned_capture_diagnostic(&name, closure, span));
+        }
+    }
+
+    /// Records that a closure at `span` captures `local`; see
+    /// [`Self::note_assignment`].
+    fn note_capture(&mut self, local: LocalId, span: Span) {
+        self.captured.push((local, span));
+        if let Some((_, assignment)) = self
+            .assignments
+            .iter()
+            .find(|(assigned, _)| *assigned == local)
+            && let Some(binding) = self.locals.get(local.0 as usize)
+        {
+            let diagnostic = assigned_capture_diagnostic(&binding.name, span, *assignment);
+            self.diagnostics.push(diagnostic);
         }
     }
 
@@ -4397,6 +4702,14 @@ impl FunctionContext {
             .find(|restart| module.is_same_or_subclass(class, restart.specializer))
             .cloned()
     }
+}
+
+/// Reports a closure at `closure` capturing the local `name`, which `:=`
+/// assigns at `assignment`.
+fn assigned_capture_diagnostic(name: &str, closure: Span, assignment: Span) -> Diagnostic {
+    Diagnostic::error(closure, DiagnosticCode::AssignedLocalCaptured)
+        .with_arg(DiagnosticArg::text("local", name))
+        .with_label(DiagnosticLabel::secondary(assignment, "assigned here"))
 }
 
 struct Lowering {
@@ -5550,7 +5863,7 @@ impl Lowering {
                     params,
                     locals: ctx.locals,
                     body: Block {
-                        lets: Vec::new(),
+                        statements: Vec::new(),
                         result,
                         span: Span::default(),
                     },
@@ -5649,7 +5962,7 @@ impl Lowering {
             };
             let value = self.limit_value(value, slot.kind, checked);
             let mut body = Block {
-                lets: Vec::new(),
+                statements: Vec::new(),
                 result: Expr::SlotWrite {
                     setter: definition,
                     receiver: Box::new(Expr::Local {
@@ -6606,8 +6919,16 @@ impl Lowering {
         block: &ast::Block,
         expected_result: Option<&[ValueKind]>,
     ) -> Block {
-        let mut lets = Vec::new();
-        for local in &block.lets {
+        let mut statements = Vec::new();
+        for statement in &block.statements {
+            let local = match statement {
+                ast::Statement::Let(local) => local,
+                ast::Statement::Expr(expr) => {
+                    let value = self.lower_expr_expected_results(ctx, expr, None);
+                    statements.push(Statement::Expr(value));
+                    continue;
+                }
+            };
             match &local.pattern {
                 ast::LetPattern::Name(binding) => {
                     let expected_type = binding.type_annotation.as_ref().map(|annotation| {
@@ -6709,12 +7030,13 @@ impl Lowering {
                         binding.span,
                     );
                     ctx.limit_local(id, range);
-                    lets.push(Let {
+                    ctx.allow_assignment(id);
+                    statements.push(Statement::Let(Let {
                         local: id,
                         locals: vec![id],
                         value,
                         span: local.span,
-                    });
+                    }));
                 }
                 ast::LetPattern::Tuple { bindings, .. } => {
                     let expected_kinds = bindings
@@ -6837,6 +7159,7 @@ impl Lowering {
                             binding.span,
                         );
                         ctx.limit_local(id, range);
+                        ctx.allow_assignment(id);
                         local_ids.push(id);
                     }
                     // Each limited binding checks its own value.
@@ -6881,18 +7204,18 @@ impl Lowering {
                         value
                     };
                     let local_id = local_ids.first().copied().unwrap_or(LocalId(u32::MAX));
-                    lets.push(Let {
+                    statements.push(Statement::Let(Let {
                         local: local_id,
                         locals: local_ids,
                         value,
                         span: local.span,
-                    });
+                    }));
                 }
             }
         }
 
         Block {
-            lets,
+            statements,
             result: self.lower_expr_expected_results(ctx, &block.result, expected_result),
             span: block.span,
         }
@@ -7483,6 +7806,20 @@ impl Lowering {
                     span: *span,
                 }
             }
+            ast::Expr::Assign {
+                name,
+                name_span,
+                value,
+                span,
+                ..
+            } => self.lower_local_assign(ctx, name, *name_span, value, *span),
+            ast::Expr::Loop {
+                kind,
+                test,
+                body,
+                span,
+                ..
+            } => self.lower_loop(ctx, *kind, test, body, *span),
             ast::Expr::Handle {
                 body,
                 restart,
@@ -7628,7 +7965,7 @@ impl Lowering {
             captures: Vec::new(),
             locals: Vec::new(),
             body: Block {
-                lets: Vec::new(),
+                statements: Vec::new(),
                 result: Expr::Error { span },
                 span,
             },
@@ -7741,6 +8078,9 @@ impl Lowering {
         );
         let captures = closure_ctx.captures.clone();
         self.diagnostics.extend(closure_ctx.diagnostics);
+        for capture in &captures {
+            ctx.note_capture(capture.source, span);
+        }
         if let Some(slot) = self.closures.get_mut(id.0 as usize) {
             *slot = Closure {
                 id,
@@ -8553,12 +8893,12 @@ impl Lowering {
         Expr::Block {
             exit: None,
             body: Box::new(Block {
-                lets: vec![Let {
+                statements: vec![Statement::Let(Let {
                     local: temporaries[0],
                     locals: temporaries,
                     value: values,
                     span,
-                }],
+                })],
                 result: Expr::Values {
                     values: checked,
                     result_kinds: kinds.to_vec(),
@@ -8857,7 +9197,15 @@ impl Lowering {
         };
         let condition = self.lower_expr(ctx, &arm.test);
         self.check_test_is_boolean(ctx, form.test_keyword(), &condition);
-        let refinement = self.true_branch_refinement(&condition);
+        // A body that assigns the local may store any value of its declared
+        // type, so the test no longer describes it there.
+        let refinement = self
+            .true_branch_refinement(&condition)
+            .filter(|refinement| {
+                ctx.locals
+                    .get(refinement.local.0 as usize)
+                    .is_none_or(|local| !arm.body.assigns(&local.name))
+            });
         let previous_kind =
             refinement.and_then(|refinement| ctx.refine_local(refinement.local, refinement.kind));
         let mut then_branch = self.lower_body_expr(ctx, &arm.body, arm_expected);
@@ -8932,7 +9280,7 @@ impl Lowering {
         let scope_start = ctx.scope_start();
         let block = self.lower_block(ctx, body, expected_results);
         ctx.hide_locals_from(scope_start);
-        if block.lets.is_empty() {
+        if block.statements.is_empty() {
             return block.result;
         }
         Expr::Block {
@@ -9197,7 +9545,7 @@ impl Lowering {
         };
         let body = ast::Block {
             id: guard.id(),
-            lets: Vec::new(),
+            statements: Vec::new(),
             result: guard.clone(),
             span,
         };
@@ -10011,6 +10359,138 @@ impl Lowering {
         self.lower_accessor_call(ctx, receiver, slot_name, span)
     }
 
+    /// Lowers `name := value` for a `let` local `name`.
+    ///
+    /// The value must have the local's declared category, which for a
+    /// local declared without a type is its initializer's, and passes the
+    /// local's range check when the local is limited.
+    fn lower_local_assign(
+        &mut self,
+        ctx: &mut FunctionContext,
+        name: &str,
+        name_span: Span,
+        value: &ast::Expr,
+        span: Span,
+    ) -> Expr {
+        let Some(local) = ctx.find_local(name) else {
+            let _ = self.lower_expr(ctx, value);
+            let kind = if ctx.binds(name) {
+                "captured local"
+            } else if self.resolve_constant(name).is_some() {
+                "constant"
+            } else if self.resolve_function(name).is_some() || self.resolve_generic(name).is_some()
+            {
+                "function"
+            } else {
+                ctx.diagnostics.push(
+                    Diagnostic::error(name_span, DiagnosticCode::UnresolvedLocal)
+                        .with_arg(DiagnosticArg::text("local", name)),
+                );
+                return Expr::Error { span };
+            };
+            ctx.diagnostics.push(
+                Diagnostic::error(name_span, DiagnosticCode::AssignmentTargetNotAssignable)
+                    .with_arg(DiagnosticArg::text("name", name))
+                    .with_arg(DiagnosticArg::text("kind", kind)),
+            );
+            return Expr::Error { span };
+        };
+        if !ctx.assignable.contains(&local) {
+            let _ = self.lower_expr(ctx, value);
+            let exit = ctx
+                .locals
+                .get(local.0 as usize)
+                .is_some_and(|local| ctx.exit_definitions.contains(&local.definition));
+            let kind = if exit {
+                "block exit procedure"
+            } else {
+                "parameter"
+            };
+            ctx.diagnostics.push(
+                Diagnostic::error(name_span, DiagnosticCode::AssignmentTargetNotAssignable)
+                    .with_arg(DiagnosticArg::text("name", name))
+                    .with_arg(DiagnosticArg::text("kind", kind)),
+            );
+            return Expr::Error { span };
+        }
+        let kind = ctx.local_kind(local);
+        let signature = ctx.local_callable_signature(local);
+        let range = ctx
+            .locals
+            .get(local.0 as usize)
+            .and_then(|local| local.range);
+        let value_expr =
+            self.lower_expr_expected_results(ctx, value, Some(core::slice::from_ref(&kind)));
+        let actual_kinds = self.expr_kinds(&value_expr);
+        let actual_kind = self.expr_kind(&value_expr);
+        let mismatch = |expected: String, actual: String| {
+            Diagnostic::error(value.span(), DiagnosticCode::LocalAssignmentTypeMismatch)
+                .with_arg(DiagnosticArg::text("local", name))
+                .with_arg(DiagnosticArg::text("expected", expected))
+                .with_arg(DiagnosticArg::text("actual", actual))
+        };
+        if actual_kinds.len() != 1 && !result_kinds_contain_error(&actual_kinds) {
+            ctx.diagnostics.push(mismatch(
+                "1 value".into(),
+                self.result_kinds_name(&actual_kinds),
+            ));
+        } else if !self.kinds_match(kind, actual_kind) {
+            ctx.diagnostics
+                .push(mismatch(self.kind_name(kind), self.kind_name(actual_kind)));
+        } else if let Some(expected) = signature.as_ref() {
+            let actual = self.expr_callable_signature(&value_expr);
+            if !self.callable_signatures_match(Some(expected), actual.as_ref()) {
+                let diagnostic = self
+                    .callable_variance_diagnostic(value.span(), expected, actual.as_ref())
+                    .unwrap_or_else(|| {
+                        mismatch(
+                            self.callable_signature_name(expected),
+                            actual.as_ref().map_or_else(
+                                || self.kind_name(actual_kind),
+                                |signature| self.callable_signature_name(signature),
+                            ),
+                        )
+                    });
+                ctx.diagnostics.push(diagnostic);
+            }
+        }
+        ctx.note_assignment(local, span);
+        Expr::AssignLocal {
+            local,
+            result_kind: kind,
+            callable_signature: signature,
+            value: Box::new(self.limit_value(value_expr, kind, range)),
+            span,
+        }
+    }
+
+    /// Lowers `while (test) body end` or `until (test) body end`. The body's
+    /// locals are scoped to it, and its values are discarded.
+    fn lower_loop(
+        &mut self,
+        ctx: &mut FunctionContext,
+        kind: ast::LoopKind,
+        test: &ast::Expr,
+        body: &ast::Block,
+        span: Span,
+    ) -> Expr {
+        let test = self.lower_expr(ctx, test);
+        let keyword = match kind {
+            ast::LoopKind::While => "while",
+            ast::LoopKind::Until => "until",
+        };
+        self.check_test_is_boolean(ctx, keyword, &test);
+        let scope = ctx.scope_start();
+        let body = self.lower_block(ctx, body, None);
+        ctx.hide_locals_from(scope);
+        Expr::Loop {
+            kind: kind.into(),
+            test: Box::new(test),
+            body: Box::new(body),
+            span,
+        }
+    }
+
     fn lower_slot_assign(
         &mut self,
         ctx: &mut FunctionContext,
@@ -10252,7 +10732,10 @@ impl Lowering {
             Expr::IntrinsicCall { result_kind, .. } => *result_kind,
             Expr::HostCall { result_kind, .. } => *result_kind,
             Expr::AccessorCall { result_kind, .. } => *result_kind,
-            Expr::SlotWrite { result_kind, .. } => *result_kind,
+            Expr::SlotWrite { result_kind, .. } | Expr::AssignLocal { result_kind, .. } => {
+                *result_kind
+            }
+            Expr::Loop { .. } => scalar_result_kind(&[]),
             Expr::ConstBool { .. }
             | Expr::Compare { .. }
             | Expr::MixedCompare { .. }
@@ -10328,6 +10811,7 @@ impl Lowering {
                 .join_arm_kinds(&self.expr_kinds(&body.result), &exit.result_kinds)
                 .unwrap_or_else(|| vec![ValueKind::Error]),
             Expr::Block { body, .. } => self.expr_kinds(&body.result),
+            Expr::Loop { .. } => Vec::new(),
             _ => vec![self.expr_kind(expr)],
         }
     }
@@ -10341,6 +10825,9 @@ impl Lowering {
                 callable_signature, ..
             }
             | Expr::ConstantRef {
+                callable_signature, ..
+            }
+            | Expr::AssignLocal {
                 callable_signature, ..
             } => callable_signature.clone(),
             Expr::Closure {
@@ -10420,6 +10907,7 @@ impl Lowering {
             } => vec![None; exit.result_kinds.len()],
             Expr::Block { body, .. } => self.expr_result_callable_signatures(&body.result),
             Expr::Discard { .. } => Vec::new(),
+            Expr::Loop { .. } => Vec::new(),
             _ => vec![self.expr_callable_signature(expr)],
         }
     }
@@ -12025,7 +12513,10 @@ mod tests {
         assert_eq!(module.diagnostics, Vec::new());
         assert_eq!(module.functions.len(), 2);
         assert_eq!(module.functions[0].params, [LocalId(0), LocalId(1)]);
-        assert_eq!(module.functions[1].body.lets[0].local, LocalId(0));
+        assert_eq!(
+            module.functions[1].body.lets().next().expect("a let").local,
+            LocalId(0)
+        );
         let Expr::DirectCall { function, args, .. } = &module.functions[1].body.result else {
             panic!("expected direct call");
         };
@@ -12178,14 +12669,14 @@ mod tests {
         let limited_integer = class_id(&module, "<limited-integer>");
         let body = &module.functions[0].body;
         assert_eq!(
-            body.lets[0].value,
+            body.lets().next().expect("a let").value,
             Expr::TypeObject {
                 object: TypeObject::limited(IntRange {
                     min: Some(0),
                     max: Some(9)
                 }),
                 class: limited_integer,
-                span: body.lets[0].value.span(),
+                span: body.lets().next().expect("a let").value.span(),
             }
         );
         assert_eq!(
@@ -12193,7 +12684,7 @@ mod tests {
             ValueKind::Object(limited_integer)
         );
         assert!(matches!(
-            body.lets[1].value,
+            body.lets().nth(1).expect("a let").value,
             Expr::IntrinsicCall {
                 intrinsic: Intrinsic::InstanceOfType,
                 result_kind: ValueKind::Bool,
@@ -12994,7 +13485,9 @@ mod tests {
             module.functions[0].locals[0].kind,
             ValueKind::ClassObject(circle_id)
         );
-        let Expr::ClassObject { class, .. } = &module.functions[0].body.lets[0].value else {
+        let Expr::ClassObject { class, .. } =
+            &module.functions[0].body.lets().next().expect("a let").value
+        else {
             panic!("expected class object let value");
         };
         assert_eq!(*class, circle_id);
@@ -13010,7 +13503,9 @@ mod tests {
             module.functions[0].locals[1].kind,
             ValueKind::ClassObject(circle_id)
         );
-        let Expr::ClassOf { class, .. } = &module.functions[0].body.lets[1].value else {
+        let Expr::ClassOf { class, .. } =
+            &module.functions[0].body.lets().nth(1).expect("a let").value
+        else {
             panic!("expected class-of expression");
         };
         assert_eq!(*class, circle_id);
@@ -13070,6 +13565,61 @@ mod tests {
                 ("actual", "<integer>")
             ]
         ));
+    }
+
+    #[test]
+    fn a_branch_that_assigns_the_tested_local_is_not_refined() {
+        // The branch may store any `<object>` in `x`, so the test does not
+        // describe it there; one that only reads `x` is refined.
+        let module = lower_source(
+            "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
+             define function reset(given :: <object>) => <integer>\n  \
+             let x = given;\n  \
+             if (instance?(x, <circle>)) x := 0; 1 else 0 end\nend;\n\
+             define function read(given :: <object>) => <integer>\n  \
+             let x = given;\n  \
+             if (instance?(x, <circle>)) x.radius else 0 end\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        let refinement = |index: usize| {
+            let Expr::If { refinement, .. } = &module.functions[index].body.result else {
+                panic!("expected if");
+            };
+            *refinement
+        };
+        assert_eq!(refinement(0), None);
+        assert!(module.functions[0].locals[1].assigned);
+        assert!(refinement(1).is_some());
+        assert!(!module.functions[1].locals[1].assigned);
+    }
+
+    #[test]
+    fn assignments_check_the_local_and_its_captures() {
+        let module = lower_source(
+            "define function main(p :: <integer>) => <integer>\n  \
+             let n :: <integer> = 0;\n  \
+             n := \"text\";\n  \
+             p := 1;\n  \
+             let k = 1;\n  \
+             let f = function () => <integer> k end;\n  \
+             k := 2;\n  \
+             while (k) k := 3 end;\n  \
+             n\nend;",
+        );
+        let codes = module
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            codes,
+            [
+                DiagnosticCode::LocalAssignmentTypeMismatch,
+                DiagnosticCode::AssignmentTargetNotAssignable,
+                DiagnosticCode::AssignedLocalCaptured,
+                DiagnosticCode::IfConditionTypeMismatch,
+            ]
+        );
     }
 
     #[test]

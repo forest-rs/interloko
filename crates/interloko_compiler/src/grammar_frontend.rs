@@ -3084,7 +3084,21 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "`class` annotation-type",
             "base_loko_primary::BaseLokoCstBuilder::collect_annotation_type_roles",
         ),
-        ("body", "let* expression", "syntax.rs:Parser::parse_body"),
+        (
+            "body",
+            "body-statement* expression?",
+            "base_loko_primary::BaseLokoCstBuilder::build_body",
+        ),
+        (
+            "body-statement",
+            "let-statement | expression-statement",
+            "base_loko_primary::BaseLokoCstBuilder::build_body",
+        ),
+        (
+            "expression-statement",
+            "expression `;` !case-label",
+            "base_loko_primary::BaseLokoCstBuilder::build_expression_statement",
+        ),
         (
             "let-statement",
             "`let` let-binding `=` expression `;`",
@@ -3112,7 +3126,7 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "expression",
-            "handle-expression | block-expression | if-expression | unless-expression | case-expression | assignment-expression",
+            "handle-expression | block-expression | while-expression | until-expression | if-expression | unless-expression | case-expression | assignment-expression",
             "syntax.rs:Parser::parse_expr",
         ),
         (
@@ -3156,6 +3170,16 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "base_loko_primary::BaseLokoCstBuilder::build_block",
         ),
         (
+            "while-expression",
+            "`while` `(` expression `)` body `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_loop",
+        ),
+        (
+            "until-expression",
+            "`until` `(` expression `)` body `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_loop",
+        ),
+        (
             "if-expression",
             "`if` `(` expression `)` body elseif-clause* else-clause? `end`",
             "base_loko_primary::BaseLokoCstBuilder::build_if",
@@ -3189,6 +3213,11 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "case-clause-end",
             "`;` | &`end`",
             "base_loko_primary::BaseLokoCstBuilder::build_case",
+        ),
+        (
+            "case-label",
+            "expression `=>` | `otherwise` `=>`",
+            "base_loko_primary::BaseLokoCstBuilder::build_expression_statement",
         ),
         (
             "otherwise-clause",
@@ -3869,6 +3898,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::ParameterList => Some("parameter-list"),
         CstKind::Body => Some("body"),
         CstKind::LetStmt => Some("let-statement"),
+        CstKind::ExprStmt => Some("expression-statement"),
         CstKind::ParameterName => Some("parameter-name"),
         CstKind::LetName => Some("let-name"),
         CstKind::RestartName => Some("restart-name"),
@@ -3900,6 +3930,8 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::HandleExpr => Some("handle-expression"),
         CstKind::RestartClause => Some("restart-clause"),
         CstKind::BlockExpr => Some("block-expression"),
+        CstKind::WhileExpr => Some("while-expression"),
+        CstKind::UntilExpr => Some("until-expression"),
         CstKind::BlockExitName => Some("block-exit-name"),
         CstKind::RestartGuard => Some("restart-guard"),
         CstKind::CleanupClause => Some("cleanup-clause"),
@@ -4340,7 +4372,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 63);
+        assert_eq!(grammar.effective_rules.len(), 68);
 
         assert!(
             !records

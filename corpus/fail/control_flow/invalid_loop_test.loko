@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.if-condition-type-mismatch
+// expect: diagnostic contains while test must be a <boolean>, not <integer>
+
+// As with `if`, a loop's test must be a `<boolean>`; Loko has no truthy
+// integers.
+
+define function main() => <integer>
+  let n = 3;
+  while (n)
+    n := n - 1
+  end;
+  n
+end;

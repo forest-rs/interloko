@@ -5764,10 +5764,7 @@ fn collect_dispatch_sites_in_block(
     block: &sem::Block,
     sites: &mut Vec<DispatchSiteRecord>,
 ) {
-    for binding in &block.lets {
-        collect_dispatch_sites_in_expr(artifacts, owner, &binding.value, sites);
-    }
-    collect_dispatch_sites_in_expr(artifacts, owner, &block.result, sites);
+    block.for_each_expr(|expr| collect_dispatch_sites_in_expr(artifacts, owner, expr, sites));
 }
 
 fn collect_dispatch_sites_in_expr(
@@ -5854,6 +5851,13 @@ fn collect_dispatch_sites_in_expr(
         } => {
             collect_dispatch_sites_in_expr(artifacts, owner, receiver, sites);
             collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
+        }
+        sem::Expr::AssignLocal { value, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
+        }
+        sem::Expr::Loop { test, body, .. } => {
+            collect_dispatch_sites_in_expr(artifacts, owner, test, sites);
+            collect_dispatch_sites_in_block(artifacts, owner, body, sites);
         }
         sem::Expr::Negate { value, .. }
         | sem::Expr::Convert { value, .. }
@@ -7125,9 +7129,21 @@ struct ParkedVm {
     installed: Installed,
 }
 
+/// Instructions one call of a session's code may run before it traps.
+///
+/// `execution_tape`'s default allows a million, which a loop of a few
+/// hundred thousand iterations exhausts. This allows a hundred times that:
+/// enough for ordinary loops, and a runaway one still traps in well under
+/// a second.
+const RUN_FUEL: u64 = 100_000_000;
+
 impl ParkedVm {
     fn new(code: &Arc<CodeUnit>) -> Result<Self, driver::LinkError> {
-        let mut vm = Vm::new(Idle, Limits::default());
+        let limits = Limits {
+            fuel: RUN_FUEL,
+            ..Limits::default()
+        };
+        let mut vm = Vm::new(Idle, limits);
         let installed = driver::install(&mut vm, code)?;
         Ok(Self { vm, installed })
     }
@@ -7868,18 +7884,40 @@ fn ast_slot_mutability_label(mutability: ast::SlotMutability) -> &'static str {
 fn dump_ast_block(out: &mut String, block: &ast::Block, indent: usize) {
     indent_line(out, indent);
     let _ = writeln!(out, "block {}", block.id);
-    for binding in &block.lets {
+    for statement in &block.statements {
         indent_line(out, indent + 2);
-        let _ = writeln!(
-            out,
-            "let {} {} {}",
-            binding.id, binding.definition, binding.name
-        );
-        dump_ast_expr(out, &binding.value, indent + 4);
+        match statement {
+            ast::Statement::Let(binding) => {
+                let _ = writeln!(
+                    out,
+                    "let {} {} {}",
+                    binding.id, binding.definition, binding.name
+                );
+                dump_ast_expr(out, &binding.value, indent + 4);
+            }
+            ast::Statement::Expr(expr) => {
+                let _ = writeln!(out, "effect");
+                dump_ast_expr(out, expr, indent + 4);
+            }
+        }
     }
     indent_line(out, indent + 2);
     let _ = writeln!(out, "result");
     dump_ast_expr(out, &block.result, indent + 4);
+}
+
+const fn ast_loop_label(kind: ast::LoopKind) -> &'static str {
+    match kind {
+        ast::LoopKind::While => "while",
+        ast::LoopKind::Until => "until",
+    }
+}
+
+const fn sem_loop_label(kind: sem::LoopKind) -> &'static str {
+    match kind {
+        sem::LoopKind::While => "while",
+        sem::LoopKind::Until => "until",
+    }
 }
 
 /// Dumps a conditional's arms, each a test and a body, then its default
@@ -8010,6 +8048,23 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             let _ = writeln!(out, "{id} slot-assign {slot}");
             dump_ast_expr(out, receiver, indent + 2);
             dump_ast_expr(out, value, indent + 2);
+        }
+        ast::Expr::Assign {
+            id, name, value, ..
+        } => {
+            let _ = writeln!(out, "{id} assign {name}");
+            dump_ast_expr(out, value, indent + 2);
+        }
+        ast::Expr::Loop {
+            id,
+            kind,
+            test,
+            body,
+            ..
+        } => {
+            let _ = writeln!(out, "{id} loop {}", ast_loop_label(*kind));
+            dump_ast_expr(out, test, indent + 2);
+            dump_ast_block(out, body, indent + 2);
         }
         ast::Expr::Binary {
             id, op, lhs, rhs, ..
@@ -13745,12 +13800,20 @@ fn dump_sem_locals(module: &sem::Module, out: &mut String, locals: &[sem::Local]
 }
 
 fn dump_sem_block(out: &mut String, block: &sem::Block, indent: usize) {
-    for binding in &block.lets {
+    for statement in &block.statements {
         indent_line(out, indent);
-        let _ = write!(out, "let ");
-        dump_sem_local_list(out, &binding.locals);
-        out.push('\n');
-        dump_sem_expr(out, &binding.value, indent + 2);
+        match statement {
+            sem::Statement::Let(binding) => {
+                let _ = write!(out, "let ");
+                dump_sem_local_list(out, &binding.locals);
+                out.push('\n');
+                dump_sem_expr(out, &binding.value, indent + 2);
+            }
+            sem::Statement::Expr(expr) => {
+                let _ = writeln!(out, "effect");
+                dump_sem_expr(out, expr, indent + 2);
+            }
+        }
     }
     indent_line(out, indent);
     let _ = writeln!(out, "result");
@@ -14097,6 +14160,24 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             );
             dump_sem_expr(out, receiver, indent + 2);
             dump_sem_expr(out, value, indent + 2);
+        }
+        sem::Expr::AssignLocal {
+            local,
+            result_kind,
+            value,
+            ..
+        } => {
+            let _ = writeln!(out, "assign l{} result={result_kind:?}", local.0);
+            dump_sem_expr(out, value, indent + 2);
+        }
+        sem::Expr::Loop {
+            kind, test, body, ..
+        } => {
+            let _ = writeln!(out, "loop {}", sem_loop_label(*kind));
+            dump_sem_expr(out, test, indent + 2);
+            indent_line(out, indent + 2);
+            let _ = writeln!(out, "body");
+            dump_sem_block(out, body, indent + 4);
         }
         sem::Expr::Binary {
             op,
@@ -15120,13 +15201,21 @@ fn effective_slot_init_fingerprint(module: &sem::Module, slot: &sem::EffectiveSl
 
 fn fingerprint_sem_block(module: &sem::Module, block: &sem::Block) -> String {
     let mut out = String::new();
-    for binding in &block.lets {
-        out.push_str("let:");
-        for local in &binding.locals {
-            let _ = write!(out, "{};", local.0);
+    for statement in &block.statements {
+        match statement {
+            sem::Statement::Let(binding) => {
+                out.push_str("let:");
+                for local in &binding.locals {
+                    let _ = write!(out, "{};", local.0);
+                }
+                out.push('=');
+                fingerprint_sem_expr(module, &binding.value, &mut out);
+            }
+            sem::Statement::Expr(expr) => {
+                out.push_str("effect=");
+                fingerprint_sem_expr(module, expr, &mut out);
+            }
         }
-        out.push('=');
-        fingerprint_sem_expr(module, &binding.value, &mut out);
         out.push(';');
     }
     out.push_str("result=");
@@ -15625,6 +15714,26 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
             }
             out.push_str(":restart=");
             fingerprint_sem_expr(module, &restart.body, out);
+            out.push(')');
+        }
+        sem::Expr::AssignLocal {
+            local,
+            result_kind,
+            value,
+            ..
+        } => {
+            let result = sem_kind_fingerprint(module, *result_kind);
+            let _ = write!(out, "assign({}:{result}=", local.0);
+            fingerprint_sem_expr(module, value, out);
+            out.push(')');
+        }
+        sem::Expr::Loop {
+            kind, test, body, ..
+        } => {
+            let _ = write!(out, "loop({}:test=", sem_loop_label(*kind));
+            fingerprint_sem_expr(module, test, out);
+            out.push_str(":body=");
+            out.push_str(&fingerprint_sem_block(module, body));
             out.push(')');
         }
         sem::Expr::Block {

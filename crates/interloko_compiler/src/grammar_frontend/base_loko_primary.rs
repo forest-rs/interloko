@@ -410,11 +410,18 @@ impl BaseLokoCstProjector<'_> {
     }
 
     fn build_body(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
-        let lets = node
+        let statements = node
             .children
             .iter()
-            .filter(|child| child.is_rule("let-statement"))
-            .map(|let_stmt| self.build_let(let_stmt))
+            .filter(|child| child.is_rule("body-statement"))
+            .filter_map(|statement| statement.children.first())
+            .map(|statement| {
+                if statement.is_rule("let-statement") {
+                    self.build_let(statement)
+                } else {
+                    self.build_expression_statement(statement)
+                }
+            })
             .collect::<Vec<_>>();
         let expr = node
             .children
@@ -424,11 +431,26 @@ impl BaseLokoCstProjector<'_> {
                     && (!child.span.is_empty() || !child.children.is_empty())
             })
             .map(|expr| self.build_expr(expr));
-        let mut children = lets.into_iter().map(CstElement::Node).collect::<Vec<_>>();
+        let mut children = statements
+            .into_iter()
+            .map(CstElement::Node)
+            .collect::<Vec<_>>();
         if let Some(expr) = expr {
             children.push(CstElement::Node(expr));
         }
         self.node(CstKind::Body, self.sorted(children), node.span)
+    }
+
+    /// Builds `expression ;`, an expression a body evaluates for effect.
+    fn build_expression_statement(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let expr = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("expression"))
+            .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr));
+        let mut children = self.direct_tokens(node.span, &[expr.span]);
+        children.push(CstElement::Node(expr));
+        self.node(CstKind::ExprStmt, self.sorted(children), node.span)
     }
 
     fn build_let(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
@@ -461,6 +483,8 @@ impl BaseLokoCstProjector<'_> {
             "handle-expression" => self.build_handle(node),
             "block-expression" => self.build_block(node),
             "restart-clause" => self.build_restart(node),
+            "while-expression" => self.build_loop(node, CstKind::WhileExpr),
+            "until-expression" => self.build_loop(node, CstKind::UntilExpr),
             "if-expression" => self.build_if(node),
             "unless-expression" => self.build_unless(node),
             "case-expression" => self.build_case(node),
@@ -587,6 +611,25 @@ impl BaseLokoCstProjector<'_> {
             self.collect_annotation_type_roles(condition, &mut roles);
         }
         self.node_with_nested_and_roles(CstKind::RestartClause, node, nested, roles)
+    }
+
+    /// Builds `while (test) body end` or `until (test) body end`: the test
+    /// expression, then the body.
+    fn build_loop(&self, node: &InterpretedRuleNode<'_>, kind: CstKind) -> CstNode {
+        let nested = node
+            .children
+            .iter()
+            .filter_map(|child| {
+                if child.is_rule("expression") {
+                    Some(self.build_expr(child))
+                } else if child.is_rule("body") {
+                    Some(self.build_body(child))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        self.node_with_nested(kind, node, nested)
     }
 
     /// Builds `if (test) body elseif-clause* else-clause? end`: the test and
@@ -1087,6 +1130,8 @@ impl BaseLokoCstProjector<'_> {
             rule,
             "handle-expression"
                 | "block-expression"
+                | "while-expression"
+                | "until-expression"
                 | "if-expression"
                 | "unless-expression"
                 | "case-expression"

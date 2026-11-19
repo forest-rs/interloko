@@ -36,12 +36,14 @@
 //! # Flow typing
 //!
 //! Verdicts come from an abstract interpreter over sem's structured IR. The
-//! IR has no loops and no local assignment, so locals are immutable and no
-//! control-flow graph is needed: the interpreter walks each body once, in
+//! IR is structured (`if`, `block`, `handle`, and `while`/`until` loops), so
+//! no control-flow graph is needed: the interpreter walks each body in
 //! evaluation order, carrying an environment from locals and closure
 //! captures to [`Type`]s of the shared lattice in
-//! [`interloko_model::types`]. Slots are mutable, so slot reads are never
-//! narrowed.
+//! [`interloko_model::types`]. An assignment `x := v` gives `x` the fact of
+//! `v` (within `x`'s declared type), which replaces any narrowing of `x`.
+//! Closures never capture an assigned local, so captures are immutable.
+//! Slots are mutable, so slot reads are never narrowed.
 //!
 //! - **Transfer.** Literals have singleton types (integers have point
 //!   ranges), `make` has its exact class, a proved cast meets its operand
@@ -77,8 +79,14 @@
 //!   joins its body's value with the arguments of every call to its exit
 //!   procedure; when the exit procedure escapes, with the block's declared
 //!   result.
-//! - **Loops.** There are none yet. [`widen_to_fixpoint`] is the documented
-//!   loop-head hook they will use.
+//! - **Loops.** A loop's head gives each local the loop assigns the join of
+//!   its entry fact and its facts at the end of every iteration, which
+//!   [`widen_to_fixpoint`] reaches with trial passes that record nothing.
+//!   The loop's decisions come from one more pass from that head, so they
+//!   hold on every iteration, and the loop exits with the facts its test's
+//!   exiting outcome implies there. Where control may leave a body at any
+//!   point (a `block` exit, a `cleanup`, a handler), the locals the body
+//!   assigns have their declared types.
 //!
 //! The pass checks every residual check against its expectation (a cast
 //! target, the generic's method specializers, a limited integer range) with
@@ -1007,8 +1015,9 @@ pub enum Binding {
 
 /// The fact flow typing gives a binding where it is bound.
 ///
-/// Locals are immutable, so this fact holds for the binding's whole scope;
-/// a test can only narrow it further at particular uses ([`UseFact`]).
+/// This fact holds for the binding's whole scope; a test can only narrow it
+/// further at particular uses ([`UseFact`]). For a local that `:=`
+/// assigns, it is the local's declared type, and each read is a use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct BindingFact {
     /// The binding.
@@ -1775,16 +1784,16 @@ pub fn dispatch_tuple_count(module: &sem::Module, actual: &[Type]) -> usize {
 /// Iterations [`widen_to_fixpoint`] runs before giving up on convergence.
 pub const MAX_FIXPOINT_ITERATIONS: usize = 64;
 
-/// Loop-head fixpoint hook for flow typing.
+/// Loop-head fixpoint for flow typing.
 ///
-/// The IR has no loops yet, so the flow analysis never calls this; it is
-/// the documented point where loop support will plug in. `entry` holds the
-/// types of the loop-carried locals on entry, and `step` runs the loop body
-/// once from head types and returns their types at the back edge. The head
-/// is the join of the entry and every back edge, widened
-/// ([`Type::widen`]) after each step so integer bounds jump to the
-/// `<i32>`, `<u32>`, and 64-bit thresholds and the iteration terminates.
-/// Facts a loop head produces carry [`ReasonKind::Widened`].
+/// `entry` holds the types of the loop-carried locals (those the loop
+/// assigns) on entry, and `step` runs the loop once from head types and
+/// returns their types at the back edge. The head is the join of the entry
+/// and every back edge: a back edge that adds nothing to the head ends the
+/// iteration, and otherwise the join is widened ([`Type::widen`]) so
+/// integer bounds jump to the `<i32>`, `<u32>`, and 64-bit thresholds and
+/// the iteration terminates. Facts a loop head produces carry
+/// [`ReasonKind::Widened`].
 ///
 /// Returns the head types, or [`Type::top`] for every local if the
 /// iteration has not converged after [`MAX_FIXPOINT_ITERATIONS`] steps.
@@ -1796,15 +1805,15 @@ pub fn widen_to_fixpoint<H: ClassHierarchy + ?Sized>(
     let mut head = entry;
     for _ in 0..MAX_FIXPOINT_ITERATIONS {
         let back = step(&head);
-        let next = head
+        let joined = head
             .iter()
             .zip(back.iter().chain(core::iter::repeat(&Type::top())))
-            .map(|(head, back)| head.join(back, hierarchy).widen())
+            .map(|(head, back)| head.join(back, hierarchy))
             .collect::<Vec<_>>();
-        if next == head {
+        if joined == head {
             return head;
         }
-        head = next;
+        head = joined.iter().map(Type::widen).collect();
     }
     head.iter().map(|_| Type::top()).collect()
 }

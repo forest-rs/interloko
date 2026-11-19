@@ -1,0 +1,11 @@
+// expect: run 1099
+// expect: diagnostics 0
+
+// A block's value is its body's, taken before the cleanup runs: a cleanup
+// that assigns the local the body ends with does not change the value.
+
+define function main() => <integer>
+  let x = 1;
+  let r = block () x cleanup x := 99 end;
+  r * 1000 + x
+end;

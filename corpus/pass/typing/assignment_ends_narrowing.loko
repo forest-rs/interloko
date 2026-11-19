@@ -1,0 +1,41 @@
+// expect: runtime code dispatch.no-applicable-method
+// expect: diagnostics 1
+// expect: diagnostic code typing.dispatch-no-applicable-method
+// expect: dump typing contains s1 dispatch proved rule=dispatch-covered
+// expect: dump typing contains because=narrowed(s0,then)
+// expect: dump typing contains s2 dispatch refuted rule=dispatch-no-applicable-method
+// expect: dump typing contains actual=<square> severity=warning origin=implicit because=constructed
+
+// `instance?(shape, <circle>)` narrows `shape` in its then branch, which
+// proves the first send. Assigning `shape` there ends the narrowing: the
+// second send sees the `<square>` just stored, which no method takes.
+
+define sealed abstract class <shape> (<object>)
+end;
+
+define sealed class <circle> (<shape>)
+end;
+
+define sealed class <square> (<shape>)
+end;
+
+define generic roundness(s :: <shape>) => <integer>;
+
+define method roundness(c :: <circle>) => <integer>
+  1
+end;
+
+define function check(given :: <shape>) => <integer>
+  let shape :: <shape> = given;
+  if (instance?(shape, <circle>))
+    let before = roundness(shape);
+    shape := make(<square>);
+    before + roundness(shape)
+  else
+    0
+  end
+end;
+
+define function main() => <integer>
+  check(make(<circle>))
+end;

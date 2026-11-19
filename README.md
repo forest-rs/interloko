@@ -110,6 +110,22 @@ The current slices include:
   run for their effects, and using it where a value is expected is a type
   error. An `instance?` test narrows its arm, and each later `elseif`,
   `else` or `case` arm sees what the earlier tests ruled out;
+- bodies of `let`s and `expression;` statements, where, as in Dylan, `;`
+  separates expressions, so a body's last expression is its value with or
+  without one;
+- assignable `let` locals: `x := v` is an expression whose value is the new
+  value. A local keeps the type it declares, or its initializer's when it
+  declares none, so `let n = 0; n := "s"` is an error, and a limited local
+  checks each value assigned to it. A closure captures a copy of a local's
+  value, so capturing a local that is assigned is an error for now;
+  parameters, block exits and constants are not assignable;
+- `while (test) body end` and `until (test) body end` loops on a
+  `<boolean>` test, which produce no values and run in one frame as tape
+  jumps, so a loop of a million iterations needs no call depth. Soft typing
+  analyzes a loop from a head whose facts are the fixpoint over every
+  iteration, so its decisions (and a strict definition's proofs) hold on
+  each one, and an assignment ends any narrowing of the local it assigns.
+  A session call may run 100 million tape instructions;
 - Dylan-style names, where a hyphen is always a name character: `x-1` and
   `a-b` are single names, so subtraction is spaced (`x - 1`, `a -% b`);
 - `<integer>` arithmetic on 64-bit fixnums that signals a `<type-error>`

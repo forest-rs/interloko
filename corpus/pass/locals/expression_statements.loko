@@ -1,0 +1,24 @@
+// expect: run 7
+// expect: diagnostics 0
+// expect: dump ast contains effect
+
+// A body evaluates `expression;` for its effects, in order with its
+// `let`s. As in Dylan, `;` separates a body's expressions, so a last
+// expression followed by one is still the body's value.
+
+define class <counter> (<object>)
+  slot count :: <integer>, init-value: 0;
+end;
+
+define function bump(c :: <counter>) => <integer>
+  c.count := c.count + 1
+end;
+
+define function main() => <integer>
+  let c = make(<counter>);
+  bump(c);
+  bump(c);
+  let base = c.count;
+  c.count := base + 4;
+  bump(c);
+end;

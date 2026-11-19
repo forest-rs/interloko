@@ -3609,6 +3609,8 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::When
         | TokenKind::Block
         | TokenKind::Cleanup
+        | TokenKind::While
+        | TokenKind::Until
         | TokenKind::End => keyword_highlight_style(),
         TokenKind::TypeName => type_highlight_style(),
         TokenKind::Number

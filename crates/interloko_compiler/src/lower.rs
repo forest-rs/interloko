@@ -85,6 +85,7 @@ use interloko_runtime::code::{Contracts, DispatchCase, GenericDispatch};
 use interloko_runtime::control::{RestartDescriptor, RestartParameter, TypeErrorSite};
 
 mod facts;
+mod reads;
 
 use facts::TypingFacts;
 
@@ -3456,10 +3457,7 @@ fn restart_descriptor(
 }
 
 fn collect_known_callable_uses_in_block(block: &sem::Block, uses: &mut CallableUses) {
-    for let_binding in &block.lets {
-        collect_known_callable_uses_in_expr(&let_binding.value, uses);
-    }
-    collect_known_callable_uses_in_expr(&block.result, uses);
+    block.for_each_expr(|expr| collect_known_callable_uses_in_expr(expr, uses));
 }
 
 fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses) {
@@ -3535,6 +3533,11 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
         } => {
             collect_known_callable_uses_in_expr(receiver, uses);
             collect_known_callable_uses_in_expr(value, uses);
+        }
+        sem::Expr::AssignLocal { value, .. } => collect_known_callable_uses_in_expr(value, uses),
+        sem::Expr::Loop { test, body, .. } => {
+            collect_known_callable_uses_in_expr(test, uses);
+            collect_known_callable_uses_in_block(body, uses);
         }
         sem::Expr::Negate { value, .. }
         | sem::Expr::Convert { value, .. }
@@ -3919,6 +3922,9 @@ struct BodyLowering<'module> {
     /// into them so far is one whose shape the tape knows: the tape keeps a
     /// fact every incoming path agrees on.
     callable_joins: Vec<(Reg, bool)>,
+    /// Reads of assigned locals in the body being lowered that may use the
+    /// local's register without copying it; see [`reads`].
+    direct_reads: Vec<*const sem::Expr>,
 }
 
 impl<'module> BodyLowering<'module> {
@@ -4060,6 +4066,7 @@ impl<'module> BodyLowering<'module> {
             exits: Vec::new(),
             proven_callables: Vec::new(),
             callable_joins: Vec::new(),
+            direct_reads: Vec::new(),
         }
     }
 
@@ -4091,6 +4098,7 @@ impl<'module> BodyLowering<'module> {
             exits: Vec::new(),
             proven_callables: Vec::new(),
             callable_joins: Vec::new(),
+            direct_reads: Vec::new(),
         }
     }
 
@@ -4169,8 +4177,10 @@ impl<'module> BodyLowering<'module> {
     /// A read of a local or capture whose use gives it a narrower class
     /// than its register's, such as after an `instance?` test: the value
     /// at that class with no cast, when flow typing established the class
-    /// itself. Locals and captures are immutable, so the fact holds for
-    /// the register.
+    /// itself. The fact describes the value read, which the register holds
+    /// until the read is used: captures are immutable, and an assignment
+    /// that could change an assigned local's register first is read from a
+    /// copy ([`reads`]).
     fn proved_read(
         &self,
         value: Value,
@@ -4249,7 +4259,8 @@ impl<'module> BodyLowering<'module> {
         block: &sem::Block,
         expected: &[ValueKind],
     ) -> Result<(), LowerError> {
-        self.lower_lets(&block.lets)?;
+        self.direct_reads = reads::direct_reads(block);
+        self.lower_statements(&block.statements)?;
         let results = self.lower_results_expr(&block.result)?;
         if results.len() != expected.len() {
             return Err(invalid_semantic(
@@ -4517,8 +4528,17 @@ impl<'module> BodyLowering<'module> {
         Some((method, callee))
     }
 
-    fn lower_lets(&mut self, lets: &[sem::Let]) -> Result<(), LowerError> {
-        for let_binding in lets {
+    /// Lowers a body's statements: binds each `let`'s locals, and evaluates
+    /// each expression statement for effect.
+    fn lower_statements(&mut self, statements: &[sem::Statement]) -> Result<(), LowerError> {
+        for statement in statements {
+            let let_binding = match statement {
+                sem::Statement::Let(let_binding) => let_binding,
+                sem::Statement::Expr(expr) => {
+                    let _ = self.lower_results_expr(expr)?;
+                    continue;
+                }
+            };
             if let [local] = let_binding.locals.as_slice() {
                 let (local_name, local_kind) = {
                     let local_info = self
@@ -4533,6 +4553,7 @@ impl<'module> BodyLowering<'module> {
                 let expected =
                     self.value_kind_with_callable_signature(local_kind, callable_signature)?;
                 let value = self.coerce_value(value, expected, let_binding.span)?;
+                let value = self.home(*local, value, let_binding.span);
                 self.set_local(*local, value)?;
                 self.locals.push(Local {
                     source: *local,
@@ -4557,6 +4578,7 @@ impl<'module> BodyLowering<'module> {
                 let expected =
                     self.value_kind_with_callable_signature(local_kind, callable_signature)?;
                 let value = self.coerce_value(value, expected, let_binding.span)?;
+                let value = self.home(local, value, let_binding.span);
                 self.set_local(local, value)?;
                 self.locals.push(Local {
                     source: local,
@@ -4567,6 +4589,159 @@ impl<'module> BodyLowering<'module> {
             }
         }
         Ok(())
+    }
+
+    /// The register `local` lives in, bound to `value`.
+    ///
+    /// A local is otherwise the register of the value bound to it, which
+    /// other locals and pending operands may share. An assigned local gets
+    /// a register of its own that only its binding and assignments write,
+    /// so an assignment changes nothing but the local, and a read that an
+    /// assignment may overtake copies it ([`Self::read_local`]). A local
+    /// bound to an assigned local's register gets a copy too. The tape does
+    /// not know the shape of a callable value in an assigned local's
+    /// register: assignments may store any of them.
+    fn home(&mut self, local: sem::LocalId, value: Value, span: Span) -> Value {
+        let assigned = self
+            .current_local(local)
+            .is_some_and(|local| local.assigned);
+        if !assigned && !self.is_assigned_register(value.reg) {
+            return value;
+        }
+        let home = self.alloc(value.kind);
+        if matches!(value.kind, ValueKind::Closure(_)) {
+            self.callable_joins.push((home.reg, false));
+        }
+        self.instructions.push(Instr::Move {
+            dst: home.reg,
+            src: value.reg,
+            span,
+        });
+        Value {
+            reachable: value.reachable,
+            ..home
+        }
+    }
+
+    /// Whether `reg` is an assigned local's register.
+    fn is_assigned_register(&self, reg: Reg) -> bool {
+        self.source_locals
+            .iter()
+            .zip(&self.local_regs)
+            .any(|(local, value)| local.assigned && value.is_some_and(|value| value.reg == reg))
+    }
+
+    /// The value of `local` at the read `expr`: its register, or for an
+    /// assigned local whose register an assignment may change before the
+    /// read is used, a copy of its register taken now ([`reads`]).
+    fn read_local(
+        &mut self,
+        expr: &sem::Expr,
+        local: sem::LocalId,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let value = self
+            .local_regs
+            .get(local.0 as usize)
+            .and_then(|value| *value)
+            .ok_or_else(|| invalid_semantic("local was read before assignment"))?;
+        let direct = self
+            .direct_reads
+            .iter()
+            .any(|read| core::ptr::eq(*read, expr));
+        if direct
+            || !self
+                .current_local(local)
+                .is_some_and(|local| local.assigned)
+        {
+            return Ok(value);
+        }
+        let copy = self.alloc(value.kind);
+        self.note_callable_move(copy.reg, value.reg);
+        self.instructions.push(Instr::Move {
+            dst: copy.reg,
+            src: value.reg,
+            span,
+        });
+        Ok(copy)
+    }
+
+    /// Lowers `local := value`: the value, converted to the local's kind,
+    /// moves into the local's register ([`Self::home`]) and is the result.
+    fn lower_assign_local(
+        &mut self,
+        local: sem::LocalId,
+        kind: sem::ValueKind,
+        callable_signature: Option<&sem::CallableSignature>,
+        value: &sem::Expr,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let expected = self.value_kind_with_callable_signature(kind, callable_signature)?;
+        let value = self.lower_expr(value)?;
+        let value = self.coerce_value(value, expected, span)?;
+        let home = self
+            .local_regs
+            .get(local.0 as usize)
+            .and_then(|value| *value)
+            .ok_or_else(|| invalid_semantic("local was assigned before its binding"))?;
+        if home.kind != value.kind
+            || self
+                .unboxed_locals
+                .iter()
+                .any(|(unboxed, _)| *unboxed == home.reg)
+        {
+            return Err(invalid_semantic(
+                "assigned local has no register of its own",
+            ));
+        }
+        self.note_callable_move(home.reg, value.reg);
+        self.instructions.push(Instr::Move {
+            dst: home.reg,
+            src: value.reg,
+            span,
+        });
+        Ok(value)
+    }
+
+    /// Lowers `while (test) body end` or `until (test) body end` to a loop
+    /// of tape jumps: the head evaluates the test and branches to the body
+    /// or past the loop, and the body jumps back to the head. A loop
+    /// produces no values.
+    fn lower_loop(
+        &mut self,
+        kind: sem::LoopKind,
+        test: &sem::Expr,
+        body: &sem::Block,
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        let head = self.alloc_label();
+        let iteration = self.alloc_label();
+        let exit = self.alloc_label();
+        self.instructions.push(Instr::Jump { label: head, span });
+        self.instructions.push(Instr::Label { label: head });
+        let test = self.lower_expr(test)?;
+        if test.kind != ValueKind::Bool {
+            return Err(invalid_semantic("loop test is not bool"));
+        }
+        let (then_label, else_label) = if kind.continues_on() {
+            (iteration, exit)
+        } else {
+            (exit, iteration)
+        };
+        self.instructions.push(Instr::Branch {
+            cond: test.reg,
+            then_label,
+            else_label,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: iteration });
+        self.lower_statements(&body.statements)?;
+        let values = self.lower_results_expr(&body.result)?;
+        if values.iter().all(|value| value.reachable) {
+            self.instructions.push(Instr::Jump { label: head, span });
+        }
+        self.instructions.push(Instr::Label { label: exit });
+        Ok(Vec::new())
     }
 
     /// Lowers a `block` expression whose results have the semantic kinds
@@ -4590,7 +4765,7 @@ impl<'module> BodyLowering<'module> {
         span: Span,
     ) -> Result<Vec<Value>, LowerError> {
         if exit.is_none() && cleanup.is_none() {
-            self.lower_lets(&body.lets)?;
+            self.lower_statements(&body.statements)?;
             return self.lower_results_expr(&body.result);
         }
         // Values leaving through the exit arrive with the exit's own kinds.
@@ -4617,7 +4792,7 @@ impl<'module> BodyLowering<'module> {
         if let (Some(sem_exit), Some(bound)) = (exit_local, exit) {
             self.exits.push((sem_exit, bound));
         }
-        self.lower_lets(&body.lets)?;
+        self.lower_statements(&body.statements)?;
         let body_values = self.lower_results_expr(&body.result);
         if exit_local.is_some() {
             self.exits.pop();
@@ -4635,12 +4810,15 @@ impl<'module> BodyLowering<'module> {
             ));
         }
 
+        // The body's values move to the block's results before the cleanup
+        // runs: a value may be a local's register, which the cleanup may
+        // assign.
         let mut reachable = body_values.iter().all(|value| value.reachable);
         if reachable {
+            self.move_results(&results, &body_values, body.result.span())?;
             reachable = self.leave_block(exit.as_ref(), cleanup, span)?;
         }
         if reachable {
-            self.move_results(&results, &body_values, body.result.span())?;
             self.instructions.push(Instr::Jump {
                 label: join_label,
                 span,
@@ -4830,7 +5008,7 @@ impl<'module> BodyLowering<'module> {
     /// Lowers a cleanup body for effect, returning whether control can
     /// continue after it.
     fn lower_cleanup(&mut self, cleanup: &sem::Block) -> Result<bool, LowerError> {
-        self.lower_lets(&cleanup.lets)?;
+        self.lower_statements(&cleanup.statements)?;
         let values = self.lower_results_expr(&cleanup.result)?;
         Ok(values.iter().all(|value| value.reachable))
     }
@@ -5231,11 +5409,7 @@ impl<'module> BodyLowering<'module> {
                 callable_signature,
                 span,
             } => {
-                let value = self
-                    .local_regs
-                    .get(local.0 as usize)
-                    .and_then(|value| *value)
-                    .ok_or_else(|| invalid_semantic("local was read before assignment"))?;
+                let value = self.read_local(expr, *local, *span)?;
                 let expected = self.value_kind_with_callable_signature(
                     *result_kind,
                     callable_signature.as_ref(),
@@ -6049,10 +6223,24 @@ impl<'module> BodyLowering<'module> {
                 });
                 Ok(result)
             }
+            sem::Expr::AssignLocal {
+                local,
+                result_kind,
+                callable_signature,
+                value,
+                span,
+            } => self.lower_assign_local(
+                *local,
+                *result_kind,
+                callable_signature.as_ref(),
+                value,
+                *span,
+            ),
             sem::Expr::If { .. }
             | sem::Expr::Handle { .. }
             | sem::Expr::Block { .. }
-            | sem::Expr::Discard { .. } => {
+            | sem::Expr::Discard { .. }
+            | sem::Expr::Loop { .. } => {
                 let mut results = self.lower_results_expr(expr)?;
                 if results.len() != 1 {
                     return Err(invalid_semantic(
@@ -6193,6 +6381,12 @@ impl<'module> BodyLowering<'module> {
                     *span,
                 )
             }
+            sem::Expr::Loop {
+                kind,
+                test,
+                body,
+                span,
+            } => self.lower_loop(*kind, test, body, *span),
             _ => Ok(vec![self.lower_expr(expr)?]),
         }
     }
@@ -7645,7 +7839,7 @@ impl<'module> BodyLowering<'module> {
         // any overflow it reports) belongs to the call.
         let Some(body) = method
             .body
-            .lets
+            .statements
             .is_empty()
             .then(|| respan_numeric_body(&method.body.result, span))
             .flatten()

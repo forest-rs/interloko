@@ -1,0 +1,17 @@
+// expect: run 30
+// expect: diagnostics 0
+
+// A closure may capture a local that is never assigned, even one bound
+// in a loop body: each iteration binds, and captures, a fresh value.
+
+define function main() => <integer>
+  let total = 0;
+  let i = 0;
+  while (i < 4)
+    let step = i * 5;
+    let add-step = function (n :: <integer>) => <integer> n + step end;
+    total := add-step(total);
+    i := i + 1
+  end;
+  total
+end;

@@ -785,7 +785,7 @@ fn residual(
         if chain.iter().any(|kind| matches!(kind, ReasonKind::Widened)) {
             return with_fixes(
                 ResidualCause::Widened(WideningLimit::LoopHead),
-                "a loop head widened the operand's facts to reach a fixpoint".into(),
+                "a loop head widened the operand's facts to reach a fixpoint, so they may hold values the loop never produces".into(),
             );
         }
         if let Some(class) = oversized_sealed_cone(module, actual)

@@ -76,7 +76,7 @@ pub enum DiagnosticCode {
     AstInvalidTypeLiteral,
     /// `signal` has the wrong syntactic argument shape.
     AstInvalidSignal,
-    /// `:=` was used with something other than an object slot target.
+    /// `:=` was used with something other than a local name or an object slot.
     AstInvalidSlotAssignment,
     /// A definition repeats an adjective, as in `define sealed sealed class`.
     AstDuplicateAdjective,
@@ -230,6 +230,12 @@ pub enum DiagnosticCode {
     SlotAssignmentTypeMismatch,
     /// A slot assignment targets a read-only slot.
     SlotAssignmentReadOnly,
+    /// A local assignment's value does not have the local's type.
+    LocalAssignmentTypeMismatch,
+    /// `:=` names something other than a `let` local.
+    AssignmentTargetNotAssignable,
+    /// A closure captures a local that `:=` assigns.
+    AssignedLocalCaptured,
     /// A slot default `init-value:` has the wrong type.
     SlotDefaultTypeMismatch,
     /// A required init keyword is missing.
@@ -425,6 +431,9 @@ impl DiagnosticCode {
         Self::SlotInitializerTypeMismatch,
         Self::SlotAssignmentTypeMismatch,
         Self::SlotAssignmentReadOnly,
+        Self::LocalAssignmentTypeMismatch,
+        Self::AssignmentTargetNotAssignable,
+        Self::AssignedLocalCaptured,
         Self::SlotDefaultTypeMismatch,
         Self::MissingRequiredInitKeyword,
         Self::MissingSlotInitializer,
@@ -566,6 +575,9 @@ impl DiagnosticCode {
             Self::SlotInitializerTypeMismatch => "sem.slot-initializer-type-mismatch",
             Self::SlotAssignmentTypeMismatch => "sem.slot-assignment-type-mismatch",
             Self::SlotAssignmentReadOnly => "sem.slot-assignment-read-only",
+            Self::LocalAssignmentTypeMismatch => "sem.local-assignment-type-mismatch",
+            Self::AssignmentTargetNotAssignable => "sem.assignment-target-not-assignable",
+            Self::AssignedLocalCaptured => "sem.assigned-local-captured",
             Self::SlotDefaultTypeMismatch => "sem.slot-default-type-mismatch",
             Self::MissingRequiredInitKeyword => "sem.missing-required-init-keyword",
             Self::MissingSlotInitializer => "sem.missing-slot-initializer",
@@ -708,6 +720,9 @@ impl DiagnosticCode {
             "sem.slot-initializer-type-mismatch" => Self::SlotInitializerTypeMismatch,
             "sem.slot-assignment-type-mismatch" => Self::SlotAssignmentTypeMismatch,
             "sem.slot-assignment-read-only" => Self::SlotAssignmentReadOnly,
+            "sem.local-assignment-type-mismatch" => Self::LocalAssignmentTypeMismatch,
+            "sem.assignment-target-not-assignable" => Self::AssignmentTargetNotAssignable,
+            "sem.assigned-local-captured" => Self::AssignedLocalCaptured,
             "sem.slot-default-type-mismatch" => Self::SlotDefaultTypeMismatch,
             "sem.missing-required-init-keyword" => Self::MissingRequiredInitKeyword,
             "sem.missing-slot-initializer" => Self::MissingSlotInitializer,

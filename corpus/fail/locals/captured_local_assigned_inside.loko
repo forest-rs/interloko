@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.assignment-target-not-assignable
+// expect: diagnostic contains `total` is a captured local and cannot be assigned
+
+// A closure cannot assign a local it captures: its capture is a copy.
+
+define function main() => <integer>
+  let total = 1;
+  let reset = function () => <integer> total := 0 end;
+  reset()
+end;

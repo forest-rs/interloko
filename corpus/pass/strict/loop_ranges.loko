@@ -1,0 +1,22 @@
+// expect: run 99
+// expect: diagnostics 0
+// expect: dump typing contains range proved rule=range-within
+
+// A strict definition must prove each value it stores in a limited local,
+// on every iteration of a loop. The test keeps `i` below `limit`, at most
+// 100, in the body, so storing it in `last` is proved, and so is `i + 1`
+// not overflowing.
+
+define strict function last-below(limit :: limited(<integer>, min: 0, max: 100)) => <integer>
+  let last :: limited(<integer>, min: 0, max: 100) = 0;
+  let i = 0;
+  while (i < limit)
+    last := i;
+    i := i + 1
+  end;
+  last
+end;
+
+define function main() => <integer>
+  last-below(100)
+end;

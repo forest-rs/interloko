@@ -1,0 +1,55 @@
+// expect: run 10
+// expect: diagnostics 0
+// expect: dump typing contains s0 overflow proved rule=overflow-impossible
+// expect: dump typing contains because=narrowed(then)
+// expect: dump typing contains <- widened@
+// expect: dump typing contains s0 dispatch proved rule=dispatch-covered
+// expect: dump typing contains actual=type-union(<circle>, <square>) severity=silent origin=implicit because=joined@
+
+// A loop's head joins each local the loop assigns over every iteration,
+// widening integer bounds until the join stops growing (`widened`) or
+// taking the join itself when it is a fixpoint (`joined`). `i` starts at 0
+// and the test keeps it below 10 in the body, so `i + 1` cannot overflow
+// on any iteration. `shape` is a `<circle>` on the first iteration and a
+// `<square>` after, so the send in the body is covered by both methods but
+// selects neither: deciding it from the first iteration alone would link
+// it to `corners(<circle>)`, which is wrong on every later one.
+
+define sealed abstract class <shape> (<object>)
+end;
+
+define sealed class <circle> (<shape>)
+end;
+
+define sealed class <square> (<shape>)
+end;
+
+define generic corners(s :: <shape>) => <integer>;
+
+define method corners(c :: <circle>) => <integer>
+  0
+end;
+
+define method corners(s :: <square>) => <integer>
+  4
+end;
+
+define function count() => <integer>
+  let i = 0;
+  while (i < 10)
+    i := i + 1
+  end;
+  i
+end;
+
+define function main() => <integer>
+  let shape :: <shape> = make(<circle>);
+  let total = 0;
+  let n = 0;
+  while (n < 3)
+    total := total + corners(shape);
+    shape := make(<square>);
+    n := n + 1
+  end;
+  total + count() - 8
+end;

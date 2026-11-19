@@ -418,12 +418,42 @@ pub struct MethodParam {
 pub struct Block {
     /// Stable-ish AST node identity.
     pub id: AstNodeId,
-    /// Local `let` bindings.
-    pub lets: Vec<Let>,
+    /// `let` bindings and expressions evaluated for effect, in source order.
+    pub statements: Vec<Statement>,
     /// Final result expression.
     pub result: Expr,
     /// Source span.
     pub span: Span,
+}
+
+impl Block {
+    /// The body's `let` bindings, in source order.
+    pub fn lets(&self) -> impl Iterator<Item = &Let> {
+        self.statements
+            .iter()
+            .filter_map(|statement| match statement {
+                Statement::Let(binding) => Some(&**binding),
+                Statement::Expr(_) => None,
+            })
+    }
+}
+
+/// One statement of a body, before its result expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Statement {
+    /// A `let` binding, scoped to the rest of the body.
+    Let(Box<Let>),
+    /// `expression;`: evaluated for its effects, its values discarded.
+    Expr(Expr),
+}
+
+/// When a conditional loop runs its body.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LoopKind {
+    /// `while (test) … end`: while the test is `#t`.
+    While,
+    /// `until (test) … end`: until the test is `#t`.
+    Until,
 }
 
 /// Local binding.
@@ -691,6 +721,34 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Local assignment through `name := value`, whose value is the new
+    /// value.
+    Assign {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Assigned local name.
+        name: String,
+        /// Span of the assigned name.
+        name_span: Span,
+        /// Assigned value expression.
+        value: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
+    /// Conditional loop, `while (test) body end` or `until (test) body end`.
+    /// It produces no values.
+    Loop {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Whether the body runs while or until the test holds.
+        kind: LoopKind,
+        /// `<boolean>` test, evaluated before each iteration.
+        test: Box<Expr>,
+        /// Loop body; its locals are scoped to one iteration.
+        body: Box<Block>,
+        /// Source span.
+        span: Span,
+    },
     /// Binary expression.
     Binary {
         /// Stable-ish AST node identity.
@@ -816,7 +874,103 @@ pub enum Expr {
     },
 }
 
+impl Block {
+    /// Whether a `:=` in this body, outside any closure in it, assigns a
+    /// local called `name`; see [`Expr::assigns`].
+    #[must_use]
+    pub fn assigns(&self, name: &str) -> bool {
+        self.statements.iter().any(|statement| match statement {
+            Statement::Let(binding) => binding.value.assigns(name),
+            Statement::Expr(expr) => expr.assigns(name),
+        }) || self.result.assigns(name)
+    }
+}
+
 impl Expr {
+    /// Whether a `:=` in this expression, outside any closure in it,
+    /// assigns a local called `name`.
+    ///
+    /// This goes by name, so it also sees assignments of other locals
+    /// that shadow it. A closure cannot assign the locals it captures, so
+    /// its body is not searched.
+    #[must_use]
+    pub fn assigns(&self, name: &str) -> bool {
+        match self {
+            Self::Assign {
+                name: assigned,
+                value,
+                ..
+            } => assigned == name || value.assigns(name),
+            Self::Loop { test, body, .. } => test.assigns(name) || body.assigns(name),
+            Self::Vector {
+                elements: exprs, ..
+            }
+            | Self::Call { args: exprs, .. } => exprs.iter().any(|expr| expr.assigns(name)),
+            Self::InstanceOf { value: inner, .. }
+            | Self::Cast { value: inner, .. }
+            | Self::Signal {
+                condition: inner, ..
+            }
+            | Self::SlotRead {
+                receiver: inner, ..
+            }
+            | Self::UnaryMinus { expr: inner, .. } => inner.assigns(name),
+            Self::MakeObject { class, fields, .. } => {
+                class.assigns(name) || fields.iter().any(|field| field.value.assigns(name))
+            }
+            Self::SlotAssign {
+                receiver: lhs,
+                value: rhs,
+                ..
+            }
+            | Self::Binary { lhs, rhs, .. }
+            | Self::Compare { lhs, rhs, .. }
+            | Self::Identical { lhs, rhs, .. } => lhs.assigns(name) || rhs.assigns(name),
+            Self::If {
+                arms,
+                else_body: default,
+                ..
+            }
+            | Self::Case {
+                arms,
+                otherwise: default,
+                ..
+            } => {
+                arms.iter()
+                    .any(|arm| arm.test.assigns(name) || arm.body.assigns(name))
+                    || default.as_ref().is_some_and(|body| body.assigns(name))
+            }
+            Self::Unless {
+                condition, body, ..
+            } => condition.assigns(name) || body.assigns(name),
+            Self::Handle { body, restart, .. } => {
+                body.assigns(name)
+                    || restart
+                        .guard
+                        .as_ref()
+                        .is_some_and(|guard| guard.assigns(name))
+                    || restart.body.assigns(name)
+            }
+            Self::Block { body, cleanup, .. } => {
+                body.assigns(name)
+                    || cleanup
+                        .as_ref()
+                        .is_some_and(|cleanup| cleanup.assigns(name))
+            }
+            Self::Number { .. }
+            | Self::Float { .. }
+            | Self::Number32 { .. }
+            | Self::Bool { .. }
+            | Self::String { .. }
+            | Self::Symbol { .. }
+            | Self::Function { .. }
+            | Self::Name { .. }
+            | Self::ClassName { .. }
+            | Self::TypeLiteral { .. }
+            | Self::Error { .. } => false,
+        }
+    }
+
     /// Returns this expression's stable-ish AST node id.
     #[must_use]
     pub const fn id(&self) -> AstNodeId {
@@ -839,6 +993,8 @@ impl Expr {
             | Self::MakeObject { id, .. }
             | Self::SlotRead { id, .. }
             | Self::SlotAssign { id, .. }
+            | Self::Assign { id, .. }
+            | Self::Loop { id, .. }
             | Self::Binary { id, .. }
             | Self::UnaryMinus { id, .. }
             | Self::Compare { id, .. }
@@ -874,6 +1030,8 @@ impl Expr {
             | Self::MakeObject { span, .. }
             | Self::SlotRead { span, .. }
             | Self::SlotAssign { span, .. }
+            | Self::Assign { span, .. }
+            | Self::Loop { span, .. }
             | Self::Binary { span, .. }
             | Self::UnaryMinus { span, .. }
             | Self::Compare { span, .. }
@@ -1318,7 +1476,7 @@ impl<'tree> Lowering<'tree> {
             .map(|body| self.lower_block(body))
             .unwrap_or_else(|| Block {
                 id: self.ast_id(node),
-                lets: Vec::new(),
+                statements: Vec::new(),
                 result: Expr::Error {
                     id: self.ast_id(node),
                     span: node.span,
@@ -1393,7 +1551,7 @@ impl<'tree> Lowering<'tree> {
 
         let body = body.unwrap_or_else(|| Block {
             id: self.ast_id(node),
-            lets: Vec::new(),
+            statements: Vec::new(),
             result: Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1569,18 +1727,42 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_block(&mut self, node: &CstNode) -> Block {
-        let mut lets = Vec::new();
+        let mut statements = Vec::new();
         let mut result = None;
 
         for child in &node.children {
             let CstElement::Node(child_node) = child else {
                 continue;
             };
-            if child_node.kind == CstKind::LetStmt {
-                lets.push(self.lower_let(child_node));
-            } else {
-                result = Some(self.lower_expr(child_node));
+            match child_node.kind {
+                CstKind::LetStmt => {
+                    statements.push(Statement::Let(Box::new(self.lower_let(child_node))));
+                }
+                CstKind::ExprStmt => {
+                    let expr = child_node.children.iter().find_map(|child| match child {
+                        CstElement::Node(expr) => Some(expr),
+                        CstElement::Token(_) => None,
+                    });
+                    let expr = match expr {
+                        Some(expr) => self.lower_expr(expr),
+                        None => Expr::Error {
+                            id: self.ast_id(child_node),
+                            span: child_node.span,
+                        },
+                    };
+                    statements.push(Statement::Expr(expr));
+                }
+                _ => result = Some(self.lower_expr(child_node)),
             }
+        }
+
+        // As in Dylan, `;` separates a body's expressions: a body whose last
+        // expression is followed by one still produces its values.
+        if result.is_none()
+            && let Some(Statement::Expr(_)) = statements.last()
+            && let Some(Statement::Expr(last)) = statements.pop()
+        {
+            result = Some(last);
         }
 
         if result.is_none() {
@@ -1592,7 +1774,7 @@ impl<'tree> Lowering<'tree> {
 
         Block {
             id: self.ast_id(node),
-            lets,
+            statements,
             result: result.unwrap_or(Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1743,6 +1925,8 @@ impl<'tree> Lowering<'tree> {
             CstKind::CaseExpr => self.lower_case(node),
             CstKind::HandleExpr => self.lower_handle(node),
             CstKind::BlockExpr => self.lower_block_expr(node),
+            CstKind::WhileExpr => self.lower_loop(node, LoopKind::While),
+            CstKind::UntilExpr => self.lower_loop(node, LoopKind::Until),
             _ => Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -1778,7 +1962,7 @@ impl<'tree> Lowering<'tree> {
 
         let body = body.unwrap_or_else(|| Block {
             id: self.ast_id(node),
-            lets: Vec::new(),
+            statements: Vec::new(),
             result: Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -2457,6 +2641,20 @@ impl<'tree> Lowering<'tree> {
                 id: self.ast_id(node),
                 span: node.span,
             });
+        if let Expr::Name {
+            name,
+            span: name_span,
+            ..
+        } = target
+        {
+            return Expr::Assign {
+                id: self.ast_id(node),
+                name,
+                name_span,
+                value: Box::new(value),
+                span: node.span,
+            };
+        }
         let Expr::SlotRead { receiver, slot, .. } = target else {
             self.diagnostics.push(Diagnostic::error(
                 node.span,
@@ -2668,7 +2866,7 @@ impl<'tree> Lowering<'tree> {
     fn missing_block(&self, node: &CstNode) -> Block {
         Block {
             id: self.ast_id(node),
-            lets: Vec::new(),
+            statements: Vec::new(),
             result: Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -2712,6 +2910,41 @@ impl<'tree> Lowering<'tree> {
         }
     }
 
+    fn lower_loop(&mut self, node: &CstNode, kind: LoopKind) -> Expr {
+        let mut test = None;
+        let mut body = None;
+        for child in &node.children {
+            let CstElement::Node(child_node) = child else {
+                continue;
+            };
+            if child_node.kind == CstKind::Body {
+                body = Some(self.lower_block(child_node));
+            } else if test.is_none() {
+                test = Some(self.lower_expr(child_node));
+            }
+        }
+        let test = test.unwrap_or_else(|| Expr::Error {
+            id: self.ast_id(node),
+            span: node.span,
+        });
+        let body = body.unwrap_or_else(|| Block {
+            id: self.ast_id(node),
+            statements: Vec::new(),
+            result: Expr::Error {
+                id: self.ast_id(node),
+                span: node.span,
+            },
+            span: node.span,
+        });
+        Expr::Loop {
+            id: self.ast_id(node),
+            kind,
+            test: Box::new(test),
+            body: Box::new(body),
+            span: node.span,
+        }
+    }
+
     fn lower_block_expr(&mut self, node: &CstNode) -> Expr {
         let mut body = None;
         let mut cleanup = None;
@@ -2741,7 +2974,7 @@ impl<'tree> Lowering<'tree> {
         }
         let body = body.unwrap_or_else(|| Block {
             id: self.ast_id(node),
-            lets: Vec::new(),
+            statements: Vec::new(),
             result: Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
@@ -3254,7 +3487,7 @@ impl FrontendFormLowering {
                     &format!("{region_slug}:f{form_index}:invalid-body"),
                     form.source_span,
                 ),
-                lets: Vec::new(),
+                statements: Vec::new(),
                 result: Expr::Error {
                     id: self.generated_id(
                         GENERATED_EXPR_TAG,
@@ -3273,7 +3506,7 @@ impl FrontendFormLowering {
                 &format!("{region_slug}:f{form_index}:body"),
                 form.source_span,
             ),
-            lets: Vec::new(),
+            statements: Vec::new(),
             result,
             span: form.source_span,
         }
@@ -3432,6 +3665,45 @@ mod tests {
 
     fn parse_file(source_file: SourceFileId, source: &str) -> syntax::SyntaxTree {
         grammar_frontend::parse_file(source_file, source).syntax
+    }
+
+    #[test]
+    fn bodies_hold_statements_loops_and_local_assignments() {
+        let tree = parse(
+            "define function main() => <integer>\n  \
+             let n = 0;\n  \
+             n:=1;\n  \
+             while (n < 10) n := n * 2 end;\n  \
+             until (n = 0) let m = n; n := m - 1; end;\n  \
+             n;\nend;",
+        );
+        assert_eq!(tree.diagnostics, Vec::new());
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        let body = &module.functions[0].body;
+        let [
+            Statement::Let(_),
+            Statement::Expr(Expr::Assign { name, .. }),
+            Statement::Expr(Expr::Loop {
+                kind: LoopKind::While,
+                ..
+            }),
+            Statement::Expr(Expr::Loop {
+                kind: LoopKind::Until,
+                body: until_body,
+                ..
+            }),
+        ] = body.statements.as_slice()
+        else {
+            panic!("unexpected statements {:?}", body.statements);
+        };
+        assert_eq!(name, "n");
+        // A trailing `;` separates, so the last expression is the result.
+        assert!(matches!(&body.result, Expr::Name { name, .. } if name == "n"));
+        assert_eq!(until_body.statements.len(), 1);
+        assert!(matches!(&until_body.result, Expr::Assign { .. }));
+        assert!(body.assigns("n"));
+        assert!(!body.assigns("m"));
     }
 
     #[test]
@@ -3613,14 +3885,14 @@ mod tests {
                 .as_deref(),
             Some(written[1])
         );
-        let LetPattern::Name(m) = &function.body.lets[0].pattern else {
+        let LetPattern::Name(m) = &function.body.lets().next().expect("a let").pattern else {
             panic!("a name binding");
         };
         assert_eq!(
             shown(m.type_annotation.as_ref()).as_deref(),
             Some(written[2])
         );
-        let LetPattern::Name(g) = &function.body.lets[1].pattern else {
+        let LetPattern::Name(g) = &function.body.lets().nth(1).expect("a let").pattern else {
             panic!("a name binding");
         };
         assert_eq!(
@@ -3661,9 +3933,16 @@ mod tests {
         assert_eq!(module.functions[0].name, "add-one");
         assert_eq!(module.functions[0].params[0].name, "x");
         assert_eq!(module.functions[0].params[0].type_annotation, None);
-        assert_eq!(module.functions[0].body.lets[0].name, "one");
         assert_eq!(
-            module.functions[0].body.lets[0]
+            module.functions[0].body.lets().next().expect("a let").name,
+            "one"
+        );
+        assert_eq!(
+            module.functions[0]
+                .body
+                .lets()
+                .next()
+                .expect("a let")
                 .type_annotation
                 .as_ref()
                 .and_then(TypeExpr::name),
@@ -3749,7 +4028,7 @@ mod tests {
             Some("(callable(<integer>) => (<integer>, <shape>), <integer>)".into())
         );
         let Some(Expr::Function { return_type, .. }) =
-            both.body.lets.first().map(|binding| &binding.value)
+            both.body.lets().next().map(|binding| &binding.value)
         else {
             panic!("function expression");
         };
@@ -3989,7 +4268,7 @@ mod tests {
             panic!("expected if");
         };
         assert_eq!(arms.len(), 2);
-        assert_eq!(arms[1].body.lets.len(), 1);
+        assert_eq!(arms[1].body.lets().count(), 1);
         assert_eq!(&tree.source[arms[1].span.start..][..6], "elseif");
         assert!(matches!(
             else_body.as_deref().map(|body| &body.result),

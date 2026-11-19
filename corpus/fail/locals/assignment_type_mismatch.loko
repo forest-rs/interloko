@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.local-assignment-type-mismatch
+// expect: diagnostic contains local `n` holds <integer> but is assigned <string>
+
+// An assignment must store a value of the local's declared type.
+
+define function main() => <integer>
+  let n :: <integer> = 0;
+  n := "s";
+  n
+end;

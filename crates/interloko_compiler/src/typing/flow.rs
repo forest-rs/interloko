@@ -2,10 +2,12 @@
 //!
 //! [`Analysis`] walks one definition's body in evaluation order with an
 //! environment ([`Env`]) from locals and captures to facts: a [`Type`] plus
-//! the [`ReasonId`] that explains it. Locals are immutable, so a fact holds
-//! for the rest of its scope, and the walk needs no control-flow graph:
+//! the [`ReasonId`] that explains it. A local's fact holds until an
+//! assignment replaces it, and the walk needs no control-flow graph:
 //! branches are analyzed under narrowed copies of the environment and
-//! joined afterwards. An environment whose `dead` reason is set describes
+//! joined afterwards, and a loop's body is analyzed from a loop head whose
+//! facts are iterated to a fixpoint ([`super::widen_to_fixpoint`]) before
+//! the pass that records its decisions. An environment whose `dead` reason is set describes
 //! code no value reaches; expressions there have [`Type::bottom`] and the
 //! checks there are recorded as [`TypingRule::Unreachable`].
 
@@ -106,6 +108,17 @@ impl Env {
             self.dead = Some(reason);
         }
     }
+}
+
+/// What a trial pass over a loop body may record, to undo before the next
+/// pass: only the final pass, from the loop's fixpoint head, decides.
+struct Checkpoint {
+    decisions: usize,
+    bindings: usize,
+    uses: usize,
+    probe: Option<(ProbeTarget, Option<ProbeHit>)>,
+    bound_locals: Vec<Option<ReasonId>>,
+    bound_captures: Vec<Option<ReasonId>>,
 }
 
 /// A `block`'s exit procedure while its body is analyzed.
@@ -317,6 +330,11 @@ pub(super) struct Analysis<'a> {
     constants: Vec<Option<Type>>,
     depth: usize,
     probe: Option<(ProbeTarget, Option<ProbeHit>)>,
+    /// The last head each loop reached, by loop. An enclosing loop's
+    /// passes give an inner loop entry facts that only grow, so its next
+    /// fixpoint starts from there instead of from scratch, which keeps
+    /// nested loops from multiplying their passes.
+    loop_heads: Vec<(*const sem::Expr, Vec<Type>)>,
 }
 
 impl<'a> Analysis<'a> {
@@ -335,6 +353,7 @@ impl<'a> Analysis<'a> {
             constants: vec![None; module.constants.len()],
             depth: 0,
             probe: None,
+            loop_heads: Vec::new(),
         }
     }
 
@@ -454,20 +473,63 @@ impl<'a> Analysis<'a> {
 
     /// Binds `var` to `fact` and records the binding's fact the first time
     /// it is bound.
+    ///
+    /// An assigned local holds other values later, so its binding fact is
+    /// its declared type, and each read records the fact it sees.
     fn define(&mut self, env: &mut Env, var: Var, fact: Fact) {
-        if let Some(context) = self.contexts.last_mut() {
-            let slot = context.bound_slot(var);
-            if slot.is_none() {
-                *slot = Some(fact.reason);
+        let first = self
+            .contexts
+            .last_mut()
+            .is_some_and(|context| context.bound_slot(var).is_none());
+        if first {
+            let reason = match var {
+                Var::Local(local) => match self.local(local).filter(|binding| binding.assigned) {
+                    Some(binding) => {
+                        let ty = self.declared_type(binding);
+                        self.reason(ReasonKind::Declared, binding.span, &ty, Vec::new())
+                    }
+                    None => fact.reason,
+                },
+                Var::Capture(_) => fact.reason,
+            };
+            if let Some(context) = self.contexts.last_mut() {
+                *context.bound_slot(var) = Some(reason);
                 if let Some(binding) = context.binding(var) {
-                    self.bindings.push(BindingFact {
-                        binding,
-                        reason: fact.reason,
-                    });
+                    self.bindings.push(BindingFact { binding, reason });
                 }
             }
         }
         env.set(var, fact);
+    }
+
+    /// Saves what a trial pass over a loop body records.
+    fn checkpoint(&self) -> Checkpoint {
+        let context = self.contexts.last();
+        Checkpoint {
+            decisions: self.decisions.len(),
+            bindings: self.bindings.len(),
+            uses: self.uses.len(),
+            probe: self.probe.clone(),
+            bound_locals: context
+                .map(|context| context.bound_locals.clone())
+                .unwrap_or_default(),
+            bound_captures: context
+                .map(|context| context.bound_captures.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Undoes what was recorded since `checkpoint`. Reasons stay: facts
+    /// derived in the trial pass may cite them.
+    fn rollback(&mut self, checkpoint: Checkpoint) {
+        self.decisions.truncate(checkpoint.decisions);
+        self.bindings.truncate(checkpoint.bindings);
+        self.uses.truncate(checkpoint.uses);
+        self.probe = checkpoint.probe;
+        if let Some(context) = self.contexts.last_mut() {
+            context.bound_locals = checkpoint.bound_locals;
+            context.bound_captures = checkpoint.bound_captures;
+        }
     }
 
     /// Records a read of `var` whose fact differs from its binding fact.
@@ -646,8 +708,9 @@ impl<'a> Analysis<'a> {
         self.define(env, Var::Local(local), fact);
     }
 
-    /// Binds `local` to `fact`, narrowed by the local's declared type.
-    fn assign(&mut self, env: &mut Env, local: LocalId, fact: Fact) {
+    /// Binds `local` to `fact`, narrowed by the local's declared type, and
+    /// returns the fact it now has.
+    fn assign(&mut self, env: &mut Env, local: LocalId, fact: Fact) -> Fact {
         let fact = match self.local(local) {
             Some(binding) => {
                 let ty = fact.ty.meet(&self.declared_type(binding), self.module);
@@ -662,14 +725,198 @@ impl<'a> Analysis<'a> {
         if fact.ty.is_bottom() {
             env.kill(fact.reason);
         }
-        self.define(env, Var::Local(local), fact);
+        self.define(env, Var::Local(local), fact.clone());
+        fact
+    }
+
+    /// Gives each of `locals` bound in `env` its declared type: the facts
+    /// at a point some assignments to them may or may not have reached.
+    fn forget(&mut self, env: &mut Env, locals: &[LocalId], span: Span) {
+        for local in locals {
+            if env.get(Var::Local(*local)).is_none() {
+                continue;
+            }
+            let Some(binding) = self.local(*local) else {
+                continue;
+            };
+            let ty = self.declared_type(binding);
+            let fact = self.fact(ReasonKind::Declared, span, ty, Vec::new());
+            env.set(Var::Local(*local), fact);
+        }
     }
 
     fn block(&mut self, env: &mut Env, block: &'a sem::Block) -> Fact {
-        for binding in &block.lets {
-            self.bind(env, binding);
+        for statement in &block.statements {
+            match statement {
+                sem::Statement::Let(binding) => self.bind(env, binding),
+                sem::Statement::Expr(expr) => {
+                    let _ = self.eval(env, expr);
+                }
+            }
         }
         self.eval(env, &block.result)
+    }
+
+    /// Analyzes a `while` or `until` loop and leaves `env` at its exit.
+    ///
+    /// The locals the loop assigns are its loop-carried locals. Their facts
+    /// at the loop head are the join of their entry facts and their facts
+    /// at the end of each iteration, iterated to a fixpoint with trial
+    /// passes over the loop that record nothing ([`Self::checkpoint`]).
+    /// The final pass, from that head, records the loop's decisions, so
+    /// they hold on every iteration. The loop leaves when its test says
+    /// so, with the facts that outcome implies at the head.
+    fn loop_expr(
+        &mut self,
+        env: &mut Env,
+        expr: &'a sem::Expr,
+        kind: sem::LoopKind,
+        test: &'a sem::Expr,
+        body: &'a sem::Block,
+        span: Span,
+    ) -> Fact {
+        let carried = expr
+            .assigned_locals()
+            .into_iter()
+            .filter(|local| env.get(Var::Local(*local)).is_some())
+            .collect::<Vec<_>>();
+        let entry = env.clone();
+        let entry_types = carried
+            .iter()
+            .map(|local| {
+                entry
+                    .get(Var::Local(*local))
+                    .map_or_else(Type::bottom, |fact| fact.ty.clone())
+            })
+            .collect::<Vec<_>>();
+        // The back edge of the pass from the final head: what the head's
+        // facts derive from besides the entry, and whether the head is
+        // exactly their join or was widened past it.
+        let mut back: Vec<Option<Fact>> = Vec::new();
+        let head = if carried.is_empty() || entry.dead.is_some() {
+            Vec::new()
+        } else {
+            let key = core::ptr::from_ref(expr);
+            let start = match self
+                .loop_heads
+                .iter()
+                .find(|(loop_expr, _)| *loop_expr == key)
+            {
+                Some((_, previous)) if previous.len() == entry_types.len() => entry_types
+                    .iter()
+                    .zip(previous)
+                    .map(|(entry, previous)| entry.join(previous, self.module))
+                    .collect(),
+                _ => entry_types.clone(),
+            };
+            let head = super::widen_to_fixpoint(self.module, start, |head| {
+                let checkpoint = self.checkpoint();
+                let head_env = self.loop_head(&entry, &carried, head, &[], span);
+                let (_, back_env) = self.iterate(head_env, kind, test, body);
+                self.rollback(checkpoint);
+                back = carried
+                    .iter()
+                    .map(|local| match back_env.dead {
+                        None => back_env.get(Var::Local(*local)).cloned(),
+                        Some(_) => None,
+                    })
+                    .collect();
+                back.iter()
+                    .map(|fact| {
+                        fact.as_ref()
+                            .map_or_else(Type::bottom, |fact| fact.ty.clone())
+                    })
+                    .collect()
+            });
+            match self
+                .loop_heads
+                .iter_mut()
+                .find(|(loop_expr, _)| *loop_expr == key)
+            {
+                Some((_, previous)) => previous.clone_from(&head),
+                None => self.loop_heads.push((key, head.clone())),
+            }
+            head
+        };
+        let back = head
+            .iter()
+            .zip(&entry_types)
+            .zip(back)
+            .map(|((head, entry), back)| {
+                let back_type = back
+                    .as_ref()
+                    .map_or_else(Type::bottom, |fact| fact.ty.clone());
+                let exact = *head == entry.join(&back_type, self.module);
+                (exact, back.map(|fact| fact.reason))
+            })
+            .collect::<Vec<_>>();
+        let head_env = self.loop_head(&entry, &carried, &head, &back, span);
+        let (exit, _) = self.iterate(head_env, kind, test, body);
+        *env = exit;
+        self.declared(expr)
+    }
+
+    /// The environment at a loop head where the loop-carried locals
+    /// `carried` have the types `head`, within their declared types.
+    ///
+    /// Each head fact derives from the entry's and, when `back` has it, the
+    /// back edge's fact, whose assumptions it relies on too. A head type
+    /// `back` says is exactly their join is [`ReasonKind::Joined`]; any
+    /// other is [`ReasonKind::Widened`], which may hold values no iteration
+    /// produces.
+    fn loop_head(
+        &mut self,
+        entry: &Env,
+        carried: &[LocalId],
+        head: &[Type],
+        back: &[(bool, Option<ReasonId>)],
+        span: Span,
+    ) -> Env {
+        let mut env = entry.clone();
+        for (index, (local, ty)) in carried.iter().zip(head).enumerate() {
+            let (Some(entry_fact), Some(binding)) =
+                (entry.get(Var::Local(*local)), self.local(*local))
+            else {
+                continue;
+            };
+            let (exact, back_reason) = back.get(index).copied().unwrap_or((false, None));
+            // A head the back edge adds nothing to still relies on what the
+            // back edge's facts assumed, so it cites them.
+            if *ty == entry_fact.ty && back_reason.is_none_or(|back| back == entry_fact.reason) {
+                continue;
+            }
+            let ty = ty.meet(&self.declared_type(binding), self.module);
+            let kind = if exact {
+                ReasonKind::Joined
+            } else {
+                ReasonKind::Widened
+            };
+            let mut from = vec![entry_fact.reason];
+            from.extend(back_reason);
+            let fact = self.fact(kind, span, ty, from);
+            env.set(Var::Local(*local), fact);
+        }
+        env
+    }
+
+    /// One pass over a loop from `head`: the test, then the body when the
+    /// test continues the loop. Returns the environments where the loop
+    /// exits and at the end of the body, the back edge.
+    fn iterate(
+        &mut self,
+        mut head: Env,
+        kind: sem::LoopKind,
+        test: &'a sem::Expr,
+        body: &'a sem::Block,
+    ) -> (Env, Env) {
+        let (_, when_true, when_false) = self.condition(&mut head, test);
+        let (mut back, exit) = if kind.continues_on() {
+            (when_true, when_false)
+        } else {
+            (when_false, when_true)
+        };
+        let _ = self.block(&mut back, body);
+        (exit, back)
     }
 
     fn bind(&mut self, env: &mut Env, binding: &'a sem::Let) {
@@ -681,12 +928,12 @@ impl<'a> Analysis<'a> {
         match (&binding.value, locals) {
             (_, [local]) => {
                 let fact = self.eval(env, &binding.value);
-                self.assign(env, *local, fact);
+                let _ = self.assign(env, *local, fact);
             }
             (sem::Expr::Values { values, .. }, locals) if values.len() == locals.len() => {
                 for (value, local) in values.iter().zip(locals) {
                     let fact = self.eval(env, value);
-                    self.assign(env, *local, fact);
+                    let _ = self.assign(env, *local, fact);
                 }
             }
             (value, locals) => {
@@ -1160,6 +1407,16 @@ impl<'a> Analysis<'a> {
                 let _ = self.eval(env, value);
                 self.declared(expr)
             }
+            E::AssignLocal { local, value, .. } => {
+                let fact = self.eval(env, value);
+                self.assign(env, *local, fact)
+            }
+            E::Loop {
+                kind,
+                test,
+                body,
+                span,
+            } => self.loop_expr(env, expr, *kind, test, body, *span),
             E::Handle {
                 body,
                 restart,
@@ -1222,7 +1479,8 @@ impl<'a> Analysis<'a> {
     }
 
     /// Analyzes a closure body where the closure is created: its captures
-    /// hold the facts of their sources here, which are immutable.
+    /// hold the facts of their sources here, which no assignment changes: sem
+    /// rejects capturing an assigned local.
     fn closure(&mut self, env: &Env, index: usize) {
         let Some(closure) = self.module.closures.get(index) else {
             return;
@@ -1341,17 +1599,22 @@ impl<'a> Analysis<'a> {
                 result = self.join_facts(result, declared, span);
             }
             // A call to the exit resumes after the block with the facts of
-            // its entry, which still hold: locals are immutable.
+            // its entry, which still hold for locals the body does not
+            // assign; one it assigns may have any value of its type.
             if (state.reached || state.escaped) && entry.dead.is_none() {
                 *env = entry.clone();
+                self.forget(env, &body.assigned_locals(), span);
             }
         }
         if let Some(cleanup) = cleanup {
+            // The cleanup runs wherever the body stopped.
             let mut cleanup_env = entry;
+            self.forget(&mut cleanup_env, &body.assigned_locals(), span);
             let _ = self.block(&mut cleanup_env, cleanup);
             if let Some(dead) = cleanup_env.dead {
                 env.kill(dead);
             }
+            self.forget(env, &cleanup.assigned_locals(), span);
         }
         let ty = result.ty.meet(&bound, self.module);
         if ty == result.ty {
@@ -1375,8 +1638,10 @@ impl<'a> Analysis<'a> {
         }
         let body_fact = self.eval(env, body);
         // A condition may be signalled anywhere in the body, so the handler
-        // starts from the facts at the body's entry.
+        // starts from the facts at the body's entry, except for the locals
+        // the body assigns.
         let mut handler_env = entry;
+        self.forget(&mut handler_env, &body.assigned_locals(), span);
         if let Some(local) = restart.condition_local {
             let mut ty = Type::of(Atom::Cone(restart.specializer), self.module);
             if let Some(binding) = self.local(local) {
@@ -1470,13 +1735,15 @@ impl<'a> Analysis<'a> {
                     self.narrow_by(when_true, when_false, var, &target, Some(*site), *span);
                 }
             }
+            // A test that assigns a local compares values read at different
+            // times, so it narrows nothing.
             sem::Expr::Compare {
                 op,
                 kind,
                 lhs,
                 rhs,
                 span,
-            } if kind.is_integer() => {
+            } if kind.is_integer() && test.assigned_locals().is_empty() => {
                 let lhs_hull = self.peek(when_true, lhs).as_ref().and_then(Interval::hull);
                 let rhs_hull = self.peek(when_true, rhs).as_ref().and_then(Interval::hull);
                 if let (Some(var), Some(other)) = (self.integer_var_of(lhs), rhs_hull) {
@@ -2514,8 +2781,11 @@ pub(super) fn operation_at(
 }
 
 fn walk_block(module: &sem::Module, block: &sem::Block, visit: &mut impl FnMut(&sem::Expr)) {
-    for binding in &block.lets {
-        walk(module, &binding.value, visit);
+    for statement in &block.statements {
+        match statement {
+            sem::Statement::Let(binding) => walk(module, &binding.value, visit),
+            sem::Statement::Expr(expr) => walk(module, expr, visit),
+        }
     }
     walk(module, &block.result, visit);
 }
@@ -2582,6 +2852,11 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
         } => {
             walk(module, receiver, visit);
             walk(module, value, visit);
+        }
+        E::AssignLocal { value, .. } => walk(module, value, visit),
+        E::Loop { test, body, .. } => {
+            walk(module, test, visit);
+            walk_block(module, body, visit);
         }
         E::Binary { lhs, rhs, .. }
         | E::Compare { lhs, rhs, .. }

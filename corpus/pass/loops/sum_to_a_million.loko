@@ -1,0 +1,23 @@
+// expect: run 500000500000
+// expect: diagnostics 0
+// expect: dump ast contains loop while
+// expect: dump sem contains loop while
+// expect: dump lowered contains jmp
+// expect: dump tape contains jmp
+
+// A loop runs in one frame: a million iterations need no call depth,
+// where recursing a million deep exceeds the VM's call depth limit.
+
+define function sum-to(n :: <integer>) => <integer>
+  let total = 0;
+  let i = 1;
+  while (i <= n)
+    total := total + i;
+    i := i + 1
+  end;
+  total
+end;
+
+define function main() => <integer>
+  sum-to(1000000)
+end;

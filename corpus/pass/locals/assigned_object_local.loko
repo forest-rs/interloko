@@ -1,0 +1,33 @@
+// expect: run 5
+// expect: diagnostics 0
+
+// A local declared with a class holds any instance of it, and assignment
+// may store an instance of another subclass than the initializer's.
+
+define class <shape> (<object>)
+end;
+
+define class <circle> (<shape>)
+  slot radius :: <integer>, init-value: 2;
+end;
+
+define class <square> (<shape>)
+  slot side :: <integer>, init-value: 3;
+end;
+
+define generic measure(s :: <shape>) => <integer>;
+
+define method measure(c :: <circle>) => <integer>
+  c.radius
+end;
+
+define method measure(s :: <square>) => <integer>
+  s.side
+end;
+
+define function main() => <integer>
+  let s :: <shape> = make(<circle>);
+  let total = measure(s);
+  s := make(<square>);
+  total + measure(s)
+end;

@@ -2280,3 +2280,92 @@ fn strict_preview_reports_what_would_fail_without_changing_anything() {
             .is_empty()
     );
 }
+
+#[test]
+fn loop_decisions_hold_on_every_iteration() {
+    // `s` is a `<circle>` on the first iteration and a `<square>` on the
+    // rest, so the send is covered by both methods and selects neither. The
+    // trial passes that reach the loop head's fixpoint record nothing: the
+    // send has one decision.
+    let (module, artifact) = decisions_for(&format!(
+        "{SHAPES}define function main() => <integer>\n  \
+         let s :: <shape> = make(<circle>);\n  \
+         let n = 0;\n  \
+         while (n < 2)\n    area(s);\n    s := make(<square>);\n    n := n + 1\n  end;\n  \
+         n\nend;"
+    ));
+    let [dispatch] = checks_of(&module, &artifact, "main", TypingCheck::Dispatch)
+        .try_into()
+        .expect("one dispatch decision");
+    assert_eq!(dispatch.verdict, TypingVerdict::Proved);
+    assert_eq!(dispatch.selected_method, None);
+    assert_eq!(
+        type_name(&module, &dispatch.actual[0]),
+        "type-union(exactly <circle>, exactly <square>)"
+    );
+    // The head is exactly the join of the entry and the back edge.
+    assert!(
+        chain(&module, &artifact, &dispatch, 0).starts_with("joined@"),
+        "{}",
+        chain(&module, &artifact, &dispatch, 0)
+    );
+    // The test bounds `n` in the body, so `n + 1` cannot overflow; the
+    // head's integer bound was widened to reach the fixpoint.
+    let [overflow] = checks_of(&module, &artifact, "main", TypingCheck::Overflow)
+        .try_into()
+        .expect("one overflow check");
+    assert_eq!(overflow.rule, TypingRule::OverflowImpossible);
+    assert!(chain(&module, &artifact, &overflow, 0).contains("widened@"));
+}
+
+#[test]
+fn an_assigned_local_is_bound_at_its_declared_type() {
+    // Each read sees the last value assigned, while the binding's fact is
+    // what holds over its whole scope: the declared type.
+    let source = "define function main() => <integer>\n  \
+                  let n :: <integer> = 0;\n  n := 5;\n  n\nend;";
+    let (module, artifact) = decisions_for(source);
+    let typed = typed(&module, &artifact, "main");
+    let binding = Binding::Local(LocalId(0));
+    let bound = typed.binding_type(binding).expect("bound");
+    assert_eq!(type_name(&module, bound), "<integer>");
+    let read = source.rfind("n\nend").expect("the read");
+    let span = Span::new(read, read + 1);
+    let read = typed.read_type(binding, span).expect("read");
+    assert_eq!(type_name(&module, read), "singleton(5)");
+}
+
+#[test]
+fn an_exit_resumes_with_what_the_body_may_have_assigned() {
+    // The exit escapes to `call`, which may call it before or after the
+    // assignment, so after the block `n` may hold either value: the
+    // conversion cannot rely on the `0` it was bound to.
+    let (module, artifact) = decisions_for(
+        "define function call(f :: <callable>) => <integer>\n  apply(f, 1)\nend;\n\
+         define function main() => <i32>\n  \
+         let n = 0;\n  \
+         let ignored = block (out)\n    n := 5000000000;\n    call(out)\n  end;\n  \
+         as(<i32>, n)\nend;",
+    );
+    let [range] = checks_of(&module, &artifact, "main", TypingCheck::Range)
+        .try_into()
+        .expect("one range check");
+    assert_eq!(range.verdict, TypingVerdict::Checked);
+    assert_eq!(type_name(&module, &range.actual[0]), "<integer>");
+}
+
+#[test]
+fn a_test_that_assigns_its_operand_narrows_nothing() {
+    // `n < (n := 3)` compares the old `n`; narrowing the new one by it
+    // would make the then branch unreachable.
+    let (module, artifact) = decisions_for(
+        "define function f(m :: <integer>) => <i32>\n  \
+         let n = m;\n  \
+         if (n < (n := 3)) as(<i32>, n) else 0i32 end\nend;",
+    );
+    let [range] = checks_of(&module, &artifact, "f", TypingCheck::Range)
+        .try_into()
+        .expect("one range check");
+    assert_eq!(range.rule, TypingRule::RangeWithin);
+    assert_eq!(type_name(&module, &range.actual[0]), "singleton(3)");
+}
