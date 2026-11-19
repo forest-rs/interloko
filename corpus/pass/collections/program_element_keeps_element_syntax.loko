@@ -1,0 +1,17 @@
+// expect: run 325
+// expect: diagnostics 0
+
+// `c[k]` is the kernel's `element`, as Dylan's `[]` is the `dylan`
+// module's, so a program's own function of that name takes calls of the
+// name and leaves element syntax alone.
+
+define function element (a :: <integer>, b :: <integer>) => <integer>
+  a + b
+end;
+
+define function main() => <integer>
+  let v = #[10, 20];
+  let t = make(<table>);
+  t[#k] := 5;
+  element(1, 2) * 100 + as(<integer>, v[1]) + as(<integer>, t[#k])
+end;

@@ -63,6 +63,32 @@ impl CollectionFunction {
             .find(|function| function.name() == name)
     }
 
+    /// Returns the generic whose kernel-only name is `name`; see
+    /// [`Self::kernel_name`].
+    #[must_use]
+    pub fn from_kernel_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|function| function.kernel_name() == name)
+    }
+
+    /// Returns the name code the compiler writes calls this generic by,
+    /// such as `c[k]` for `element(c, k)` or the `<sequence>` iteration
+    /// method's `size(c)`: a `%` cannot appear in a source name, so no
+    /// binding or definition of the program's own `element` takes these
+    /// calls from the kernel's generic.
+    #[must_use]
+    pub const fn kernel_name(self) -> &'static str {
+        match self {
+            Self::Size => "%size",
+            Self::Element => crate::ast::KERNEL_ELEMENT,
+            Self::ElementSetter => crate::ast::KERNEL_ELEMENT_SETTER,
+            Self::Add => "%add!",
+            Self::ForwardIterationProtocol => "%forward-iteration-protocol",
+        }
+    }
+
     /// Returns the Loko name.
     #[must_use]
     pub const fn name(self) -> &'static str {

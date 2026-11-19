@@ -19,8 +19,9 @@
 //!
 //! The kernel's methods are written here as Loko syntax trees and lowered
 //! like any method body, so their callables are ordinary closures. They
-//! call the kernel's operations by names a program cannot write (`%size`),
-//! so no definition of the program's can change what they do.
+//! call the kernel's operations and generics by names a program cannot
+//! write (`%collection-size`, `%size`), so no binding or definition of the
+//! program's can change what they do.
 
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
@@ -34,7 +35,7 @@ use crate::ast::{
 use crate::identity::{AstNodeId, DefinitionId, DefinitionKind, SourceFileId};
 use crate::syntax::Span;
 
-use super::BuiltinValueClass;
+use super::{BuiltinValueClass, CollectionFunction};
 
 /// The name of the iteration protocol generic.
 pub const FORWARD_ITERATION_PROTOCOL: &str = "forward-iteration-protocol";
@@ -265,13 +266,13 @@ impl KernelTree {
     fn vector_protocol(&mut self, definition: DefinitionId) -> Block {
         let initial = self.int(0);
         let c = self.name("c");
-        let limit = self.call("%size", vec![c]);
+        let limit = self.call("%collection-size", vec![c]);
         let next_body = self.next_index();
         let next = self.function(&["c", "s"], "<object>", next_body);
         let state = self.integer("s");
         let c = self.name("c");
         let vector = self.cast("<vector>", c);
-        let size = self.call("%size", vec![vector]);
+        let size = self.call("%collection-size", vec![vector]);
         let done_body = self.compare(CompareOp::Ge, state, size);
         let done = self.function(&["c", "s", "l"], "<boolean>", done_body);
         let key_body = self.name("s");
@@ -397,7 +398,7 @@ impl KernelTree {
     fn sequence_protocol(&mut self) -> Block {
         let initial = self.int(0);
         let c = self.name("c");
-        let limit = self.call("size", vec![c]);
+        let limit = self.call(CollectionFunction::Size.kernel_name(), vec![c]);
         let next_body = self.next_index();
         let next = self.function(&["c", "s"], "<object>", next_body);
         let state = self.integer("s");
@@ -408,12 +409,15 @@ impl KernelTree {
         let key = self.function(&["c", "s"], "<object>", key_body);
         let c = self.name("c");
         let state = self.name("s");
-        let element_body = self.call("element", vec![c, state]);
+        let element_body = self.call(CollectionFunction::Element.kernel_name(), vec![c, state]);
         let element = self.function(&["c", "s"], "<object>", element_body);
         let value = self.name("v");
         let c = self.name("c");
         let state = self.name("s");
-        let setter_body = self.call("element-setter", vec![value, c, state]);
+        let setter_body = self.call(
+            CollectionFunction::ElementSetter.kernel_name(),
+            vec![value, c, state],
+        );
         let setter = self.function(&["v", "c", "s"], "<object>", setter_body);
         let result = self.values(vec![initial, limit, next, done, key, element, setter]);
         self.block(Vec::new(), result)

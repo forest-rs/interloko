@@ -775,18 +775,9 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Runtime type membership test: `instance?(value, type)`.
-    InstanceOf {
-        /// Stable-ish AST node identity.
-        id: AstNodeId,
-        /// Tested value.
-        value: Box<Expr>,
-        /// Tested type: a class or limited type.
-        target: TypeExpr,
-        /// Source span.
-        span: Span,
-    },
-    /// Checked cast or conversion: `as(type, value)`.
+    /// The kernel's checked cast or conversion, `as(type, value)`, which
+    /// code the compiler writes uses and no binding or definition of the
+    /// program can shadow. Source `as(…)` is a [`Self::Call`] of `as`.
     Cast {
         /// Stable-ish AST node identity.
         id: AstNodeId,
@@ -797,8 +788,11 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Direct call syntax, also written by element access: `x[i]` is
-    /// `element(x, i)` and `x[i] := v` is `element-setter(v, x, i)`.
+    /// A call of a name, which sem resolves: a local or captured binding,
+    /// then a definition of the program, then the kernel's built-in of the
+    /// name. Element access writes one by a kernel-only name: `x[i]` calls
+    /// the kernel's `element` ([`KERNEL_ELEMENT`]) and `x[i] := v` its
+    /// `element-setter` ([`KERNEL_ELEMENT_SETTER`]).
     Call {
         /// Stable-ish AST node identity.
         id: AstNodeId,
@@ -827,7 +821,9 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Recoverable condition signal.
+    /// The kernel's `signal(condition)`, which code the compiler writes
+    /// uses and no binding or definition of the program can shadow. Source
+    /// `signal(…)` is a [`Self::Call`] of `signal`.
     Signal {
         /// Stable-ish AST node identity.
         id: AstNodeId,
@@ -836,7 +832,9 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
-    /// Object construction through `make(<class>, slot: value)`.
+    /// The kernel's `make(<class>, slot: value)`, which code the compiler
+    /// writes uses and no binding or definition of the program can shadow.
+    /// Source `make(…)` is a [`Self::Call`] of `make`.
     MakeObject {
         /// Stable-ish AST node identity.
         id: AstNodeId,
@@ -1152,7 +1150,6 @@ impl Expr {
     pub fn for_each_child<'e>(&'e self, mut visit: impl FnMut(&'e Self)) {
         match self {
             Self::Assign { value: inner, .. }
-            | Self::InstanceOf { value: inner, .. }
             | Self::Cast { value: inner, .. }
             | Self::Signal {
                 condition: inner, ..
@@ -1307,7 +1304,6 @@ impl Expr {
             | Self::Name { id, .. }
             | Self::ClassName { id, .. }
             | Self::TypeLiteral { id, .. }
-            | Self::InstanceOf { id, .. }
             | Self::Cast { id, .. }
             | Self::Call { id, .. }
             | Self::ValueCall { id, .. }
@@ -1348,7 +1344,6 @@ impl Expr {
             | Self::Name { span, .. }
             | Self::ClassName { span, .. }
             | Self::TypeLiteral { span, .. }
-            | Self::InstanceOf { span, .. }
             | Self::Cast { span, .. }
             | Self::Call { span, .. }
             | Self::ValueCall { span, .. }
@@ -2760,23 +2755,18 @@ impl<'tree> Lowering<'tree> {
                 span: node.span,
             };
         };
-        if text == "make" {
-            return self.lower_make_object(node);
-        }
-        if matches!(text, "signal" | "instance?" | "as") {
-            self.reject_keyword_args(node, text);
-        }
-        if text == "signal" {
-            return self.lower_signal(node);
-        }
-        if text == "instance?" {
-            return self.lower_instance_of(node);
-        }
-        if text == "as" {
-            return self.lower_cast(node);
-        }
-        if text == "limited" {
-            return self.lower_type_literal(node);
+        // `limited(<integer>, min: 0)` writes a type, whose value is a type
+        // object. Every other call, `make`, `as`, `instance?` and `signal`
+        // included, is a call of its name, which sem resolves: the
+        // program's bindings and definitions come before the kernel's.
+        if text == "limited"
+            && let Some(target) = self.type_expr_from_node(node)
+        {
+            return Expr::TypeLiteral {
+                id: self.ast_id(node),
+                target,
+                span: node.span,
+            };
         }
         let (args, keywords) = self.lower_arguments(node);
         Expr::Call {
@@ -2844,162 +2834,10 @@ impl<'tree> Lowering<'tree> {
         };
         Expr::Call {
             id: self.ast_id(node),
-            callee: String::from("element"),
+            callee: String::from(KERNEL_ELEMENT),
             args: vec![self.lower_expr(collection), self.lower_expr(key)],
             keywords: Vec::new(),
             span: node.span,
-        }
-    }
-
-    fn lower_instance_of(&mut self, node: &CstNode) -> Expr {
-        // A type operand that writes no type is a type object the program
-        // computes, such as a `<type-error>`'s expected type, so the test
-        // is an ordinary call that sem resolves to its intrinsic.
-        if let [value, target] = regular_arg_nodes(node).as_slice()
-            && !self.writes_type(target)
-        {
-            let args = vec![self.lower_expr(value), self.lower_expr(target)];
-            return Expr::Call {
-                id: self.ast_id(node),
-                callee: "instance?".into(),
-                args,
-                keywords: Vec::new(),
-                span: node.span,
-            };
-        }
-        let Some((value, target)) =
-            self.lower_typed_args(node, false, DiagnosticCode::AstInvalidInstanceOf)
-        else {
-            return Expr::Error {
-                id: self.ast_id(node),
-                span: node.span,
-            };
-        };
-        Expr::InstanceOf {
-            id: self.ast_id(node),
-            value: Box::new(value),
-            target,
-            span: node.span,
-        }
-    }
-
-    /// Lowers `limited(...)` written as an expression, whose value is the
-    /// type object; a call that writes no type is reported as one.
-    fn lower_type_literal(&mut self, node: &CstNode) -> Expr {
-        match self.type_expr_from_node(node) {
-            Some(target) => Expr::TypeLiteral {
-                id: self.ast_id(node),
-                target,
-                span: node.span,
-            },
-            None => {
-                self.diagnostics.push(Diagnostic::error(
-                    node.span,
-                    DiagnosticCode::AstInvalidTypeLiteral,
-                ));
-                Expr::Error {
-                    id: self.ast_id(node),
-                    span: node.span,
-                }
-            }
-        }
-    }
-
-    /// Reports each keyword argument of `node`, a call of `callee`, which
-    /// takes none.
-    fn reject_keyword_args(&mut self, node: &CstNode, callee: &str) {
-        let keywords = node
-            .child_nodes(CstKind::ArgList)
-            .flat_map(|list| list.child_nodes(CstKind::KeywordArg))
-            .collect::<Vec<_>>();
-        for keyword in keywords {
-            let keyword = self.lower_keyword_arg(keyword);
-            self.diagnostics.push(
-                Diagnostic::error(keyword.span, DiagnosticCode::UnexpectedKeywordArgument)
-                    .with_arg(DiagnosticArg::text("callee", callee.to_string()))
-                    .with_arg(DiagnosticArg::text("keyword", keyword.name)),
-            );
-        }
-    }
-
-    fn lower_cast(&mut self, node: &CstNode) -> Expr {
-        // `as(<string-position>, s, n)` names the position at byte offset
-        // `n` of `s`: a call of the checked text operation behind it.
-        if let [target, string, offset] = regular_arg_nodes(node).as_slice()
-            && matches!(
-                self.type_expr_from_node(target),
-                Some(TypeExpr::Named { ref name, .. }) if name == "<string-position>"
-            )
-        {
-            return Expr::Call {
-                id: self.ast_id(node),
-                callee: String::from(POSITION_FROM_OFFSET),
-                args: vec![self.lower_expr(string), self.lower_expr(offset)],
-                keywords: Vec::new(),
-                span: node.span,
-            };
-        }
-        let Some((value, target)) =
-            self.lower_typed_args(node, true, DiagnosticCode::AstInvalidCast)
-        else {
-            return Expr::Error {
-                id: self.ast_id(node),
-                span: node.span,
-            };
-        };
-        Expr::Cast {
-            id: self.ast_id(node),
-            target,
-            value: Box::new(value),
-            span: node.span,
-        }
-    }
-
-    /// Lowers the two arguments of `as` (`type_first`) or `instance?`: a
-    /// value and a type, reporting `code` when there are not two or the
-    /// type argument writes no type.
-    fn lower_typed_args(
-        &mut self,
-        node: &CstNode,
-        type_first: bool,
-        code: DiagnosticCode,
-    ) -> Option<(Expr, TypeExpr)> {
-        let args = regular_arg_nodes(node);
-        let [first, second] = args.as_slice() else {
-            self.diagnostics.push(
-                Diagnostic::error(node.span, code)
-                    .with_arg(DiagnosticArg::unsigned("expected_count", 2))
-                    .with_arg(DiagnosticArg::unsigned(
-                        "actual_count",
-                        u64::try_from(args.len()).unwrap_or(u64::MAX),
-                    )),
-            );
-            return None;
-        };
-        let (type_node, value_node) = if type_first {
-            (first, second)
-        } else {
-            (second, first)
-        };
-        let target = self.type_expr_from_node(type_node);
-        let value = self.lower_expr(value_node);
-        let Some(target) = target else {
-            self.diagnostics.push(Diagnostic::error(node.span, code));
-            return None;
-        };
-        Some((value, target))
-    }
-
-    /// Whether `node` writes a type where `as` and `instance?` take one,
-    /// rather than an expression computing a type object: a type name, or a
-    /// `limited(...)` call, which [`Self::type_expr_from_node`] reads.
-    fn writes_type(&self, node: &CstNode) -> bool {
-        match node.kind {
-            CstKind::TypeExpr => true,
-            CstKind::CallExpr => self
-                .first_token_text(node, TokenKind::Ident)
-                .is_some_and(|(_, callee)| callee == "limited"),
-            _ => false,
         }
     }
 
@@ -3048,76 +2886,6 @@ impl<'tree> Lowering<'tree> {
                 }))
             }
             _ => None,
-        }
-    }
-
-    fn lower_signal(&mut self, node: &CstNode) -> Expr {
-        let args = self.lower_regular_args(node);
-        if args.len() != 1 {
-            self.diagnostics.push(
-                Diagnostic::error(node.span, DiagnosticCode::AstInvalidSignal)
-                    .with_arg(DiagnosticArg::unsigned("expected_count", 1))
-                    .with_arg(DiagnosticArg::unsigned(
-                        "actual_count",
-                        u64::try_from(args.len()).unwrap_or(u64::MAX),
-                    )),
-            );
-            return Expr::Error {
-                id: self.ast_id(node),
-                span: node.span,
-            };
-        }
-        Expr::Signal {
-            id: self.ast_id(node),
-            condition: Box::new(args.into_iter().next().expect("arity was checked")),
-            span: node.span,
-        }
-    }
-
-    fn lower_regular_args(&mut self, node: &CstNode) -> Vec<Expr> {
-        let mut args = Vec::new();
-        for arg_list in node.child_nodes(CstKind::ArgList) {
-            for child in &arg_list.children {
-                if let CstElement::Node(expr) = child {
-                    if matches!(expr.kind, CstKind::KeywordArg) {
-                        continue;
-                    }
-                    args.push(self.lower_expr(expr));
-                }
-            }
-        }
-        args
-    }
-
-    fn lower_make_object(&mut self, node: &CstNode) -> Expr {
-        let Some(arg_list) = node.child_nodes(CstKind::ArgList).next() else {
-            return Expr::Error {
-                id: self.ast_id(node),
-                span: node.span,
-            };
-        };
-        let class = arg_list
-            .children
-            .iter()
-            .find_map(|child| match child {
-                CstElement::Node(expr) if expr.kind != CstKind::KeywordArg => {
-                    Some(self.lower_expr(expr))
-                }
-                _ => None,
-            })
-            .unwrap_or(Expr::Error {
-                id: self.ast_id(node),
-                span: node.span,
-            });
-        let fields = arg_list
-            .child_nodes(CstKind::KeywordArg)
-            .map(|keyword| self.lower_keyword_arg(keyword))
-            .collect();
-        Expr::MakeObject {
-            id: self.ast_id(node),
-            class: Box::new(class),
-            fields,
-            span: node.span,
         }
     }
 
@@ -3224,7 +2992,7 @@ impl<'tree> Lowering<'tree> {
             keywords,
             ..
         } = &target
-            && callee == "element"
+            && callee == KERNEL_ELEMENT
             && keywords.is_empty()
             && matches!(
                 node.children.first(),
@@ -3235,7 +3003,7 @@ impl<'tree> Lowering<'tree> {
             args.insert(0, value);
             return Expr::Call {
                 id: self.ast_id(node),
-                callee: String::from("element-setter"),
+                callee: String::from(KERNEL_ELEMENT_SETTER),
                 args,
                 keywords: Vec::new(),
                 span: node.span,
@@ -4296,6 +4064,16 @@ fn let_pattern_definition(pattern: &LetPattern) -> DefinitionId {
 }
 
 /// The argument nodes of a call that are not keyword arguments, in order.
+/// The kernel-only name `collection[key]` calls, the kernel's `element`
+/// generic: a `%` cannot appear in a source name, so a program's own
+/// `element` does not take element syntax from it, as Dylan's `[]` always
+/// means the `dylan` module's `element`.
+pub const KERNEL_ELEMENT: &str = "%element";
+
+/// The kernel-only name `collection[key] := value` calls, the kernel's
+/// `element-setter` generic; see [`KERNEL_ELEMENT`].
+pub const KERNEL_ELEMENT_SETTER: &str = "%element-setter";
+
 /// The callee `as(<string-position>, s, n)` calls. It is not a name, so
 /// source cannot call it any other way.
 pub const POSITION_FROM_OFFSET: &str = "as(<string-position>, ...)";
@@ -4970,13 +4748,22 @@ mod tests {
         let Expr::If { arms, .. } = &function.body.result else {
             panic!("an if");
         };
-        let Expr::InstanceOf { target, .. } = &arms[0].test else {
-            panic!("instance?");
+        // `instance?` and `as` are calls of their names, whose type
+        // arguments are type literals.
+        let type_arg = |expr: &Expr, callee: &str, index: usize| match expr {
+            Expr::Call {
+                callee: name, args, ..
+            } if name == callee => match &args[index] {
+                Expr::TypeLiteral { target, .. } => target.clone(),
+                other => panic!("a type literal, not {other:?}"),
+            },
+            other => panic!("a call of {callee}, not {other:?}"),
         };
-        assert_eq!(target.to_string(), written[5]);
-        let Expr::Cast { target, .. } = &arms[0].body.result else {
-            panic!("as");
-        };
+        assert_eq!(
+            type_arg(&arms[0].test, "instance?", 1).to_string(),
+            written[5]
+        );
+        let target = type_arg(&arms[0].body.result, "as", 0);
         assert_eq!(target.to_string(), written[3]);
         let TypeExpr::Limited(limited) = target else {
             panic!("a limited type");
@@ -5207,14 +4994,16 @@ mod tests {
         let Expr::If { arms, .. } = &module.functions[0].body.result else {
             panic!("expected if");
         };
+        // Both are calls of their names, which sem resolves.
         assert!(matches!(
             &arms[0].test,
-            Expr::InstanceOf { target, .. } if target.name() == Some("<circle>")
+            Expr::Call { callee, args, .. } if callee == "instance?"
+                && matches!(&args[1], Expr::ClassName { class_name, .. } if class_name == "<circle>")
         ));
         assert!(matches!(
             &arms[0].body.result,
             Expr::SlotRead { receiver, .. }
-                if matches!(receiver.as_ref(), Expr::Cast { target, .. } if target.name() == Some("<circle>"))
+                if matches!(receiver.as_ref(), Expr::Call { callee, .. } if callee == "as")
         ));
     }
 
@@ -5311,10 +5100,12 @@ mod tests {
         let Expr::Call { args, .. } = &module.functions[0].body.result else {
             panic!("expected area call");
         };
+        // `make` is a call of its name, which sem resolves.
         assert!(matches!(
             &args[0],
-            Expr::MakeObject { class, .. }
-                if matches!(class.as_ref(), Expr::ClassName { class_name, .. } if class_name == "<circle>")
+            Expr::Call { callee, args, keywords, .. } if callee == "make"
+                && matches!(&args[0], Expr::ClassName { class_name, .. } if class_name == "<circle>")
+                && keywords.len() == 2
         ));
     }
 
@@ -5457,11 +5248,11 @@ mod tests {
         ));
         assert!(matches!(
             body.as_ref(),
-            Expr::Signal { condition, .. }
-                if matches!(
-                    condition.as_ref(),
-                    Expr::MakeObject { class, .. }
-                        if matches!(class.as_ref(), Expr::ClassName { class_name, .. } if class_name == "<bad>")
+            Expr::Call { callee, args, .. } if callee == "signal"
+                && matches!(
+                    &args[0],
+                    Expr::Call { callee, args, .. } if callee == "make"
+                        && matches!(&args[0], Expr::ClassName { class_name, .. } if class_name == "<bad>")
                 )
         ));
     }
