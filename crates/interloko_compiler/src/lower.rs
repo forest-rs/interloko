@@ -290,8 +290,8 @@ pub enum ValueKind {
 enum TakesKeywords {
     /// Lowering knows the callee's signature.
     Known(bool),
-    /// The callee's shape, to test at run time.
-    Shape(Value),
+    /// The callee's shape says, tested at run time.
+    Shape,
 }
 
 /// The elements of a [`ValueKind::Array`].
@@ -4207,7 +4207,8 @@ impl<'module> Lowering<'module> {
     /// Lowers the adapter that gives a callable value from untyped code the
     /// typed entry `signature` promises ([`BodyLowering::adapt`]): it boxes
     /// the arguments, calls the value's boxed entry, which its environment
-    /// holds, and checks and unboxes each result to the signature's kind,
+    /// holds with the value's shape, keeps the results the signature
+    /// declares, and checks and unboxes each to the signature's kind,
     /// adapting a typed callable result in turn. A result of another kind
     /// signals `type-error.entry` at `entry:<adapter>:<index>`; a class
     /// result is only checked to be an object, as callers cast it.
@@ -4234,13 +4235,16 @@ impl<'module> Lowering<'module> {
             .enumerate()
             .map(|(index, kind)| body.push_param(&format!("arg{index}"), *kind))
             .collect::<Vec<_>>();
-        let boxed = body.alloc(ValueKind::Entry);
-        body.instructions.push(Instr::CaptureGet {
-            dst: boxed.reg,
-            env: env.reg,
-            index: 0,
-            kind: ValueKind::Entry,
-            span,
+        let [boxed, shape] = [(0, ValueKind::Entry), (1, ValueKind::U64)].map(|(index, kind)| {
+            let part = body.alloc(kind);
+            body.instructions.push(Instr::CaptureGet {
+                dst: part.reg,
+                env: env.reg,
+                index,
+                kind,
+                span,
+            });
+            part
         });
         let wired = params
             .into_iter()
@@ -4251,7 +4255,7 @@ impl<'module> Lowering<'module> {
             .iter()
             .map(|_| body.alloc(BOXED_WIRE))
             .collect::<Vec<_>>();
-        body.call_entry(boxed, &wired, &results, span);
+        body.call_entry_keeping(boxed, &wired, &results, Some(shape), span);
         // A class result need only be an object here: typed callers cast
         // the class results they rely on themselves, at sites typing
         // classifies.
@@ -4366,13 +4370,13 @@ impl<'module> Lowering<'module> {
         ]);
         let mut args = wired.clone();
         args.extend([names, values]);
-        body.call_entry(keyword_entry, &args, &results, span);
+        body.call_entry_keeping(keyword_entry, &args, &results, Some(shape), span);
         body.instructions.extend([
             Instr::Jump { label: join, span },
             Instr::Label { label: without },
         ]);
         body.parse_keywords(names, values, &[], span)?;
-        body.call_entry(boxed, &wired, &results, span);
+        body.call_entry_keeping(boxed, &wired, &results, Some(shape), span);
         body.instructions.extend([
             Instr::Jump { label: join, span },
             Instr::Label { label: join },
@@ -5220,16 +5224,17 @@ impl<'module> BodyLowering<'module> {
     /// typed entry's place, with a keyword tail when it takes keywords
     /// ([`KEYWORD_SHAPE`]), and otherwise through `boxed_entry`.
     ///
-    /// `takes` is what lowering knows of the value, or its shape to test.
-    /// A value that takes no keywords is called through its boxed entry,
-    /// after signalling `<unknown-keyword-error>` for the first keyword the
-    /// call passes (one not marked keyword-absent, as only a typed call
-    /// passes those), if any.
+    /// `takes` is what lowering knows of the value, or that its shape is
+    /// to be tested. A value that takes no keywords is called through its
+    /// boxed entry, after signalling `<unknown-keyword-error>` for the
+    /// first keyword the call passes (one not marked keyword-absent, as
+    /// only a typed call passes those), if any. Either entry's results are
+    /// kept as [`Self::call_entry_keeping`] keeps them.
     #[allow(clippy::too_many_arguments)]
     fn call_boxed(
         &mut self,
-        boxed_entry: Value,
-        keyword_entry: Value,
+        [boxed_entry, keyword_entry]: [Value; 2],
+        shape: Option<Value>,
         takes: TakesKeywords,
         wired: &[Value],
         keywords: &[String],
@@ -5237,10 +5242,10 @@ impl<'module> BodyLowering<'module> {
         results: &[Value],
         span: Span,
     ) -> Result<(), LowerError> {
-        let shape = match takes {
+        match takes {
             TakesKeywords::Known(true) => {
                 return self.call_with_tail(
-                    keyword_entry,
+                    (keyword_entry, shape),
                     wired,
                     keywords,
                     keyword_values,
@@ -5250,7 +5255,7 @@ impl<'module> BodyLowering<'module> {
             }
             TakesKeywords::Known(false) => {
                 return self.call_without_tail(
-                    boxed_entry,
+                    (boxed_entry, shape),
                     wired,
                     keywords,
                     keyword_values,
@@ -5258,7 +5263,10 @@ impl<'module> BodyLowering<'module> {
                     span,
                 );
             }
-            TakesKeywords::Shape(shape) => shape,
+            TakesKeywords::Shape => {}
+        }
+        let Some(shape) = shape else {
+            return Err(invalid_semantic("a keyword test needs the callee's shape"));
         };
         let (bit, flag, zero, none) = (
             self.alloc(ValueKind::U64),
@@ -5299,7 +5307,7 @@ impl<'module> BodyLowering<'module> {
             Instr::Label { label: with },
         ]);
         self.call_with_tail(
-            keyword_entry,
+            (keyword_entry, Some(shape)),
             wired,
             keywords,
             keyword_values,
@@ -5310,7 +5318,14 @@ impl<'module> BodyLowering<'module> {
             Instr::Jump { label: join, span },
             Instr::Label { label: without },
         ]);
-        self.call_without_tail(boxed_entry, wired, keywords, keyword_values, results, span)?;
+        self.call_without_tail(
+            (boxed_entry, Some(shape)),
+            wired,
+            keywords,
+            keyword_values,
+            results,
+            span,
+        )?;
         self.instructions.extend([
             Instr::Jump { label: join, span },
             Instr::Label { label: join },
@@ -5318,10 +5333,11 @@ impl<'module> BodyLowering<'module> {
         Ok(())
     }
 
-    /// Calls a boxed entry that takes a keyword tail.
+    /// Calls the keyword entry of a value of shape `shape`, which takes a
+    /// keyword tail.
     fn call_with_tail(
         &mut self,
-        entry: Value,
+        (entry, shape): (Value, Option<Value>),
         wired: &[Value],
         keywords: &[String],
         keyword_values: &[Value],
@@ -5331,15 +5347,16 @@ impl<'module> BodyLowering<'module> {
         let (names, values) = self.keyword_tail(keywords, keyword_values, span);
         let mut args = wired.to_vec();
         args.extend([names, values]);
-        self.call_entry(entry, &args, results, span);
+        self.call_entry_keeping(entry, &args, results, shape, span);
         Ok(())
     }
 
-    /// Calls a boxed entry that takes no keyword tail, after signalling for
-    /// the first keyword the call passes, if any.
+    /// Calls the boxed entry of a value of shape `shape`, which takes no
+    /// keyword tail, after signalling for the first keyword the call
+    /// passes, if any.
     fn call_without_tail(
         &mut self,
-        entry: Value,
+        (entry, shape): (Value, Option<Value>),
         wired: &[Value],
         keywords: &[String],
         keyword_values: &[Value],
@@ -5379,7 +5396,7 @@ impl<'module> BodyLowering<'module> {
                 Instr::Label { label: next },
             ]);
         }
-        self.call_entry(entry, wired, results, span);
+        self.call_entry_keeping(entry, wired, results, shape, span);
         self.instructions.extend([
             Instr::Jump { label: done, span },
             Instr::Label { label: done },
@@ -5397,6 +5414,116 @@ impl<'module> BodyLowering<'module> {
             rets: results.iter().map(|result| result.kind).collect(),
             span,
         });
+    }
+
+    /// The result counts above `wanted` that a callable value of this
+    /// program returns, in increasing order: those a call keeping `wanted`
+    /// results tests for ([`Self::call_entry_keeping`]).
+    fn larger_result_counts(&self, wanted: usize) -> Vec<usize> {
+        let mut larger = self
+            .ids
+            .call_sigs
+            .iter()
+            .map(|signature| signature.rets.len())
+            .filter(|count| *count > wanted)
+            .collect::<Vec<_>>();
+        larger.sort_unstable();
+        larger.dedup();
+        larger
+    }
+
+    /// Calls the boxed or keyword entry `entry` of a callable value whose
+    /// shape is `shape`, into `results`, keeping the first `results.len()`
+    /// of however many results it returns, as Dylan does.
+    ///
+    /// The tape requires a call to expect exactly the results its callee
+    /// returns, and the boxed ABI returns as many as the value declares, so
+    /// a call wanting fewer tests the count the shape records
+    /// ([`RESULTS_SHAPE`]) against each larger count a callable value of
+    /// this program returns, and calls with that one. A value returning a
+    /// count no value of this program does, one from code installed later,
+    /// is called expecting `results.len()`, which the tape checks.
+    ///
+    /// `shape` is needed only when [`Self::larger_result_counts`] has any
+    /// for `results.len()`; without it the call expects `results.len()`.
+    fn call_entry_keeping(
+        &mut self,
+        entry: Value,
+        args: &[Value],
+        results: &[Value],
+        shape: Option<Value>,
+        span: Span,
+    ) {
+        let larger = self.larger_result_counts(results.len());
+        let Some(shape) = shape.filter(|_| !larger.is_empty()) else {
+            self.call_entry(entry, args, results, span);
+            return;
+        };
+        let (mask, count) = (self.alloc(ValueKind::U64), self.alloc(ValueKind::U64));
+        let join = self.alloc_label();
+        self.instructions.extend([
+            Instr::ConstU64 {
+                dst: mask.reg,
+                value: RESULTS_SHAPE,
+                span,
+            },
+            Instr::AndU64 {
+                dst: count.reg,
+                lhs: shape.reg,
+                rhs: mask.reg,
+                span,
+            },
+        ]);
+        for returned in larger {
+            let Ok(encoded) = u64::try_from(returned) else {
+                continue;
+            };
+            if encoded > RESULTS_SHAPE_MAX {
+                continue;
+            }
+            let (expected, same) = (self.alloc(ValueKind::U64), self.alloc(ValueKind::Bool));
+            let (call, next) = (self.alloc_label(), self.alloc_label());
+            self.instructions.extend([
+                Instr::ConstU64 {
+                    dst: expected.reg,
+                    value: encoded << RESULTS_SHAPE_SHIFT,
+                    span,
+                },
+                Instr::EqU64 {
+                    dst: same.reg,
+                    lhs: count.reg,
+                    rhs: expected.reg,
+                    span,
+                },
+                Instr::Branch {
+                    cond: same.reg,
+                    then_label: call,
+                    else_label: next,
+                    span,
+                },
+                Instr::Label { label: call },
+            ]);
+            let all = (0..returned)
+                .map(|_| self.alloc(BOXED_WIRE))
+                .collect::<Vec<_>>();
+            self.call_entry(entry, args, &all, span);
+            for (result, value) in results.iter().zip(&all) {
+                self.instructions.push(Instr::Move {
+                    dst: result.reg,
+                    src: value.reg,
+                    span,
+                });
+            }
+            self.instructions.extend([
+                Instr::Jump { label: join, span },
+                Instr::Label { label: next },
+            ]);
+        }
+        self.call_entry(entry, args, results, span);
+        self.instructions.extend([
+            Instr::Jump { label: join, span },
+            Instr::Label { label: join },
+        ]);
     }
 
     /// Reads a boxed call's keyword tail into one boxed value per keyword
@@ -9111,18 +9238,20 @@ impl<'module> BodyLowering<'module> {
             .call_sigs
             .get(sig.0 as usize)
             .is_some_and(|signature| !signature.keywords.is_empty());
-        let [typed, Some(boxed), shape] =
-            self.open_callable(value.reg, [keywords, true, keywords], span)
+        let [typed, Some(boxed), Some(shape)] =
+            self.open_callable(value.reg, [keywords, true, true], span)
         else {
             return Err(invalid_semantic(
                 "opening a callable dropped its boxed entry",
             ));
         };
-        // An adapter for a signature with keywords also passes them on to
-        // the value's keyword entry, when its shape says it has one.
-        let captures = match (typed, shape) {
-            (Some(typed), Some(shape)) => vec![boxed.reg, typed.reg, shape.reg],
-            _ => vec![boxed.reg],
+        // An adapter keeps the results its signature declares of those the
+        // value returns, which its shape counts. One for a signature with
+        // keywords also passes them on to the value's keyword entry, when
+        // its shape says it has one.
+        let captures = match typed {
+            Some(typed) => vec![boxed.reg, typed.reg, shape.reg],
+            None => vec![boxed.reg, shape.reg],
         };
         self.emit_callable_new(adapter, BoxedEntry::Shared(boxed.reg), sig, &captures, span)
     }
@@ -9498,7 +9627,9 @@ impl<'module> BodyLowering<'module> {
         }
         // A call passing no keywords takes the plain boxed callable ABI,
         // whatever the value takes.
-        let [_, Some(boxed_entry), _] = self.open_callable(callee.reg, [false, true, false], span)
+        let keeping = !self.larger_result_counts(kinds.len()).is_empty();
+        let [_, Some(boxed_entry), shape] =
+            self.open_callable(callee.reg, [false, true, keeping], span)
         else {
             return Err(invalid_semantic(
                 "opening a callable dropped its boxed entry",
@@ -9512,7 +9643,7 @@ impl<'module> BodyLowering<'module> {
             .iter()
             .map(|_| self.alloc(BOXED_WIRE))
             .collect::<Vec<_>>();
-        self.call_entry(boxed_entry, &wired, &boxed_results, span);
+        self.call_entry_keeping(boxed_entry, &wired, &boxed_results, shape, span);
         self.move_unboxed_results(&results, boxed_results, span)?;
         self.instructions.extend([
             Instr::Jump { label: join, span },
@@ -9545,14 +9676,15 @@ impl<'module> BodyLowering<'module> {
                 .map(|signature| !signature.keywords.is_empty()),
             _ => None,
         };
+        let keeping = !self.larger_result_counts(kinds.len()).is_empty();
         let [Some(keyword_entry), Some(boxed_entry), shape] =
-            self.open_callable(callee.reg, [true, true, known.is_none()], span)
+            self.open_callable(callee.reg, [true, true, known.is_none() || keeping], span)
         else {
             return Err(invalid_semantic("opening a callable dropped a part"));
         };
         let takes = match (known, shape) {
             (Some(takes), _) => TakesKeywords::Known(takes),
-            (None, Some(shape)) => TakesKeywords::Shape(shape),
+            (None, Some(_)) => TakesKeywords::Shape,
             (None, None) => return Err(invalid_semantic("opening a callable dropped its shape")),
         };
         let mut wired = Vec::with_capacity(args.len());
@@ -9568,8 +9700,8 @@ impl<'module> BodyLowering<'module> {
             .map(|_| self.alloc(BOXED_WIRE))
             .collect::<Vec<_>>();
         self.call_boxed(
-            boxed_entry,
-            keyword_entry,
+            [boxed_entry, keyword_entry],
+            shape,
             takes,
             &wired,
             keywords,
@@ -13420,7 +13552,9 @@ fn callable_shape(
     let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
     });
-    (hash & !KEYWORD_SHAPE) | keyword_bit
+    let results =
+        u64::try_from(rets.len()).map_or(RESULTS_SHAPE_MAX, |count| count.min(RESULTS_SHAPE_MAX));
+    (hash & !(KEYWORD_SHAPE | RESULTS_SHAPE)) | keyword_bit | (results << RESULTS_SHAPE_SHIFT)
 }
 
 /// The bit of a [`callable_shape`] set exactly when the value takes
@@ -13431,6 +13565,24 @@ fn callable_shape(
 /// passing keywords tests the bit, so a call passing none, and every value
 /// that takes none, keeps the plain boxed callable ABI.
 const KEYWORD_SHAPE: u64 = 1 << 63;
+
+/// Where a [`callable_shape`] holds how many results the value's entries
+/// return, up to [`RESULTS_SHAPE_MAX`]: in the bits of [`RESULTS_SHAPE`].
+///
+/// The boxed callable ABI returns as many boxed results as the value
+/// declares, and the tape checks that a call expects exactly as many. A
+/// call through an untyped value that wants fewer, keeping the first or
+/// discarding them all as a `=> ()` body's last call does, tests these
+/// bits to call with the count the value returns
+/// ([`BodyLowering::call_entry_keeping`]).
+const RESULTS_SHAPE_SHIFT: u32 = 55;
+
+/// The largest result count a [`callable_shape`] records exactly.
+const RESULTS_SHAPE_MAX: u64 = 0xFF;
+
+/// The bits of a [`callable_shape`] holding its result count; see
+/// [`RESULTS_SHAPE_SHIFT`].
+const RESULTS_SHAPE: u64 = RESULTS_SHAPE_MAX << RESULTS_SHAPE_SHIFT;
 
 /// Writes `kind`'s part of a [`callable_shape`]: its register type, and a
 /// typed callable's signature when `full`.

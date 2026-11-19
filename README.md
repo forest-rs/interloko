@@ -244,7 +244,13 @@ The current slices include:
   value of a class it can never be an instance of is still an error. Where
   one value is expected, a call returning several keeps the first (an
   argument, a `let` without a values pattern, a `select` arm); one
-  returning none is an error;
+  returning none is an error. A call through an untyped `<callable>` keeps
+  the values it wants of those the value returns in the same way, none at
+  the end of a `=> ()` body: the value's shape records how many it returns,
+  and the call tests that count against each larger one a callable of the
+  program returns (a value from code installed later that returns a count
+  the program never saw is called as the call site expects, which the tape
+  checks);
 - immutable top-level constants named in the Dylan style, such as
   `define constant $answer :: <integer> = 42;`. The initializer may be any
   expression, including a `begin … end` body with its own `let`s, loops and
