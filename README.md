@@ -114,7 +114,10 @@ The current slices include:
   error. An `instance?` test narrows its arm, and each later `elseif`,
   `else` or `case` arm sees what the earlier tests ruled out. Arms of
   different classes join at their least common superclass (a `<call>` arm
-  and a `<var>` arm at `<node>`), as the type lattice bounds their union;
+  and a `<var>` arm at `<node>`), as the type lattice bounds their union.
+  Where its values are discarded, as in a statement or at the end of a
+  body declared `=> ()`, a conditional's arms, or a `handle`'s body and
+  restart, run for their effects and need not agree;
 - bodies of `let`s and `expression;` statements, where, as in Dylan, `;`
   separates expressions, so a body's last expression is its value with or
   without one;

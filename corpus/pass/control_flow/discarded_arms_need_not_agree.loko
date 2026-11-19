@@ -1,0 +1,70 @@
+// expect: run 12345
+// expect: diagnostics 0
+
+// As in Dylan, a statement's values are discarded, and so are those of the
+// last expression of a body declared `=> ()`. A conditional or a handle
+// there runs its arms for their effects, so its arms need not produce the
+// same values: here one arm assigns a position or a string and the other
+// runs a loop, which produces none. Each arm is lowered as a statement
+// is, so a block's exit in one still takes a value, and a `signal` in a
+// handle's body is still typed by the restart's values. Where a
+// conditional's value is used, its arms must still join.
+
+define class <oops> (<error>)
+end;
+
+define class <log> (<object>)
+  slot trail :: <integer>, init-value: 0;
+end;
+
+define function note(log :: <log>, digit :: <integer>) => <integer>
+  log.trail := log.trail * 10 + digit
+end;
+
+define function skip-word(text :: <string>, start :: <string-position>) => <string-position>
+  let pos = start;
+  if (pos = end-position(text))
+    pos := start
+  else
+    while (pos < end-position(text) & text[pos] > ' ') pos := next-position(text, pos) end
+  end;
+  pos
+end;
+
+define function record(log :: <log>, kind :: <symbol>) => ()
+  select (kind)
+    #one => note(log, 1);
+    #two => "two";
+    otherwise => while (#f) note(log, 0) end;
+  end
+end;
+
+define function main() => <integer>
+  let log = make(<log>);
+  record(log, #one);
+  record(log, #two);
+  case
+    log.trail = 1 => note(log, 2);
+    otherwise => "unreachable";
+  end;
+  handle
+    if (log.trail = 12) signal(make(<oops>)) else note(log, 9) end
+  with restart <oops>
+    begin note(log, 3); "handled" end
+  end;
+  if (skip-word("ab cd", start-position("ab cd")) = position-at("ab cd", 2)) note(log, 4) else #f end;
+  if (log.trail = 1234)
+    block (done) note(log, 5); done(0); note(log, 0) end
+  else
+    "not reached"
+  end;
+  handle
+    begin
+      let digit = signal(make(<oops>));
+      note(log, digit)
+    end
+  with restart <oops>
+    6
+  end;
+  log.trail
+end;
