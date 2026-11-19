@@ -2366,6 +2366,9 @@ impl Host for InterlokoHost {
         }
         !crate::control::is_control_symbol(symbol)
     }
+    fn object_key(&self, object: Obj) -> Option<u64> {
+        Self::object_key(self, object)
+    }
     fn call(
         &mut self,
         symbol: &str,
@@ -3100,7 +3103,10 @@ impl Host for InterlokoHost {
                     return Err(HostError::Failed);
                 };
                 let class = runtime_class_id(*class_raw)?;
-                rets[0] = Value::Bool(self.value_is_instance(*value, class));
+                // A stale or invalid handle fails, as `obj.key` traps on it,
+                // rather than answering no.
+                let actual = self.class_of_any(*value)?;
+                rets[0] = Value::Bool(self.layout.is_same_or_subclass(actual, class));
                 Ok(0)
             }
             CAST_OBJECT => {
@@ -3144,7 +3150,41 @@ impl Host for InterlokoHost {
     }
 }
 
+/// Set in the key of a boxed `<object>` value that holds no runtime object,
+/// such as a boxed `<integer>`, above its class id.
+///
+/// [`InterlokoHost::object_key`] keys an object by its class, so guests test
+/// classes with `obj.key`; the bit also tells a boxed scalar from a boxed
+/// object without a host call.
+pub const SCALAR_KEY_BIT: u64 = 1 << 63;
+
 impl InterlokoHost {
+    /// The key `obj.key` reads for `object`: its class id, with
+    /// [`SCALAR_KEY_BIT`] set for a boxed value that holds no runtime
+    /// object. `None` for a stale or invalid handle, which traps: a handle
+    /// kept past its turn is a bug, and class reads and `instance?` tests
+    /// fail on one rather than answer for an object that is gone.
+    ///
+    /// An object's class never changes, so neither does its key.
+    #[must_use]
+    pub fn object_key(&self, object: Obj) -> Option<u64> {
+        match object.host_type {
+            INTERLOKO_OBJECT_TYPE => Some(u64::from(self.object(object).ok()?.class.0)),
+            INTERLOKO_VALUE_TYPE => match self.unbox(object).ok()? {
+                Unboxed::Value(Value::Obj(boxed)) if boxed.host_type == INTERLOKO_OBJECT_TYPE => {
+                    Some(u64::from(self.object(boxed).ok()?.class.0))
+                }
+                // Scalars, characters and string positions: whatever class
+                // a send selects them by, marked as no runtime object.
+                _ => {
+                    let class = self.class_of_any(ValueRef::Obj(object)).ok()?;
+                    Some(u64::from(class.0) | SCALAR_KEY_BIT)
+                }
+            },
+            _ => None,
+        }
+    }
+
     fn builtin_class(&self, kind: BuiltinValueClass) -> Result<ClassId, HostError> {
         self.layout.class_id(kind.name()).ok_or(HostError::Failed)
     }

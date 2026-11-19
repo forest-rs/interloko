@@ -7291,6 +7291,9 @@ impl Host for SharedFunctionCallHost<'_> {
     fn is_synchronous(&self, symbol: &str, sig_hash: SigHash) -> bool {
         self.0.borrow().is_synchronous(symbol, sig_hash)
     }
+    fn object_key(&self, object: execution_tape::value::Obj) -> Option<u64> {
+        self.0.borrow().object_key(object)
+    }
 }
 
 struct FunctionCallHost<'a> {
@@ -7368,6 +7371,9 @@ impl Host for FunctionCallHost<'_> {
     /// Host functions run inline, and the runtime's imports as it says.
     fn is_synchronous(&self, symbol: &str, sig_hash: SigHash) -> bool {
         self.runtime.is_synchronous(symbol, sig_hash)
+    }
+    fn object_key(&self, object: execution_tape::value::Obj) -> Option<u64> {
+        self.runtime.object_key(object)
     }
     fn call(
         &mut self,
@@ -26916,6 +26922,9 @@ end;
         }
         fn is_synchronous(&self, symbol: &str, _: SigHash) -> bool {
             !interloko_runtime::control::is_control_symbol(symbol)
+        }
+        fn object_key(&self, object: execution_tape::value::Obj) -> Option<u64> {
+            self.0.object_key(object)
         }
     }
 

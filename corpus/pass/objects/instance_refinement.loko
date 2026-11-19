@@ -5,7 +5,7 @@
 // expect: dump sem contains local l0 as object(c1)
 // expect: dump lowered contains instance?
 // expect: dump lowered contains as <circle>
-// expect: dump tape contains interloko.instance_of
+// expect: dump tape contains obj.key
 // expect: dump tape contains interloko.cast_object
 
 define class <circle> (<object>)

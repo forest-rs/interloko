@@ -27,6 +27,10 @@
 //!   answers after the first send) and calls it indirectly; proved calls the
 //!   method through a relinkable tape link. Its baseline makes the same
 //!   object and passes it to a function.
+//! - `untyped send`: `describe(x)` on an `<object>` parameter holding a
+//!   `<circle>`, sent to a generic whose method takes the object, so the
+//!   send unboxes the receiver first. Its baseline passes the same boxed
+//!   value to a function that does not send.
 //!
 //! - `exact float`: `as(<integer>, f)` on an integral `<double-float>`.
 //!   Typing cannot prove a float integral, so both policies test it; the
@@ -260,6 +264,32 @@ end;
 
 define function leaf-sent(d :: <integer>) => <integer>
   if (d = 0) send-leaf(make(<circle>, radius: 1)) else leaf-sent(d - 1) + leaf-sent(d - 1) end
+end;
+
+define generic describe(x) => <integer>;
+
+define method describe(c :: <circle>) => <integer>
+  1
+end;
+
+define function send-untyped(x :: <object>) => <integer>
+  describe(x)
+end;
+
+define function describe-direct(x :: <object>) => <integer>
+  1
+end;
+
+define function take-object(x :: <object>) => <integer>
+  describe-direct(x)
+end;
+
+define function untyped-sent(d :: <integer>) => <integer>
+  if (d = 0) send-untyped(make(<circle>, radius: 1)) else untyped-sent(d - 1) + untyped-sent(d - 1) end
+end;
+
+define function untyped-called(d :: <integer>) => <integer>
+  if (d = 0) take-object(make(<circle>, radius: 1)) else untyped-called(d - 1) + untyped-called(d - 1) end
 end;
 
 define function leaf-called(d :: <integer>) => <integer>
@@ -547,6 +577,7 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("generic send", net("sent", "called")),
         ("shape send", net("shape-sent", "shape-called")),
         ("leaf send", net("leaf-sent", "leaf-called")),
+        ("untyped send", net("untyped-sent", "untyped-called")),
         ("typecase cast", net("cast-past", "test-only")),
         ("untyped call", net("untyped", "inc-called")),
         ("typed callable", net("typed-callable", "inc-called")),
