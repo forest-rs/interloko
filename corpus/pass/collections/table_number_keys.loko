@@ -1,0 +1,17 @@
+// expect: run 1111
+// expect: diagnostics 0
+
+// Numbers are table keys by `==`: integers by value whatever limited type
+// held them, floats by class and bit pattern, so a NaN finds itself and
+// `-0.0` is not `0.0`.
+
+define function main() => <integer>
+  let t = make(<table>);
+  t[7] := 1;
+  t[0.0 / 0.0] := 10;
+  t[0.0] := 100;
+  t[-0.0] := 1000;
+  as(<integer>, t[7i32]) + as(<integer>, t[0.0 / 0.0])
+    + as(<integer>, t[0.0]) + as(<integer>, t[-0.0])
+    + as(<integer>, element(t, 7.0, default: 0))
+end;

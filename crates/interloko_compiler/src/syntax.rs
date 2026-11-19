@@ -1043,7 +1043,8 @@ pub(crate) const fn is_name_start(byte: u8) -> bool {
 ///
 /// Mirrors the base grammar's `[A-Za-z0-9_?!-]`. As in Dylan, a hyphen is
 /// always a name character: `x-1`, `a-b`, and `x-` are single names, so
-/// subtraction is written with spaces, `x - 1`.
+/// subtraction is written with spaces, `x - 1`. A name may end in `?`, as a
+/// predicate's does, or `!`, as a destructive operation's does (`add!`).
 pub(crate) const fn is_name_continue(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'?' | b'!' | b'-')
 }

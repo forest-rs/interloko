@@ -167,11 +167,20 @@ pub struct TypeErrorSite {
     /// - `check:<definition>@<start>..<end>`, a check typing does not
     ///   classify, by the definition whose code makes it and its span;
     /// - `check@<start>..<end>`, the same in generated code no definition
-    ///   owns.
+    ///   owns;
+    /// - `kernel:<method>`, a check a kernel method makes, such as
+    ///   `kernel:element(<vector>)` for an index outside a vector, the same
+    ///   whether the method runs inline or is called.
     pub site: String,
     /// Source byte range of the checked expression, empty when the check
     /// has no source of its own.
     pub span: Range<usize>,
+    /// Whether the expected type is the indices of a collection, known only
+    /// at run time. The check then passes two values, an index and the
+    /// collection's size `n`: the condition's value is the index, and its
+    /// expected type `limited(<integer>, min: 0, max: n - 1)`, in place of
+    /// [`Self::expected`].
+    pub indices: bool,
 }
 
 /// Control metadata of one emitted program.

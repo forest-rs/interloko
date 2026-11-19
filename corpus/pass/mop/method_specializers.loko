@@ -1,6 +1,6 @@
 // expect: run 2
 // expect: dump lowered contains runtime.method-specializers
-// expect: dump lowered contains runtime.vector-ref
+// expect: dump lowered contains runtime.vector-element
 
 define class <shape> (<object>)
   slot size :: <integer>, init-value: 1;
@@ -25,9 +25,9 @@ define method collide(a :: <circle>, b :: <square>) => <integer>
 end;
 
 define function main() => <integer>
-  let m = vector-ref(generic-function-methods(collide), 1);
+  let m = generic-function-methods(collide)[1];
   let specs = method-specializers(m);
-  if (class-name(vector-ref(specs, 0)) = "<circle>") if (class-name(vector-ref(specs, 1)) = "<square>") vector-size(specs)
+  if (class-name(specs[0]) = "<circle>") if (class-name(specs[1]) = "<square>") size(specs)
        else 0
        end
   else 0

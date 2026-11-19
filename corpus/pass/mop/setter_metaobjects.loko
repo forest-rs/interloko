@@ -7,7 +7,7 @@ define class <circle> (<object>)
 end;
 
 define function main() => <integer>
-  if (generic-function-name(radius-setter) = "radius-setter") vector-size(generic-function-methods(radius-setter))
+  if (generic-function-name(radius-setter) = "radius-setter") size(generic-function-methods(radius-setter))
   else 0
   end
 end;

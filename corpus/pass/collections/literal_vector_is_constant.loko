@@ -1,0 +1,13 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports unhandled condition <immutable-collection-error>
+// expect: diagnostics 0
+
+// A vector literal is constant, as Dylan's literals are: storing into one
+// signals an `<immutable-collection-error>`. A vector `make` makes is
+// mutable.
+
+define function main() => <integer>
+  let v = #[1, 2];
+  v[0] := 3;
+  0
+end;

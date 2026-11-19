@@ -1,0 +1,12 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports unhandled condition <not-found-error>
+// expect: diagnostics 0
+
+// `t[k]` for a key the table lacks, with no `default:`, signals a
+// `<not-found-error>`, an `<error>` holding the table and the key.
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["a"] := 1;
+  as(<integer>, t["b"])
+end;

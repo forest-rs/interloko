@@ -134,14 +134,33 @@ impl InterlokoHost {
         };
         let mut stats = self.turn_stats_for(&turn, &[]);
         for store in turn.write_log.into_iter().rev() {
-            if let Some(RuntimeObjectStorage::Native { slots }) = self
+            let Some(storage) = self
                 .image
                 .objects
-                .get_mut(store.index)
+                .get_mut(store.index())
                 .map(|object| &mut object.storage)
-                && let Some(slot) = slots.get_mut(store.slot)
-            {
-                *slot = store.old;
+            else {
+                continue;
+            };
+            match (store, storage) {
+                (
+                    LoggedStore::Slot { slot, old, .. },
+                    RuntimeObjectStorage::Native { slots: values }
+                    | RuntimeObjectStorage::Vector {
+                        elements: values, ..
+                    },
+                ) => {
+                    if let Some(value) = values.get_mut(slot) {
+                        *value = old;
+                    }
+                }
+                (LoggedStore::Grew { len, .. }, RuntimeObjectStorage::Vector { elements, .. }) => {
+                    elements.truncate(len);
+                }
+                (LoggedStore::Table { undo, .. }, RuntimeObjectStorage::Table(table)) => {
+                    table.undo(undo);
+                }
+                _ => {}
             }
         }
         self.roots.truncate(turn.roots);
@@ -223,15 +242,6 @@ impl InterlokoHost {
             interned: self.image.stats_from(turn.image.objects),
             image: self.image.stats(),
             logged_stores: turn.write_log.len(),
-        }
-    }
-
-    /// Records that a turn is about to overwrite `slot` of the image object
-    /// at `index`, which currently holds `old`. Outside a turn, image stores
-    /// are not logged.
-    pub(crate) fn log_image_store(&mut self, index: usize, slot: usize, old: Value) {
-        if let Some(turn) = &mut self.turn {
-            turn.write_log.push(LoggedStore { index, slot, old });
         }
     }
 }

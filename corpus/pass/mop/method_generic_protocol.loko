@@ -12,6 +12,6 @@ define method area(c :: <circle>) => <integer>
 end;
 
 define function main() => <integer>
-  let chosen = vector-ref(generic-function-methods(area), 0);
+  let chosen = generic-function-methods(area)[0];
   if (generic-function-name(method-generic-function(chosen)) = "area") 1 else 0 end
 end;

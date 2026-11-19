@@ -13,9 +13,18 @@ use crate::promotion;
 use crate::syntax::{self, Span};
 
 mod collection;
-pub use collection::{BUILTIN_METHODS, BuiltinMethod, CollectionFunction};
+pub use collection::{BUILTIN_METHODS, BuiltinMethod, CollectionFunction, MethodKey};
 mod text;
 pub use text::{NAMED_TEXT_FUNCTIONS, TextClasses, text_function_name, text_functions_for_name};
+
+/// The built-in collections, by how their operations work.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum CollectionKind {
+    /// A `<vector>` or `<stretchy-vector>`, keyed by `<integer>` index.
+    Vector,
+    /// A `<table>`, keyed by any object.
+    Table,
+}
 
 use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
 use interloko_model::sealing::Sealing;
@@ -302,8 +311,8 @@ fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
         "generic-function-methods" => Intrinsic::GenericFunctionMethods,
         "method-generic-function" => Intrinsic::MethodGenericFunction,
         "method-specializers" => Intrinsic::MethodSpecializers,
-        "vector-size" => Intrinsic::VectorSize,
-        "vector-ref" => Intrinsic::VectorRef,
+        "key-exists?" => Intrinsic::TableKeyExists,
+        "remove-key!" => Intrinsic::TableRemoveKey,
         "float-to-string" => Intrinsic::FloatToString,
         "integer-to-string" => Intrinsic::IntegerToString,
         "concatenate" => Intrinsic::Concatenate,
@@ -335,14 +344,25 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         | Intrinsic::GenericFunctionMethods
         | Intrinsic::MethodGenericFunction
         | Intrinsic::MethodSpecializers
-        | Intrinsic::VectorSize
+        | Intrinsic::CollectionSize
         | Intrinsic::LimitedIntegerBase
         | Intrinsic::LimitedIntegerMin
         | Intrinsic::LimitedIntegerMax
         | Intrinsic::SubclassTypeClass
         | Intrinsic::TypeName => 1,
-        Intrinsic::VectorRef | Intrinsic::Concatenate | Intrinsic::InstanceOfType => 2,
-        Intrinsic::VectorElementOr => 3,
+        Intrinsic::VectorElement
+        | Intrinsic::StretchyAdd
+        | Intrinsic::TableElement
+        | Intrinsic::TableKeyExists
+        | Intrinsic::TableRemoveKey
+        | Intrinsic::Concatenate
+        | Intrinsic::InstanceOfType => 2,
+        Intrinsic::VectorElementOr
+        | Intrinsic::VectorElementSetter
+        | Intrinsic::TableElementOr
+        | Intrinsic::TableElementSetter => 3,
+        Intrinsic::MakeVector | Intrinsic::MakeStretchyVector => 2,
+        Intrinsic::MakeTable => 0,
         Intrinsic::Text(function) => function.params().len(),
         Intrinsic::CharCompare(_) | Intrinsic::PositionCompare(_) => 2,
         Intrinsic::CharToInteger | Intrinsic::PositionToInteger => 1,
@@ -373,10 +393,21 @@ fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
             "<generic-function>"
         }
         (Intrinsic::MethodGenericFunction | Intrinsic::MethodSpecializers, 0) => "<method>",
-        (Intrinsic::VectorSize | Intrinsic::VectorRef | Intrinsic::VectorElementOr, 0) => {
-            "<vector>"
-        }
-        (Intrinsic::VectorRef | Intrinsic::VectorElementOr, 1)
+        (Intrinsic::CollectionSize, 0) => "<vector> or <table>",
+        (Intrinsic::VectorElement | Intrinsic::VectorElementOr, 0)
+        | (Intrinsic::VectorElementSetter, 1) => "<vector>",
+        (Intrinsic::StretchyAdd, 0) => "<stretchy-vector>",
+        (
+            Intrinsic::TableElement
+            | Intrinsic::TableElementOr
+            | Intrinsic::TableKeyExists
+            | Intrinsic::TableRemoveKey,
+            0,
+        )
+        | (Intrinsic::TableElementSetter, 1) => "<table>",
+        (Intrinsic::VectorElement | Intrinsic::VectorElementOr, 1)
+        | (Intrinsic::VectorElementSetter, 2)
+        | (Intrinsic::MakeVector | Intrinsic::MakeStretchyVector, 0)
         | (Intrinsic::IntegerToString, 0) => "<integer>",
         (Intrinsic::FloatToString, 0) => "<float>",
         (Intrinsic::Concatenate, _) => "<string>",
@@ -904,7 +935,9 @@ impl Module {
                     | BuiltinValueClass::Type
                     | BuiltinValueClass::LimitedIntegerType
                     | BuiltinValueClass::SubclassType
-                    | BuiltinValueClass::StringBuilder,
+                    | BuiltinValueClass::StringBuilder
+                    | BuiltinValueClass::StretchyVector
+                    | BuiltinValueClass::Table,
             } => Some(ValueKind::Object(class)),
             ClassOrigin::ObjectRoot
             | ClassOrigin::Native
@@ -1962,6 +1995,8 @@ fn kind_holds(
         // A class object names its bound or a subclass of it.
         || matches!((expected, actual), (ValueKind::ClassObject(expected), ValueKind::ClassObject(actual)) if is_same_or_subclass(actual, expected))
         || class_of(actual).is_some_and(|actual| matches!(expected, ValueKind::Object(expected) if is_same_or_subclass(actual, expected)))
+        // A `<stretchy-vector>` is a `<vector>`.
+        || matches!((expected, actual), (ValueKind::Vector(expected), ValueKind::Object(actual)) if is_same_or_subclass(actual, expected))
         || expected == actual
         // `<i32>` and `<u32>` are subtypes of `<integer>`; they widen
         // exactly.
@@ -3500,14 +3535,49 @@ pub enum Intrinsic {
     MethodGenericFunction,
     /// Returns class metaobjects for a method's specializers.
     MethodSpecializers,
-    /// Returns an immutable vector's element count.
-    VectorSize,
-    /// Returns one immutable vector element as `<object>`.
-    VectorRef,
-    /// Returns one immutable vector element as `<object>`, or the third
-    /// argument when the index is outside the vector: `element(v, i,
-    /// default: d)`. It has no name of its own.
+    /// `size(c)` of a `<vector>` (a `<stretchy-vector>` too) or a
+    /// `<table>`: its number of elements or entries.
+    CollectionSize,
+    /// `element(v, i)` of a vector: its element at `i` as `<object>`. An
+    /// index outside the vector signals a `type-error.range` whose expected
+    /// type is the vector's indices, and whose `use-value` replacement is
+    /// an index, checked again.
+    VectorElement,
+    /// `element(v, i, default: d)` of a vector: its element at `i`, or `d`
+    /// when `i` is outside it.
     VectorElementOr,
+    /// `element-setter(x, v, i)`, which `v[i] := x` writes: stores `x` at
+    /// `i` and returns it. An index outside the vector signals as
+    /// [`Self::VectorElement`] does, and a store into a literal vector,
+    /// which is constant, signals an `<immutable-collection-error>`.
+    VectorElementSetter,
+    /// `add!(v, x)`: adds `x` at the end of a `<stretchy-vector>` and
+    /// returns the vector.
+    StretchyAdd,
+    /// `element(t, k)` of a `<table>`: the value stored under `k`. A key the
+    /// table lacks signals a `<not-found-error>`, whose `use-value`
+    /// replacement is the value.
+    TableElement,
+    /// `element(t, k, default: d)` of a `<table>`: the value stored under
+    /// `k`, or `d`.
+    TableElementOr,
+    /// `element-setter(x, t, k)`, which `t[k] := x` writes: stores `x` under
+    /// `k` and returns it.
+    TableElementSetter,
+    /// `key-exists?(t, k)`: whether a `<table>` has the key `k`.
+    TableKeyExists,
+    /// `remove-key!(t, k)`: removes `k`'s entry from a `<table>`, returning
+    /// whether it had one.
+    TableRemoveKey,
+    /// `make(<vector>, size: n, fill: x)`: a new `<vector>` of `n`
+    /// elements, each `x`. It has no name of its own.
+    MakeVector,
+    /// `make(<stretchy-vector>, size: n, fill: x)`: a new
+    /// `<stretchy-vector>` of `n` elements, each `x`. It has no name of its
+    /// own.
+    MakeStretchyVector,
+    /// `make(<table>)`: a new empty `<table>`. It has no name of its own.
+    MakeTable,
     /// Renders a float as its shortest round-trip literal text, such as
     /// `1.0`, `2.5e-7`, `inf`, or `nan`; a `<single-float>` carries its
     /// `f32` suffix, as in `0.1f32`.
@@ -5328,7 +5398,21 @@ impl Lowering {
                 name: (*name).to_string(),
                 origin: ClassOrigin::BuiltinValue { kind: *kind },
                 superclass: Some(OBJECT_CLASS_ID),
-                sealing: Sealing::Open,
+                // No source class can inherit from a built-in class, so a
+                // concrete one's direct subclasses are the built-in ones it
+                // has. Saying so for `<vector>`, which `<stretchy-vector>`
+                // extends, lets typing resolve a send on a `<vector>` to the
+                // kernel method both share; every other concrete built-in
+                // is a leaf, closed already.
+                sealing: if !kind.is_abstract()
+                    && BuiltinValueClass::ALL
+                        .iter()
+                        .any(|(other, _)| other.builtin_superclass() == Some(*kind))
+                {
+                    Sealing::Sealed
+                } else {
+                    Sealing::Open
+                },
                 is_abstract: false,
                 finalized: false,
                 direct_slots: Vec::new(),
@@ -8617,7 +8701,9 @@ impl Lowering {
         let arity = function.arity();
         let result_kinds = vec![match function {
             CollectionFunction::Size => ValueKind::I64,
-            CollectionFunction::Element | CollectionFunction::ElementSetter => ValueKind::Any,
+            CollectionFunction::Element
+            | CollectionFunction::ElementSetter
+            | CollectionFunction::Add => ValueKind::Any,
         }];
         self.generic_symbols.push(GenericSymbol {
             name: name.into(),
@@ -8677,7 +8763,13 @@ impl Lowering {
                         if index == function.collection_index() {
                             self.builtin_value_class(builtin.collection)
                         } else if index == function.collection_index() + 1 {
-                            builtin.key.and_then(|key| self.builtin_value_class(key))
+                            match builtin.key {
+                                Some(collection::MethodKey::Class(key)) => {
+                                    self.builtin_value_class(key)
+                                }
+                                Some(collection::MethodKey::Object) => Some(OBJECT_CLASS_ID),
+                                None => None,
+                            }
                         } else {
                             Some(OBJECT_CLASS_ID)
                         }
@@ -8831,13 +8923,30 @@ impl Lowering {
         // so its kernel method is the only one that can apply: call it
         // directly, which keeps its precise result, a `<character>` for
         // `element`.
+        // A generic whose rows also differ by key, as `add!`'s builder rows
+        // do by element, takes the one row the key's class picks.
+        let key_class = args
+            .get(function.collection_index() + 1)
+            .and_then(|key| self.value_kind_class(self.expr_kind(key)));
         let text_method = self
             .value_kind_class(self.expr_kind(&args[function.collection_index()]))
             .and_then(|class| {
-                collection::builtin_methods(function).find(|method| {
+                let mut rows = collection::builtin_methods(function).filter(|method| {
                     matches!(method.operation, Intrinsic::Text(_))
                         && self.builtin_value_class(method.collection) == Some(class)
-                })
+                        && match method.key {
+                            Some(collection::MethodKey::Class(key))
+                                if function == CollectionFunction::Add =>
+                            {
+                                key_class.is_some_and(|actual| {
+                                    self.builtin_value_class(key) == Some(actual)
+                                })
+                            }
+                            _ => true,
+                        }
+                });
+                let row = rows.next()?;
+                rows.next().is_none().then_some(row)
             });
         // A key typing does not know is a position, an `<object>`,
         // dispatches instead.
@@ -8880,7 +8989,10 @@ impl Lowering {
         }
         let operation = self.value_kind_class(collection).and_then(|class| {
             collection::builtin_methods(function)
-                .filter(|method| self.builtin_value_class(method.collection) == Some(class))
+                .filter(|method| {
+                    self.builtin_value_class(method.collection)
+                        .is_some_and(|kernel| self.is_same_or_subclass(class, kernel))
+                })
                 .find_map(|method| method.with_default)
         });
         let Some(operation) = operation else {
@@ -9242,12 +9354,25 @@ impl Lowering {
             | Intrinsic::InstanceOfType
             | Intrinsic::CharCompare(_)
             | Intrinsic::PositionCompare(_) => ValueKind::Bool,
-            Intrinsic::VectorSize | Intrinsic::CharToInteger | Intrinsic::PositionToInteger => {
+            Intrinsic::CollectionSize | Intrinsic::CharToInteger | Intrinsic::PositionToInteger => {
                 ValueKind::I64
             }
             Intrinsic::Text(function) => self.text_classes().map_or(ValueKind::Error, |classes| {
                 classes.result_kind(function.result())
             }),
+            Intrinsic::MakeVector => self
+                .builtin_value_class(BuiltinValueClass::Vector)
+                .map_or(ValueKind::Error, ValueKind::Vector),
+            Intrinsic::MakeStretchyVector => self
+                .builtin_value_class(BuiltinValueClass::StretchyVector)
+                .map_or(ValueKind::Error, ValueKind::Object),
+            Intrinsic::MakeTable => self
+                .builtin_value_class(BuiltinValueClass::Table)
+                .map_or(ValueKind::Error, ValueKind::Object),
+            Intrinsic::TableKeyExists | Intrinsic::TableRemoveKey => ValueKind::Bool,
+            Intrinsic::StretchyAdd => self
+                .builtin_value_class(BuiltinValueClass::StretchyVector)
+                .map_or(ValueKind::Error, ValueKind::Object),
             Intrinsic::LimitedIntegerBase => self
                 .builtin_value_class(BuiltinValueClass::Integer)
                 .map_or(ValueKind::Error, ValueKind::ClassObject),
@@ -9256,10 +9381,34 @@ impl Lowering {
             | Intrinsic::ClassDirectSuperclass
             | Intrinsic::SlotSetter
             | Intrinsic::MethodGenericFunction
-            | Intrinsic::VectorRef
+            | Intrinsic::VectorElement
             | Intrinsic::VectorElementOr
+            | Intrinsic::VectorElementSetter
+            | Intrinsic::TableElement
+            | Intrinsic::TableElementOr
+            | Intrinsic::TableElementSetter
             | Intrinsic::LimitedIntegerMin
             | Intrinsic::LimitedIntegerMax => ValueKind::Any,
+        }
+    }
+
+    /// The collection a value of kind `actual` is, by its static class: a
+    /// `<vector>` (a `<stretchy-vector>` too) or a `<table>`.
+    fn collection_kind(&self, actual: ValueKind) -> Option<CollectionKind> {
+        let class = match actual {
+            ValueKind::Vector(class) | ValueKind::Object(class) => class,
+            _ => return None,
+        };
+        let is = |kind| {
+            self.builtin_value_class(kind)
+                .is_some_and(|builtin| self.is_same_or_subclass(class, builtin))
+        };
+        if is(BuiltinValueClass::Vector) {
+            Some(CollectionKind::Vector)
+        } else if is(BuiltinValueClass::Table) {
+            Some(CollectionKind::Table)
+        } else {
+            None
         }
     }
 
@@ -9340,12 +9489,43 @@ impl Lowering {
                 matches!(actual, ValueKind::MethodObject(_) | ValueKind::Any)
                     || self.is_builtin_instance(actual, BuiltinValueClass::Method)
             }
-            (Intrinsic::VectorSize | Intrinsic::VectorRef | Intrinsic::VectorElementOr, 0) => {
-                matches!(actual, ValueKind::Vector(_) | ValueKind::Any)
+            (Intrinsic::CollectionSize, 0) => self.collection_kind(actual).is_some(),
+            (Intrinsic::VectorElement | Intrinsic::VectorElementOr, 0)
+            | (Intrinsic::VectorElementSetter, 1) => {
+                self.collection_kind(actual) == Some(CollectionKind::Vector)
             }
-            // Any value boxes to the `<object>` a default must be.
-            (Intrinsic::VectorElementOr, 2) => true,
-            (Intrinsic::VectorRef | Intrinsic::VectorElementOr, 1)
+            (Intrinsic::StretchyAdd, 0) => {
+                self.is_builtin_subclass_instance(actual, BuiltinValueClass::StretchyVector)
+            }
+            (
+                Intrinsic::TableElement
+                | Intrinsic::TableElementOr
+                | Intrinsic::TableKeyExists
+                | Intrinsic::TableRemoveKey,
+                0,
+            )
+            | (Intrinsic::TableElementSetter, 1) => {
+                self.collection_kind(actual) == Some(CollectionKind::Table)
+            }
+            // Any value boxes to the `<object>` an element, a key or a
+            // default is.
+            (Intrinsic::VectorElementOr | Intrinsic::TableElementOr, 2)
+            | (Intrinsic::VectorElementSetter | Intrinsic::TableElementSetter, 0)
+            | (
+                Intrinsic::StretchyAdd
+                | Intrinsic::TableElement
+                | Intrinsic::TableElementOr
+                | Intrinsic::TableKeyExists
+                | Intrinsic::TableRemoveKey,
+                1,
+            )
+            | (Intrinsic::TableElementSetter, 2)
+            | (Intrinsic::MakeVector | Intrinsic::MakeStretchyVector, 1) => {
+                !matches!(actual, ValueKind::Error)
+            }
+            (Intrinsic::VectorElement | Intrinsic::VectorElementOr, 1)
+            | (Intrinsic::VectorElementSetter, 2)
+            | (Intrinsic::MakeVector | Intrinsic::MakeStretchyVector, 0)
             | (Intrinsic::IntegerToString, 0) => {
                 matches!(actual, ValueKind::I64 | ValueKind::I32 | ValueKind::U32)
             }
@@ -11430,6 +11610,74 @@ impl Lowering {
         }
     }
 
+    /// The operation `make` on the built-in collection class `kind` is.
+    const fn collection_maker(kind: BuiltinValueClass) -> Option<Intrinsic> {
+        match kind {
+            BuiltinValueClass::Vector => Some(Intrinsic::MakeVector),
+            BuiltinValueClass::StretchyVector => Some(Intrinsic::MakeStretchyVector),
+            BuiltinValueClass::Table => Some(Intrinsic::MakeTable),
+            _ => None,
+        }
+    }
+
+    /// Lowers `make` of a built-in collection class: `make(<vector>, size:
+    /// n, fill: x)` and `make(<stretchy-vector>, ...)`, whose `size:` is 0
+    /// and `fill:` `#f` when absent, and `make(<table>)`, which takes no
+    /// keywords. A size below 0 or past
+    /// [`interloko_runtime::MAX_VECTOR_SIZE`] signals a
+    /// `type-error.range`.
+    fn lower_make_collection(
+        &mut self,
+        ctx: &mut FunctionContext,
+        make: Intrinsic,
+        class_name: &str,
+        fields: &[ast::KeywordArg],
+        span: Span,
+    ) -> Expr {
+        let keywords: &[&str] = match make {
+            Intrinsic::MakeTable => &[],
+            _ => &["size", "fill"],
+        };
+        let mut size = None;
+        let mut fill = None;
+        for field in fields {
+            let slot = match field.name.as_str() {
+                "size" if keywords.contains(&"size") => &mut size,
+                "fill" if keywords.contains(&"fill") => &mut fill,
+                _ => {
+                    ctx.diagnostics.push(
+                        Diagnostic::error(field.span, DiagnosticCode::UnknownInitKeyword)
+                            .with_arg(DiagnosticArg::text("class", class_name))
+                            .with_arg(DiagnosticArg::text("keyword", format!("{}:", field.name))),
+                    );
+                    continue;
+                }
+            };
+            if slot.is_some() {
+                ctx.diagnostics.push(
+                    Diagnostic::error(field.span, DiagnosticCode::DuplicateInitKeyword)
+                        .with_arg(DiagnosticArg::text("keyword", format!("{}:", field.name))),
+                );
+                continue;
+            }
+            *slot = Some(self.lower_expr_expected(ctx, &field.value, None));
+        }
+        if make == Intrinsic::MakeTable {
+            return self.checked_intrinsic_call(ctx, make, "make", Vec::new(), span);
+        }
+        let size = size.unwrap_or(Expr::ConstI64 { value: 0, span });
+        let size = self.limit_value(
+            size,
+            ValueKind::I64,
+            Some(IntRange {
+                min: Some(0),
+                max: i64::try_from(interloko_runtime::MAX_VECTOR_SIZE).ok(),
+            }),
+        );
+        let fill = fill.unwrap_or(Expr::ConstBool { value: false, span });
+        self.checked_intrinsic_call(ctx, make, "make", vec![size, fill], span)
+    }
+
     fn lower_make_object(
         &mut self,
         ctx: &mut FunctionContext,
@@ -11488,6 +11736,12 @@ impl Lowering {
                     .with_arg(DiagnosticArg::text("class", class_name.clone())),
             );
             return Expr::Error { span };
+        }
+        if let ClassOrigin::BuiltinValue { kind } = class_origin
+            && let Some(make) = Self::collection_maker(kind)
+            && matches!(class_expr, Expr::ClassObject { .. })
+        {
+            return self.lower_make_collection(ctx, make, &class_name, fields, span);
         }
         if matches!(class_origin, ClassOrigin::BuiltinValue { .. }) {
             ctx.diagnostics.push(
@@ -12645,7 +12899,9 @@ impl Lowering {
                     | BuiltinValueClass::Type
                     | BuiltinValueClass::LimitedIntegerType
                     | BuiltinValueClass::SubclassType
-                    | BuiltinValueClass::StringBuilder,
+                    | BuiltinValueClass::StringBuilder
+                    | BuiltinValueClass::StretchyVector
+                    | BuiltinValueClass::Table,
             } => Some(ValueKind::Object(class)),
             ClassOrigin::ObjectRoot
             | ClassOrigin::Native
@@ -14024,10 +14280,10 @@ mod tests {
                 }
                 ValueKind::Char => of(Atom::Exact(builtin(BuiltinValueClass::Character))),
                 ValueKind::Position => of(Atom::Exact(builtin(BuiltinValueClass::StringPosition))),
-                // Built-in value classes are closed.
-                ValueKind::String(class) | ValueKind::Symbol(class) | ValueKind::Vector(class) => {
-                    of(Atom::Exact(class))
-                }
+                // Built-in value classes are closed, except `<vector>`,
+                // which `<stretchy-vector>` extends.
+                ValueKind::String(class) | ValueKind::Symbol(class) => of(Atom::Exact(class)),
+                ValueKind::Vector(class) => of(Atom::Cone(class)),
                 ValueKind::Object(class) => of(Atom::Cone(class)),
                 ValueKind::ClassObject(_) => of(Atom::Exact(builtin(BuiltinValueClass::Class))),
                 ValueKind::GenericFunctionObject(generic) => {
@@ -14696,7 +14952,25 @@ mod tests {
         let select_error = class(&module, "<select-error>");
         assert_eq!(select_error.superclass, Some(error));
         assert_eq!(select_error.id.0, no_method.id.0 + 1);
-        assert_eq!(select_error.id.0 as usize, module.classes.len() - 1);
+        let not_found = class(&module, "<not-found-error>");
+        assert_eq!(not_found.superclass, Some(error));
+        assert_eq!(not_found.id.0, select_error.id.0 + 1);
+        let immutable = class(&module, "<immutable-collection-error>");
+        assert_eq!(immutable.superclass, Some(error));
+        assert_eq!(immutable.id.0, not_found.id.0 + 1);
+        assert_eq!(immutable.id.0 as usize, module.classes.len() - 1);
+        assert_eq!(
+            not_found
+                .effective_slots
+                .iter()
+                .map(|slot| slot.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "not-found-error-collection",
+                "not-found-error-key",
+                "not-found-error-code"
+            ]
+        );
         assert_eq!(
             select_error
                 .effective_slots

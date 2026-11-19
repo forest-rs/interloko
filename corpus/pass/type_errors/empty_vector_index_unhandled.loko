@@ -1,0 +1,12 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 0 is not of type limited(<integer>, min: 0, max: -1)
+// expect: diagnostics 0
+
+// An empty vector has no indices: its expected type is an empty range.
+// Storing outside a vector fails the same way as reading.
+
+define function main() => <integer>
+  let v = make(<stretchy-vector>);
+  v[0] := 1;
+  0
+end;

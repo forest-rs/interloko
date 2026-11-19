@@ -1,0 +1,14 @@
+// expect: runtime code type-error.range
+// expect: run reports type-error.range: 3 is not of type limited(<integer>, min: 0, max: 2)
+// expect: diagnostics 0
+
+// An index outside a vector signals a `<type-error>`: the index is not one
+// of the vector's indices, `limited(<integer>, min: 0, max: size - 1)`.
+
+define function third(v :: <vector>, i :: <integer>) => <object>
+  v[i]
+end;
+
+define function main() => <integer>
+  as(<integer>, third(make(<vector>, size: 3, fill: 7), 3))
+end;

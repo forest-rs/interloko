@@ -1,0 +1,17 @@
+// expect: run 1102
+// expect: diagnostics 0
+
+// Characters box into collections like numbers: a vector holds them, and
+// a table keys by them, by value. A character is never the integer of its
+// code: `'a'` and 97 are different keys.
+
+define function main() => <integer>
+  let t = make(<table>);
+  t['a'] := 1;
+  t[97] := 100;
+  let v = make(<stretchy-vector>);
+  add!(v, 'a');
+  add!(v, 'b');
+  as(<integer>, t[as(<character>, v[0])]) + as(<integer>, t[97])
+    + as(<integer>, as(<character>, v[1])) + as(<integer>, element(t, 'b', default: 903))
+end;

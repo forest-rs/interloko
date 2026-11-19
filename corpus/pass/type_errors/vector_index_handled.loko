@@ -1,0 +1,19 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// The `<type-error>` of an index outside a vector is an ordinary
+// condition: a handler can take it, and its expected type tells the valid
+// indices.
+
+define function at(v :: <vector>, i :: <integer>) => <integer>
+  handle
+    as(<integer>, v[i])
+  with restart e :: <type-error>
+    if (instance?(i, type-error-expected-type(e))) 0 else 40 end
+  end
+end;
+
+define function main() => <integer>
+  let v = make(<vector>, size: 2, fill: 1);
+  at(v, -1) + at(v, 1) + at(v, 0)
+end;

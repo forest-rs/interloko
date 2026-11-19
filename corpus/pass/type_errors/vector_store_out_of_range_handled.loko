@@ -1,0 +1,27 @@
+// expect: run 21
+// expect: diagnostics 0
+
+// Storing outside a vector signals the same `type-error.range` reading
+// does, and a store into a literal signals `<immutable-collection-error>`;
+// a handler can take either.
+
+define function store(v :: <vector>, i :: <integer>) => <integer>
+  handle
+    handle
+      begin
+        v[i] := 5;
+        1
+      end
+    with restart e :: <type-error>
+      10
+    end
+  with restart e :: <immutable-collection-error>
+    if (immutable-collection-error-collection(e) == v) 100 else 1000 end
+  end
+end;
+
+define function main() => <integer>
+  let v = make(<vector>, size: 2);
+  // 1 + 10 + 10 = 21: inside, past the end, before the start.
+  store(v, 1) + store(v, 2) + store(v, -1) + store(#[1, 2], 0) - 100
+end;

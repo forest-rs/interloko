@@ -326,7 +326,7 @@ The current slices include:
   changes it and so takes an explicit `as`. A method's limited parameter
   restates or widens its generic's range: unlike Dylan's DRM, methods do
   not dispatch on ranges, so a send's range check is the only one;
-- symbols, keywords, and immutable vectors;
+- symbols and keywords;
 - strings: a `<string>` is immutable, validated UTF-8 whose header caches
   its character count, so `size(s)` is O(1), and whether it is all ASCII;
   a Rust host borrows its text as `&str` without a copy. Strings have no
@@ -352,14 +352,46 @@ The current slices include:
   a runtime host call: a loop reading a character and stepping costs about
   220 ns per character today. Normalization and grapheme clusters are
   left to a library;
+- mutable collections, which live in the runtime's heap as instances do
+  (a turn's stores into image collections are logged, undone if it aborts
+  and evacuated if it finishes). Their elements and keys are `<object>`s,
+  so numbers and callables box on the way in and come back out as
+  `<object>`s:
+  - `<vector>`: `make(<vector>, size: n, fill: x)` makes `n` elements of
+    `x` (`size:` 0 and `fill:` `#f` by default; at most 2^28 until the
+    heap has a byte budget), and `v[i] := x` replaces one. A vector literal `#[a, b]` is constant, as Dylan's literals are,
+    and so are the vectors the MOP answers: storing into one signals an
+    `<immutable-collection-error>`. An index outside a vector, read or
+    written, signals a `type-error.range` whose expected type is the
+    vector's indices, `limited(<integer>, min: 0, max: size - 1)`, and whose
+    `use-value` replacement is another index, checked again;
+  - `<stretchy-vector>`, a `<vector>` that grows at its end: `add!(v, x)`
+    appends `x` and returns `v`, and `make(<stretchy-vector>)` takes
+    `size:` and `fill:` too;
+  - `<table>`, a map from keys to values made with `make(<table>)`: `t[k]`,
+    `t[k] := v`, `element(t, k, default: d)`, `size(t)`, `key-exists?(t,
+    k)` and `remove-key!(t, k)`, which answers whether the key was there.
+    Keys compare as Dylan's `<table>` compares them, by `==`, except
+    strings, which compare by their text as `=` does (as Dylan's
+    `<string-table>`): `t["max"]` finds the entry stored under any other
+    `"max"`, while `1` and `1.0`, or two vectors with the same elements,
+    are different keys, as are a character and the integer of its code. A
+    callable key, like a callable in a slot, holds
+    only for the run that made it. A missing key without a `default:` signals a
+    `<not-found-error>` holding the table and the key, whose `use-value`
+    supplies the element. Entries keep the order they were added in, and
+    a version counter counts changes to the set of keys, for iteration to
+    check;
 - Dylan's collection generics `size(collection)`, `element(collection,
-  key, #key default)` and `element-setter(value, collection, key)`, and its
+  key, #key default)`, `element-setter(value, collection, key)` and
+  `add!(collection, element)` (whose kernel methods take a stretchy vector
+  and any element, or a string builder and a character or string), and its
   element syntax: `c[k]` is `element(c, k)` and `c[k] := v` is
   `element-setter(v, c, k)`, so they nest and chain with slot reads
   (`lexer.text[lexer.pos]`). They are open built-in generics, as the
   numeric operators are built-in generics: the kernel's methods come from
-  `BUILTIN_METHODS` in `sem/collection.rs` (so far the immutable
-  `<vector>`'s `size` and `element`, `<string>`'s `size` and `element` by
+  `BUILTIN_METHODS` in `sem/collection.rs` (`<vector>`'s, and so
+  `<stretchy-vector>`'s, `<table>`'s, `<string>`'s `size` and `element` by
   position, and `<string-builder>`'s `size`), a program adds methods for its own
   classes with `define method`, a send typing resolves to a kernel method
   runs it inline, an `<object>` receiver dispatches, and a send no method
@@ -369,13 +401,13 @@ The current slices include:
   replaces the built-in generic, and a slot named `size` keeps its getter
   for its own class. Methods cannot take keyword parameters yet, so
   `element(c, k, default: d)`, which returns `d` for a key outside the
-  collection, needs a receiver typing knows has a kernel method (a vector
-  index outside it otherwise traps). Keyword arguments are passed by name,
+  collection, needs a receiver typing knows has a kernel method. Keyword arguments are passed by name,
   and a call to something that does not take one is an error rather than
   a silent drop;
 - recoverable condition/restart forms, with `<condition>`, `<error>`,
-  `<type-error>`, `<no-applicable-method>` and `<select-error>` defined by
-  the kernel: a
+  `<type-error>`, `<no-applicable-method>`, `<select-error>`,
+  `<not-found-error>` and `<immutable-collection-error>` defined by the
+  kernel: a
   runtime check that fails (a cast, a callable value's argument or result,
   a range, an overflow) signals a `<type-error>` naming the value, the
   expected type (a type object: a class, a `<limited-integer>` or a

@@ -117,7 +117,7 @@ impl InterlokoHost {
         };
         let elements = match slot(NoApplicableMethodSlot::Arguments)? {
             Value::Obj(vector) => match &self.object(vector).ok()?.storage {
-                RuntimeObjectStorage::Vector { elements } => elements.clone(),
+                RuntimeObjectStorage::Vector { elements, .. } => elements.clone(),
                 _ => return None,
             },
             _ => return None,

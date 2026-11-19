@@ -10,8 +10,8 @@
 //! names them and maps their runtime kinds to value kinds; the runtime owns
 //! what they do.
 //!
-//! `size` and `element` on strings are kernel methods of the collection
-//! generics ([`super::BUILTIN_METHODS`]); `copy-sequence` and `starts-with?`
+//! `size` and `element` on strings, and `add!` on a string builder, are
+//! kernel methods of the collection generics ([`super::BUILTIN_METHODS`]); `copy-sequence` and `starts-with?`
 //! take keyword arguments, which sem lowers on its own.
 
 use super::{ClassId, TextFunction, ValueKind};
@@ -57,13 +57,6 @@ pub const NAMED_TEXT_FUNCTIONS: &[(&str, &[TextFunction])] = &[
     ("previous-position", &[TextFunction::PreviousPosition]),
     ("position-at", &[TextFunction::PositionAt]),
     ("position-after", &[TextFunction::PositionAfter]),
-    (
-        "add!",
-        &[
-            TextFunction::BuilderAddCharacter,
-            TextFunction::BuilderAddString,
-        ],
-    ),
 ];
 
 /// Returns the overloads a call of `name` can reach.
@@ -95,6 +88,8 @@ pub fn text_function_name(function: TextFunction) -> &'static str {
         TextFunction::MakeBuilder => "make(<string-builder>)",
         TextFunction::BuilderSize => "size(<string-builder>)",
         TextFunction::BuilderToString => "as(<string>, <string-builder>)",
+        TextFunction::BuilderAddCharacter => "add!(<string-builder>, <character>)",
+        TextFunction::BuilderAddString => "add!(<string-builder>, <string>)",
         function => NAMED_TEXT_FUNCTIONS
             .iter()
             .find(|(_, functions)| functions.contains(&function))

@@ -24,7 +24,7 @@ end;
 
 define function main() => <integer>
   let direct = class-direct-slots(<circle>);
-  let slot = vector-ref(direct, 0);
+  let slot = direct[0];
   if (class-name(object-class(make(<circle>, radius: 12))) = "<circle>")
     if (slot-name(slot) = "radius") 1 else 0 end
   else
@@ -77,18 +77,13 @@ limited-integer-max(limited)        => <integer> as <object>, or #f
 subclass-type-class(subclass)       => class metaobject
 ```
 
-Vector helpers:
-
-```text
-vector-size(vector)                 => <integer>
-vector-ref(vector, index)           => <object>
-```
-
-The collection generics `size(vector)` and `element(vector, index,
-default: d)`, written `vector[index]` without a default, serve vectors too;
-their kernel methods are `collection(size)` and `collection(element)`
-methods in the MOP, and `generic-function-methods` lists them with a
-program's own.
+The MOP functions that answer several metaobjects answer a `<vector>`,
+read with the collection generics: `size(v)`, and `element(v, i, default:
+d)`, written `v[i]` without a default. Their kernel methods are
+`collection(size)` and `collection(element)` methods in the MOP, and
+`generic-function-methods` lists them with a program's own. Such a vector
+is constant, as a vector literal is: storing into one signals an
+`<immutable-collection-error>`.
 
 ## Direct Versus Effective
 

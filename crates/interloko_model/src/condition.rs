@@ -13,6 +13,8 @@
 //!       <type-error>
 //!       <no-applicable-method>
 //!       <select-error>
+//!       <not-found-error>
+//!       <immutable-collection-error>
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
@@ -22,7 +24,10 @@
 //! send that found no method for its arguments: the generic, the arguments
 //! and the stable code [`NO_APPLICABLE_METHOD_CODE`]. A `<select-error>`
 //! reports a `select` without `otherwise` whose target matched no key: the
-//! target value. Their slots are
+//! target value. A `<not-found-error>` reports an `element` of a collection
+//! without the key and without a `default:` ([`NOT_FOUND_CODE`]), and an
+//! `<immutable-collection-error>` a store into a constant collection, a
+//! vector literal ([`IMMUTABLE_COLLECTION_CODE`]). Their slots are
 //! read-only, so they add no setter generics to a program.
 //!
 //! A send never finds several equally specific methods: a module whose
@@ -46,6 +51,12 @@ pub enum ConditionClass {
     /// `<select-error>`: a `select` without `otherwise` found no key that
     /// matched its target.
     SelectError,
+    /// `<not-found-error>`: `element` found no entry for its key in a
+    /// collection, and the call passed no `default:`.
+    NotFoundError,
+    /// `<immutable-collection-error>`: a store into a collection that is
+    /// constant, such as a vector literal.
+    ImmutableCollectionError,
 }
 
 impl ConditionClass {
@@ -59,6 +70,8 @@ impl ConditionClass {
         Self::TypeError,
         Self::NoApplicableMethod,
         Self::SelectError,
+        Self::NotFoundError,
+        Self::ImmutableCollectionError,
     ];
 
     /// Returns the Loko-visible class name.
@@ -70,6 +83,8 @@ impl ConditionClass {
             Self::TypeError => "<type-error>",
             Self::NoApplicableMethod => "<no-applicable-method>",
             Self::SelectError => "<select-error>",
+            Self::NotFoundError => "<not-found-error>",
+            Self::ImmutableCollectionError => "<immutable-collection-error>",
         }
     }
 
@@ -82,6 +97,8 @@ impl ConditionClass {
             b"<type-error>" => Some(Self::TypeError),
             b"<no-applicable-method>" => Some(Self::NoApplicableMethod),
             b"<select-error>" => Some(Self::SelectError),
+            b"<not-found-error>" => Some(Self::NotFoundError),
+            b"<immutable-collection-error>" => Some(Self::ImmutableCollectionError),
             _ => None,
         }
     }
@@ -93,7 +110,11 @@ impl ConditionClass {
         match self {
             Self::Condition => None,
             Self::Error => Some(Self::Condition),
-            Self::TypeError | Self::NoApplicableMethod | Self::SelectError => Some(Self::Error),
+            Self::TypeError
+            | Self::NoApplicableMethod
+            | Self::SelectError
+            | Self::NotFoundError
+            | Self::ImmutableCollectionError => Some(Self::Error),
         }
     }
 
@@ -105,6 +126,8 @@ impl ConditionClass {
             Self::TypeError => &TYPE_ERROR_SLOTS,
             Self::NoApplicableMethod => &NO_APPLICABLE_METHOD_SLOTS,
             Self::SelectError => &SELECT_ERROR_SLOTS,
+            Self::NotFoundError => &NOT_FOUND_ERROR_SLOTS,
+            Self::ImmutableCollectionError => &IMMUTABLE_COLLECTION_ERROR_SLOTS,
         }
     }
 }
@@ -234,6 +257,48 @@ impl NoApplicableMethodSlot {
 /// The stable code of a `<no-applicable-method>` the runtime signals, in
 /// the diagnostic code scheme (`area.name`) with `dispatch` as its area.
 pub const NO_APPLICABLE_METHOD_CODE: &str = "dispatch.no-applicable-method";
+
+/// The slots of `<not-found-error>`, in layout order: the collection, the
+/// key it lacks and the code.
+pub const NOT_FOUND_ERROR_SLOTS: [ConditionSlot; 3] = [
+    ConditionSlot {
+        name: "not-found-error-collection",
+        type_name: "<object>",
+        init_keyword: "collection",
+    },
+    ConditionSlot {
+        name: "not-found-error-key",
+        type_name: "<object>",
+        init_keyword: "key",
+    },
+    ConditionSlot {
+        name: "not-found-error-code",
+        type_name: "<string>",
+        init_keyword: "code",
+    },
+];
+
+/// The stable code of a `<not-found-error>` the runtime signals.
+pub const NOT_FOUND_CODE: &str = "collection.not-found";
+
+/// The slots of `<immutable-collection-error>`, in layout order: the
+/// collection and the code.
+pub const IMMUTABLE_COLLECTION_ERROR_SLOTS: [ConditionSlot; 2] = [
+    ConditionSlot {
+        name: "immutable-collection-error-collection",
+        type_name: "<object>",
+        init_keyword: "collection",
+    },
+    ConditionSlot {
+        name: "immutable-collection-error-code",
+        type_name: "<string>",
+        init_keyword: "code",
+    },
+];
+
+/// The stable code of an `<immutable-collection-error>` the runtime
+/// signals.
+pub const IMMUTABLE_COLLECTION_CODE: &str = "collection.immutable";
 
 /// What kind of runtime check a `<type-error>` reports.
 ///

@@ -1,0 +1,10 @@
+// expect: diagnostic code typing.dispatch-no-applicable-method
+
+// A `<table>` grows by key, with `t[k] := v`, not at an end: no method of
+// `add!` takes one.
+
+define function main() => <integer>
+  let t = make(<table>);
+  add!(t, 3);
+  size(t)
+end;

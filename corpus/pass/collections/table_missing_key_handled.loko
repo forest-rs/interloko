@@ -1,0 +1,27 @@
+// expect: run 5
+// expect: diagnostics 0
+
+// A handler can take the `<not-found-error>` of a missing key: it holds
+// the key, the table and the stable code `collection.not-found`.
+
+define function lookup(t :: <table>, k :: <string>) => <integer>
+  handle
+    as(<integer>, t[k])
+  with restart e :: <not-found-error>
+    if (not-found-error-code(e) = "collection.not-found")
+      if (not-found-error-collection(e) == t)
+        if (as(<string>, not-found-error-key(e)) = "four") 4 else -10 end
+      else
+        -100
+      end
+    else
+      -1000
+    end
+  end
+end;
+
+define function main() => <integer>
+  let t = make(<table>);
+  t["one"] := 1;
+  lookup(t, "one") + lookup(t, "four")
+end;

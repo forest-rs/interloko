@@ -80,6 +80,10 @@
 //! `cell access` is what one read and one write of the total cost when a
 //! closure captures it, so it lives in a shared cell, against the same loop
 //! with the total in a register.
+//! `vector element` is one `as(<integer>, v[i])` of a `<vector>` in such a
+//! loop, against the loop making the vector alone: a checked element read
+//! and an unbox. `table lookup` is one `as(<integer>, t[i])` of a
+//! `<table>` with integer keys, against filling the table alone.
 //!
 //! `character scan` is one iteration of a loop over a 256-character ASCII
 //! `<string>` by position: `s[p]`, a `<character>` compare and
@@ -379,6 +383,49 @@ define function cell-looped(d :: <integer>) => <integer>
     i := i + 1
   end;
   read-total()
+
+end;
+
+define function vector-made(d :: <integer>) => <integer>
+  let v = make(<vector>, size: 256, fill: 1);
+  size(v)
+end;
+
+define function vector-read(d :: <integer>) => <integer>
+  let v = make(<vector>, size: 256, fill: 1);
+  let total = 0;
+  let i = 0;
+  while (i < 256)
+    total := total + as(<integer>, v[i]);
+    i := i + 1
+  end;
+  total
+end;
+
+define function table-filled(d :: <integer>) => <integer>
+  let t = make(<table>);
+  let i = 0;
+  while (i < 256)
+    t[i] := i;
+    i := i + 1
+  end;
+  size(t)
+end;
+
+define function table-read(d :: <integer>) => <integer>
+  let t = make(<table>);
+  let i = 0;
+  while (i < 256)
+    t[i] := i;
+    i := i + 1
+  end;
+  let total = 0;
+  let j = 0;
+  while (j < 256)
+    total := total + as(<integer>, t[j]);
+    j := j + 1
+  end;
+  total
 end;
 
 define function scanned(d :: <integer>) => <integer>
@@ -501,6 +548,8 @@ fn costs(source: &str, policy: CodegenPolicy) -> Vec<(&'static str, f64)> {
         ("character scan", net("scanned", "unlooped")),
         ("scan + digit?", net("scanned-digits", "unlooped")),
         ("for iteration", net("for-looped", "unlooped")),
+        ("vector element", net("vector-read", "vector-made")),
+        ("table lookup", net("table-read", "table-filled")),
     ]
 }
 

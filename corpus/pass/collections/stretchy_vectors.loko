@@ -1,0 +1,38 @@
+// expect: run 1062
+// expect: diagnostics 1
+// expect: diagnostic code typing.instance-always-true
+// expect: dump lowered contains runtime.add!
+// expect: dump lowered contains runtime.vector-element
+
+// A `<stretchy-vector>` is a `<vector>` that grows at its end: `add!`
+// appends an element and returns the vector. Every vector operation takes
+// one, and it passes where a `<vector>` is expected: typing knows it is
+// one, so testing for it always succeeds.
+
+define function total(v :: <vector>) => <integer>
+  let sum = 0;
+  let i = 0;
+  while (i < size(v))
+    sum := sum + as(<integer>, v[i]);
+    i := i + 1
+  end;
+  sum
+end;
+
+define function main() => <integer>
+  let v = make(<stretchy-vector>);
+  let i = 1;
+  while (i <= 10)
+    add!(v, i * 10);
+    i := i + 1
+  end;
+  v[0] := 1;
+  let more = make(<stretchy-vector>, size: 2, fill: 3);
+  add!(add!(more, 4), 5);
+  // 1 + 20 + 30 + ... + 100 = 541, and 3 + 3 + 4 + 5 = 15
+  if (instance?(v, <vector>))
+    total(v) + total(more) + size(more) * 100 + 106
+  else
+    0
+  end
+end;

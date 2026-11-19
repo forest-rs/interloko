@@ -1,6 +1,6 @@
 // expect: run 13
 // expect: diagnostics 0
-// expect: dump lowered contains vector-ref
+// expect: dump lowered contains vector-element
 // A receiver typing knows is a `<vector>` runs the kernel method inline;
 // an `<object>` receiver dispatches, reaching a program's method or the
 // kernel's alike.

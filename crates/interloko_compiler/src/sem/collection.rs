@@ -35,11 +35,14 @@ pub enum CollectionFunction {
     /// `element-setter(value, collection, key) => <object>`: stores `value`
     /// at `key` and returns it.
     ElementSetter,
+    /// `add!(collection, element) => <object>`: adds `element` at the end
+    /// of `collection`, which it returns.
+    Add,
 }
 
 impl CollectionFunction {
     /// Every collection generic.
-    pub const ALL: &'static [Self] = &[Self::Size, Self::Element, Self::ElementSetter];
+    pub const ALL: &'static [Self] = &[Self::Size, Self::Element, Self::ElementSetter, Self::Add];
 
     /// Returns the generic named `name`.
     #[must_use]
@@ -57,6 +60,7 @@ impl CollectionFunction {
             Self::Size => "size",
             Self::Element => "element",
             Self::ElementSetter => "element-setter",
+            Self::Add => "add!",
         }
     }
 
@@ -67,6 +71,7 @@ impl CollectionFunction {
             Self::Size => &["collection"],
             Self::Element => &["collection", "key"],
             Self::ElementSetter => &["value", "collection", "key"],
+            Self::Add => &["collection", "element"],
         }
     }
 
@@ -80,7 +85,7 @@ impl CollectionFunction {
     #[must_use]
     pub const fn collection_index(self) -> usize {
         match self {
-            Self::Size | Self::Element => 0,
+            Self::Size | Self::Element | Self::Add => 0,
             Self::ElementSetter => 1,
         }
     }
@@ -95,7 +100,7 @@ impl CollectionFunction {
     pub const fn keywords(self) -> &'static [&'static str] {
         match self {
             Self::Element => &["default"],
-            Self::Size | Self::ElementSetter => &[],
+            Self::Size | Self::ElementSetter | Self::Add => &[],
         }
     }
 }
@@ -107,8 +112,9 @@ pub struct BuiltinMethod {
     pub function: CollectionFunction,
     /// The collection class the method specializes on.
     pub collection: BuiltinValueClass,
-    /// The key class it specializes on, for a generic that takes a key.
-    pub key: Option<BuiltinValueClass>,
+    /// The key class it specializes on, for a generic that takes a key,
+    /// and the element class, for `add!`.
+    pub key: Option<MethodKey>,
     /// The operation, taking the generic's arguments in order.
     pub operation: Intrinsic,
     /// The operation that serves a call passing `default:`, taking the
@@ -116,23 +122,61 @@ pub struct BuiltinMethod {
     pub with_default: Option<Intrinsic>,
 }
 
+/// The keys a kernel method takes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MethodKey {
+    /// Instances of a kernel class, such as a vector's `<integer>` indices.
+    Class(BuiltinValueClass),
+    /// Any object, as a `<table>`'s keys are.
+    Object,
+}
+
 /// The kernel's methods of the collection generics, one row per generic and
 /// collection class. A kernel collection class takes part by adding its
-/// rows here.
+/// rows here; a `<stretchy-vector>` is a `<vector>`, so the vector rows
+/// serve it.
 pub const BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod {
         function: CollectionFunction::Size,
         collection: BuiltinValueClass::Vector,
         key: None,
-        operation: Intrinsic::VectorSize,
+        operation: Intrinsic::CollectionSize,
         with_default: None,
     },
     BuiltinMethod {
         function: CollectionFunction::Element,
         collection: BuiltinValueClass::Vector,
-        key: Some(BuiltinValueClass::Integer),
-        operation: Intrinsic::VectorRef,
+        key: Some(MethodKey::Class(BuiltinValueClass::Integer)),
+        operation: Intrinsic::VectorElement,
         with_default: Some(Intrinsic::VectorElementOr),
+    },
+    BuiltinMethod {
+        function: CollectionFunction::ElementSetter,
+        collection: BuiltinValueClass::Vector,
+        key: Some(MethodKey::Class(BuiltinValueClass::Integer)),
+        operation: Intrinsic::VectorElementSetter,
+        with_default: None,
+    },
+    BuiltinMethod {
+        function: CollectionFunction::Size,
+        collection: BuiltinValueClass::Table,
+        key: None,
+        operation: Intrinsic::CollectionSize,
+        with_default: None,
+    },
+    BuiltinMethod {
+        function: CollectionFunction::Element,
+        collection: BuiltinValueClass::Table,
+        key: Some(MethodKey::Object),
+        operation: Intrinsic::TableElement,
+        with_default: Some(Intrinsic::TableElementOr),
+    },
+    BuiltinMethod {
+        function: CollectionFunction::ElementSetter,
+        collection: BuiltinValueClass::Table,
+        key: Some(MethodKey::Object),
+        operation: Intrinsic::TableElementSetter,
+        with_default: None,
     },
     // A string's size is its cached scalar count, and its keys are
     // positions: no integer indexes a string.
@@ -146,7 +190,7 @@ pub const BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod {
         function: CollectionFunction::Element,
         collection: BuiltinValueClass::String,
-        key: Some(BuiltinValueClass::StringPosition),
+        key: Some(MethodKey::Class(BuiltinValueClass::StringPosition)),
         operation: Intrinsic::Text(TextFunction::StringElement),
         with_default: Some(Intrinsic::Text(TextFunction::StringElementOr)),
     },
@@ -155,6 +199,29 @@ pub const BUILTIN_METHODS: &[BuiltinMethod] = &[
         collection: BuiltinValueClass::StringBuilder,
         key: None,
         operation: Intrinsic::Text(TextFunction::BuilderSize),
+        with_default: None,
+    },
+    // `add!` grows a stretchy vector by any element, and a string builder
+    // by a character or a string.
+    BuiltinMethod {
+        function: CollectionFunction::Add,
+        collection: BuiltinValueClass::StretchyVector,
+        key: Some(MethodKey::Object),
+        operation: Intrinsic::StretchyAdd,
+        with_default: None,
+    },
+    BuiltinMethod {
+        function: CollectionFunction::Add,
+        collection: BuiltinValueClass::StringBuilder,
+        key: Some(MethodKey::Class(BuiltinValueClass::Character)),
+        operation: Intrinsic::Text(TextFunction::BuilderAddCharacter),
+        with_default: None,
+    },
+    BuiltinMethod {
+        function: CollectionFunction::Add,
+        collection: BuiltinValueClass::StringBuilder,
+        key: Some(MethodKey::Class(BuiltinValueClass::String)),
+        operation: Intrinsic::Text(TextFunction::BuilderAddString),
         with_default: None,
     },
 ];
@@ -189,12 +256,14 @@ mod tests {
             assert!(
                 BUILTIN_METHODS[..index].iter().all(|earlier| (
                     earlier.function,
-                    earlier.collection
+                    earlier.collection,
+                    earlier.key
                 ) != (
                     method.function,
-                    method.collection
+                    method.collection,
+                    method.key
                 )),
-                "{} has two methods for one class",
+                "{} has two methods for one class and key",
                 method.function.name()
             );
             let takes_key = method.function != CollectionFunction::Size;
@@ -205,9 +274,13 @@ mod tests {
                 method.function.name()
             );
         }
-        assert_eq!(
-            builtin_methods(CollectionFunction::ElementSetter).count(),
-            0
-        );
+        for (function, rows) in [
+            (CollectionFunction::Size, 4),
+            (CollectionFunction::Element, 3),
+            (CollectionFunction::ElementSetter, 2),
+            (CollectionFunction::Add, 3),
+        ] {
+            assert_eq!(builtin_methods(function).count(), rows);
+        }
     }
 }
