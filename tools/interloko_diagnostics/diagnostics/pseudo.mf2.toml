@@ -81,6 +81,7 @@
 "sem.instance-of-impossible" = "[ps] instance? cannot match { $actual } as { $expected }"
 "sem.cast-type-mismatch" = "[ps] as got { $actual }, need { $expected }"
 "sem.cast-impossible" = "[ps] cannot cast { $actual } to { $expected }"
+"sem.vector-element-type-mismatch" = "[ps] vector element { $element_index } got { $actual }, need { $expected }"
 "sem.make-class-argument-type-mismatch" = "[ps] make class arg got { $actual }, need class object"
 "sem.host-backed-make" = "[ps] make cannot construct host-backed { $class }"
 "sem.builtin-value-make" = "[ps] make cannot construct built-in value { $class }"

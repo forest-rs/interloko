@@ -6972,16 +6972,38 @@ impl Lowering {
                     .unwrap_or(ClassId(u32::MAX)),
                 span: *span,
             },
-            ast::Expr::Vector { elements, span, .. } => Expr::VectorLiteral {
-                elements: elements
+            ast::Expr::Vector { elements, span, .. } => {
+                let elements = elements
                     .iter()
                     .map(|element| self.lower_expr(ctx, element))
-                    .collect(),
-                class: self
-                    .builtin_value_class(BuiltinValueClass::Vector)
-                    .unwrap_or(ClassId(u32::MAX)),
-                span: *span,
-            },
+                    .collect::<Vec<_>>();
+                // A vector holds `<object>`s, so each element must be a value
+                // that boxes as one.
+                for (index, element) in elements.iter().enumerate() {
+                    let actual = self.expr_kind(element);
+                    if !self.kinds_match(ValueKind::Any, actual) {
+                        ctx.diagnostics.push(
+                            Diagnostic::error(
+                                element.span(),
+                                DiagnosticCode::VectorElementTypeMismatch,
+                            )
+                            .with_arg(DiagnosticArg::unsigned(
+                                "element_index",
+                                u64::try_from(index + 1).unwrap_or(u64::MAX),
+                            ))
+                            .with_arg(DiagnosticArg::text("expected", "<object>"))
+                            .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+                        );
+                    }
+                }
+                Expr::VectorLiteral {
+                    elements,
+                    class: self
+                        .builtin_value_class(BuiltinValueClass::Vector)
+                        .unwrap_or(ClassId(u32::MAX)),
+                    span: *span,
+                }
+            }
             ast::Expr::Function {
                 params,
                 return_type,
