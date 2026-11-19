@@ -1,0 +1,19 @@
+// expect: run 120
+// expect: diagnostics 0
+
+// A read that signals, and that a handler leaves by exiting, does not
+// change the local it was assigning: `c` keeps its 'x'.
+
+define function main() => <integer>
+  let c = 'x';
+  let s = "ab";
+  handle
+    block ()
+      c := s[end-position(s)];
+      0
+    end
+  with restart e :: <type-error>
+    1
+  end;
+  as(<integer>, c)
+end;
