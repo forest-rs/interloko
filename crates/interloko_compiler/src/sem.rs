@@ -1,6 +1,7 @@
 //! Semantic IR for the first generic-dispatch Interloko slice.
 
 use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -6231,7 +6232,37 @@ struct Lowering {
     /// The names of the generics the program's own methods join, in
     /// source order, a name once for each method.
     program_method_names: Vec<String>,
+    /// What the passes so far found assigned to each untyped `let` local,
+    /// by its binding's span; see [`UntypedAssignments`]. A local's kind is
+    /// the join of its initializer's and this.
+    untyped_assigned: BTreeMap<(usize, usize), UntypedAssignments>,
+    /// The untyped `let` locals this pass has bound, by binding span, so an
+    /// assignment can tell one from a local that declares its type.
+    untyped_lets: BTreeSet<(usize, usize)>,
+    /// What this pass assigns to each untyped `let` local.
+    untyped_seen: BTreeMap<(usize, usize), UntypedAssignments>,
+    /// Whether this pass assigned some untyped `let` local a value its kind
+    /// does not hold, so another pass must widen it.
+    untyped_widened: bool,
     diagnostics: Vec<Diagnostic>,
+}
+
+/// The values assigned to an untyped `let` local, as lowering sees them.
+///
+/// As in Dylan, a `let` that declares no type binds an `<object>`: any
+/// value may be assigned to it. Its representation is the narrowest that
+/// holds every value bound to it, its initializer's and each assignment's,
+/// which the module's lowering passes find as a fixpoint, so an integer
+/// counter stays an unboxed `<integer>` and an accumulator that starts as
+/// `#f` holds an `<object>`. Soft typing still tracks the value each
+/// assignment stores.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct UntypedAssignments {
+    /// The join of the assigned values' kinds.
+    kind: ValueKind,
+    /// Whether some assigned callable's signature differs from the
+    /// local's, so the local holds untyped callables.
+    unsigned: bool,
 }
 
 impl Lowering {
@@ -6271,6 +6302,10 @@ impl Lowering {
                 .iter()
                 .map(|method| method.name.clone())
                 .collect(),
+            untyped_assigned: BTreeMap::new(),
+            untyped_lets: BTreeSet::new(),
+            untyped_seen: BTreeMap::new(),
+            untyped_widened: false,
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
@@ -8599,6 +8634,7 @@ impl Lowering {
         self.infer_open_result_signatures(module, diagnostic_len, closure_len);
         self.diagnostics.truncate(diagnostic_len);
         self.closures.truncate(closure_len);
+        self.start_untyped_pass();
         self.snapshot_dispatch_specializers();
         self.methods.clear();
         for method in &module.methods {
@@ -8678,7 +8714,7 @@ impl Lowering {
         diagnostic_len: usize,
         closure_len: usize,
     ) {
-        let max_passes = module
+        let mut max_passes = module
             .methods
             .len()
             .saturating_add(module.functions.len())
@@ -8687,10 +8723,13 @@ impl Lowering {
             // after the constant it reads.
             .saturating_add(module.constants.len())
             .saturating_add(2);
-        for _ in 0..max_passes {
+        let mut pass = 0;
+        while pass < max_passes {
+            pass += 1;
             let before = self.result_signature_snapshot();
             self.diagnostics.truncate(diagnostic_len);
             self.closures.truncate(closure_len);
+            self.start_untyped_pass();
             self.snapshot_dispatch_specializers();
             self.methods.clear();
 
@@ -8715,10 +8754,123 @@ impl Lowering {
             }
             self.lower_library_functions();
 
-            if self.result_signature_snapshot() == before {
+            // Untyped locals widen only once the results this pass read
+            // are settled, so a callee's provisional result never widens
+            // one; widening is monotone, so it ends, and each widening may
+            // take a pass to settle the results that depend on it.
+            if self.result_signature_snapshot() != before {
+                continue;
+            }
+            // A widening that changes nothing would only repeat itself; the
+            // final pass then reports the assignment it could not take.
+            if !self.untyped_widened || !self.widen_untyped_lets() {
                 break;
             }
+            max_passes = max_passes.saturating_add(2);
         }
+    }
+
+    /// Whether an untyped `let` bound at `span` is tracked by that span
+    /// ([`UntypedAssignments`]). Only a binding with a source position of
+    /// its own is: the kernel library's code keeps none, so its spans
+    /// cannot tell its locals apart. It is written so each untyped local
+    /// keeps its initializer's kind, and an assignment of another kind is
+    /// checked against it.
+    const fn tracks_untyped_let(&self, span: Span) -> bool {
+        !self.kernel_scope && span.start < span.end
+    }
+
+    /// Starts a lowering pass's record of untyped `let` locals.
+    fn start_untyped_pass(&mut self) {
+        self.untyped_lets.clear();
+        self.untyped_seen.clear();
+        self.untyped_widened = false;
+    }
+
+    /// Widens each untyped `let` local by what the last pass assigned it,
+    /// for the next pass, and returns whether any local widened.
+    fn widen_untyped_lets(&mut self) -> bool {
+        let before = self.untyped_assigned.clone();
+        let seen = core::mem::take(&mut self.untyped_seen);
+        for (key, assigned) in seen {
+            let widened = match self.untyped_assigned.get(&key) {
+                Some(previous) => UntypedAssignments {
+                    kind: self.join_result_kind(previous.kind, assigned.kind),
+                    unsigned: previous.unsigned || assigned.unsigned,
+                },
+                None => assigned,
+            };
+            self.untyped_assigned.insert(key, widened);
+        }
+        self.untyped_assigned != before
+    }
+
+    /// The kind and callable signature of an untyped `let` local bound at
+    /// `span` to a value of kind `actual` and signature `signature`: the
+    /// join of the value's and every value the passes so far found assigned
+    /// to it ([`UntypedAssignments`]).
+    fn untyped_let_kind(
+        &mut self,
+        span: Span,
+        actual: ValueKind,
+        signature: Option<CallableSignature>,
+    ) -> (ValueKind, Option<CallableSignature>) {
+        let key = (span.start, span.end);
+        self.untyped_lets.insert(key);
+        let Some(assigned) = self.untyped_assigned.get(&key) else {
+            return (actual, signature);
+        };
+        let kind = self.join_result_kind(actual, assigned.kind);
+        let signature = signature.filter(|_| kind == ValueKind::Callable && !assigned.unsigned);
+        (kind, signature)
+    }
+
+    /// Lowers `value` assigned to the untyped `let` local bound at `span`,
+    /// of kind `kind` and signature `signature` in this pass: any value
+    /// may be assigned, so one the local's kind does not hold widens it in
+    /// the next pass. Only a pass whose locals did not reach their
+    /// fixpoint reports one as a mismatch, which the module's passes
+    /// prevent.
+    fn lower_untyped_assigned_value(
+        &mut self,
+        ctx: &mut FunctionContext,
+        name: &str,
+        span: Span,
+        kind: ValueKind,
+        signature: Option<&CallableSignature>,
+        value: &ast::Expr,
+    ) -> Expr {
+        let value_expr = self.lower_expr(ctx, value);
+        let actual = self.expr_kind(&value_expr);
+        if actual == ValueKind::Error {
+            return value_expr;
+        }
+        let actual_signature = self.expr_callable_signature(&value_expr);
+        let unsigned = signature.is_some()
+            && !self.callable_signatures_match(signature, actual_signature.as_ref());
+        let key = (span.start, span.end);
+        let seen = match self.untyped_seen.get(&key) {
+            Some(seen) => UntypedAssignments {
+                kind: self.join_result_kind(seen.kind, actual),
+                unsigned: seen.unsigned || unsigned,
+            },
+            None => UntypedAssignments {
+                kind: actual,
+                unsigned,
+            },
+        };
+        self.untyped_seen.insert(key, seen);
+        if self.kinds_match(kind, actual) && !unsigned {
+            return value_expr;
+        }
+        self.untyped_widened = true;
+        ctx.diagnostics.push(
+            Diagnostic::error(value.span(), DiagnosticCode::LocalAssignmentTypeMismatch)
+                .with_arg(DiagnosticArg::text("local", name))
+                .with_arg(DiagnosticArg::text("expected", self.kind_name(kind)))
+                .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+        );
+        Expr::Error { span: value.span() }
     }
 
     fn result_signature_snapshot(&self) -> Vec<Vec<ValueKind>> {
@@ -9432,15 +9584,23 @@ impl Lowering {
                             });
                         ctx.diagnostics.push(diagnostic);
                     }
+                    let untyped = expected_type.is_none();
                     let local_kind = expected_kind.unwrap_or(actual_kind);
                     let range = expected_type.as_ref().and_then(|resolved| resolved.range);
-                    let value = self.limit_value(value, local_kind, range);
                     let callable_signature = expected_type
                         .and_then(|resolved| resolved.callable_signature)
                         .or(match actual_kind {
                             ValueKind::Callable => actual_callable_signature,
                             _ => None,
                         });
+                    // An untyped `let` holds every value assigned to it.
+                    let (local_kind, callable_signature) =
+                        if untyped && self.tracks_untyped_let(binding.span) {
+                            self.untyped_let_kind(binding.span, local_kind, callable_signature)
+                        } else {
+                            (local_kind, callable_signature)
+                        };
+                    let value = self.limit_value(value, local_kind, range);
                     if ctx.find_local(&binding.name).is_some() {
                         ctx.diagnostics.push(
                             Diagnostic::error(binding.span, DiagnosticCode::DuplicateLocal)
@@ -9577,6 +9737,7 @@ impl Lowering {
                                 });
                             ctx.diagnostics.push(diagnostic);
                         }
+                        let untyped = expected_type.is_none();
                         let kind = expected_kind.unwrap_or(actual_kind);
                         let range = expected_type.as_ref().and_then(|resolved| resolved.range);
                         let callable_signature = expected_type
@@ -9585,6 +9746,13 @@ impl Lowering {
                                 ValueKind::Callable => actual_callable_signature,
                                 _ => None,
                             });
+                        // An untyped binding holds every value assigned to it.
+                        let (kind, callable_signature) =
+                            if untyped && self.tracks_untyped_let(binding.span) {
+                                self.untyped_let_kind(binding.span, kind, callable_signature)
+                            } else {
+                                (kind, callable_signature)
+                            };
                         let id = ctx.add_local(
                             self.local_definition(binding.definition, &binding.name),
                             binding.name.clone(),
@@ -17818,11 +17986,22 @@ impl Lowering {
         }
         let kind = ctx.local_kind(local);
         let signature = ctx.local_callable_signature(local);
-        let range = ctx
-            .locals
-            .get(local.0 as usize)
-            .and_then(|local| local.range);
-        let value = self.lower_assigned_value(ctx, name, kind, signature.as_ref(), range, value);
+        let binding = ctx.locals.get(local.0 as usize);
+        let range = binding.and_then(|local| local.range);
+        let untyped = binding.map(|binding| binding.span).filter(|span| {
+            self.tracks_untyped_let(*span) && self.untyped_lets.contains(&(span.start, span.end))
+        });
+        let value = match untyped {
+            Some(binding) => self.lower_untyped_assigned_value(
+                ctx,
+                name,
+                binding,
+                kind,
+                signature.as_ref(),
+                value,
+            ),
+            None => self.lower_assigned_value(ctx, name, kind, signature.as_ref(), range, value),
+        };
         ctx.note_assignment(local);
         Expr::AssignLocal {
             local,
@@ -17872,14 +18051,28 @@ impl Lowering {
             );
             return Expr::Error { span };
         }
-        let value = self.lower_assigned_value(
-            ctx,
-            name,
-            captured.kind,
-            captured.callable_signature.as_ref(),
-            captured.range,
-            value,
-        );
+        // A capture carries its source binding's span.
+        let untyped = Some(captured.span).filter(|span| {
+            self.tracks_untyped_let(*span) && self.untyped_lets.contains(&(span.start, span.end))
+        });
+        let value = match untyped {
+            Some(binding) => self.lower_untyped_assigned_value(
+                ctx,
+                name,
+                binding,
+                captured.kind,
+                captured.callable_signature.as_ref(),
+                value,
+            ),
+            None => self.lower_assigned_value(
+                ctx,
+                name,
+                captured.kind,
+                captured.callable_signature.as_ref(),
+                captured.range,
+                value,
+            ),
+        };
         if !ctx.assigned_captures.contains(&captured.source) {
             ctx.assigned_captures.push(captured.source);
         }
@@ -22511,6 +22704,40 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn untyped_lets_hold_every_value_bound_to_them() {
+        let module = lower_source(
+            "define function main() => <integer>\n  \
+             let n = 0;\n  \
+             while (n < 3) n := n + 1 end;\n  \
+             let result = #f;\n  \
+             result := n;\n  \
+             let text = \"\";\n  \
+             text := later(text);\n  \
+             let shared = 1;\n  \
+             let set = method (value) shared := value end;\n  \
+             set(\"s\");\n  \
+             n\nend;\n\
+             define function later(s :: <string>) s end;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        let main = &module.functions[0];
+        let kind = |name: &str| {
+            main.locals
+                .iter()
+                .find(|local| local.name == name)
+                .map(|local| local.kind)
+        };
+        // A counter stays an `<integer>`, an accumulator starting as `#f`
+        // holds an `<object>`, and a local a closure assigns another type
+        // widens too. A callee's provisional result, before its own
+        // inference settles, never widens one.
+        assert_eq!(kind("n"), Some(ValueKind::I64));
+        assert_eq!(kind("result"), Some(ValueKind::Any));
+        assert!(matches!(kind("text"), Some(ValueKind::String(_))));
+        assert_eq!(kind("shared"), Some(ValueKind::Any));
     }
 
     #[test]

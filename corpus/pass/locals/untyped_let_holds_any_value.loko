@@ -1,0 +1,52 @@
+// expect: run 1111
+// expect: diagnostics 0
+// expect: dump lowered contains local l1 n = %r3: i64
+
+// As in Dylan, a `let` that declares no type binds an `<object>`, so any
+// value may be assigned to it: an accumulator may start as `#f`, and a
+// local holding one class may be assigned another. Its representation is
+// the narrowest that holds every value bound to it, so a counter that only
+// ever holds integers stays an unboxed `<integer>` (`count-to`'s `n`
+// lowers to an `i64` register), and soft typing tracks the type each
+// assignment stores.
+
+define class <node> (<object>)
+  constant slot parent, init-value: #f, init-keyword: parent:;
+end;
+
+define class <leaf> (<object>) end;
+
+define function count-to(limit :: <integer>) => <integer>
+  let n = 0;
+  while (n < limit) n := n + 1 end;
+  n
+end;
+
+// The last integer, or `#f` when there is none.
+define function last-integer(items :: <vector>)
+  let found = #f;
+  for (item in items)
+    if (instance?(item, <integer>)) found := item end
+  end;
+  found
+end;
+
+// The root of a chain of nodes.
+define function root(n :: <node>) => <node>
+  let frame = n;
+  while (frame.parent) frame := frame.parent end;
+  frame
+end;
+
+define function main() => <integer>
+  let total = count-to(1000);
+  if (last-integer(#[#f, 7, "x"]) == 7 & last-integer(#[]) == #f) total := total + 100 end;
+  let top = make(<node>);
+  if (root(make(<node>, parent: make(<node>, parent: top))) == top) total := total + 10 end;
+  let thing = make(<node>);
+  thing := make(<leaf>);
+  // A closure may assign the local too.
+  let set-thing = method (value) thing := value end;
+  set-thing(1);
+  total + as(<integer>, thing)
+end;

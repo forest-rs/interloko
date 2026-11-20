@@ -1,11 +1,11 @@
-// expect: diagnostics 2
+// expect: diagnostics 1
 // expect: diagnostic contains expects callable(<integer>, <vector>) => <integer> but got callable(<integer>, #rest <vector>) => <integer>
-// expect: diagnostic code sem.local-assignment-type-mismatch
+// expect: diagnostic code sem.function-argument-type-mismatch
 
 // A value taking `#rest` gets the arguments after its required ones in a
 // vector its caller makes, so it never stands in for one taking a
-// `<vector>` parameter, whose caller passes one as it is, nor the other
-// way round, though the two take the same registers.
+// `<vector>` parameter, whose caller passes one as it is, though the two
+// take the same registers.
 
 define function count(a :: <integer>, #rest xs) => <integer>
   size(xs) + 10 * a
@@ -16,7 +16,5 @@ define function takev(f :: callable(<integer>, <vector>) => <integer>) => <integ
 end;
 
 define function main() => <integer>
-  let f = method (a :: <integer>, #rest xs) => <integer> size(xs) end;
-  f := method (a :: <integer>, v :: <vector>) => <integer> size(v) end;
-  takev(count) + f(1, 2, 3)
+  takev(count)
 end;

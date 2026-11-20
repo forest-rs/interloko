@@ -94,7 +94,7 @@
 "sem.slot-initializer-type-mismatch" = "slot `{ $slot }` expects { $expected } but initializer has { $actual }"
 "sem.slot-assignment-type-mismatch" = "slot `{ $slot }` expects { $expected } but assigned value has { $actual }"
 "sem.slot-assignment-read-only" = "slot `{ $slot }` on `{ $class }` is read-only ({ $reason })"
-"sem.local-assignment-type-mismatch" = "local `{ $local }` holds { $expected } but is assigned { $actual }; a `let` without a type takes its initializer's"
+"sem.local-assignment-type-mismatch" = "local `{ $local }` holds { $expected } but is assigned { $actual }"
 "sem.assignment-target-not-assignable" = "`{ $name }` is a { $kind } and cannot be assigned; only `let` locals and parameters can"
 "sem.unexpected-keyword-argument" = "`{ $callee }` takes no `{ $keyword }:` argument"
 "sem.duplicate-keyword-argument" = "`{ $keyword }:` is given more than once"
