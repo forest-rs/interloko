@@ -21,7 +21,8 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use interloko_compiler::session::{
-    CompilerSession, ExecutionTraceDetail, RuntimeMode, SessionArtifacts, SessionRuntime,
+    CompilerSession, ExecutionTraceDetail, FunctionValue, RuntimeMode, SessionArtifacts,
+    SessionRuntime,
 };
 
 const SOURCE: &str = include_str!("lisp.loko");
@@ -42,6 +43,18 @@ fn call(artifacts: &SessionArtifacts, runtime: &mut SessionRuntime, name: &str) 
         .call_function(artifacts, name, &[], None)
         .unwrap_or_else(|error| panic!("{name} failed: {error}"));
     black_box(outcome);
+}
+
+/// Checks that the interpreter computes `(fib n)`, so the bench measures a working one.
+fn check(artifacts: &SessionArtifacts, name: &str, expected: &str) {
+    let outcome = artifacts
+        .call_function(name, &[], None)
+        .unwrap_or_else(|error| panic!("{name} failed: {error}"));
+    assert_eq!(
+        outcome.value,
+        FunctionValue::String(expected.into()),
+        "{name} computes its Fibonacci number"
+    );
 }
 
 /// Median wall time of one call of `name`.
@@ -92,6 +105,14 @@ fn main() {
         .compile(id, RuntimeMode::CompileOnly)
         .expect("source was just added");
     assert!(!artifacts.has_errors(), "the benchmark program compiles");
+    for (name, expected) in [
+        ("fib-1", "1"),
+        ("fib-2", "1"),
+        ("fib-5", "5"),
+        ("fib-16", "987"),
+    ] {
+        check(&artifacts, name, expected);
+    }
     let mut runtime = artifacts.runtime().expect("a runtime image");
 
     let nanos = |duration: Duration| duration.as_secs_f64() * 1e9;
