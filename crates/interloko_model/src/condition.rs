@@ -20,6 +20,7 @@
 //!       <unknown-keyword-error>
 //!       <simple-error>
 //!       <argument-count-error>
+//!       <stack-overflow-error>
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
@@ -45,6 +46,8 @@
 //! An `<argument-count-error>` reports a call through a callable value
 //! that passed more or fewer arguments than its callee takes: how many it
 //! takes and how many the call passed.
+//! A `<stack-overflow-error>` reports a call that would have made the
+//! stack deeper than the run allows.
 //! Their slots are read-only, so they add no setter generics to a program.
 //!
 //! A send never finds several equally specific methods: a module whose
@@ -92,6 +95,9 @@ pub enum ConditionClass {
     /// `<argument-count-error>`: a call through a callable value passed
     /// more or fewer required arguments than its callee takes.
     ArgumentCountError,
+    /// `<stack-overflow-error>`: a call would have made the stack deeper
+    /// than the run allows.
+    StackOverflowError,
 }
 
 impl ConditionClass {
@@ -113,6 +119,7 @@ impl ConditionClass {
         Self::UnknownKeywordError,
         Self::SimpleError,
         Self::ArgumentCountError,
+        Self::StackOverflowError,
     ];
 
     /// Returns the Loko-visible class name.
@@ -132,6 +139,7 @@ impl ConditionClass {
             Self::UnknownKeywordError => "<unknown-keyword-error>",
             Self::SimpleError => "<simple-error>",
             Self::ArgumentCountError => "<argument-count-error>",
+            Self::StackOverflowError => "<stack-overflow-error>",
         }
     }
 
@@ -152,6 +160,7 @@ impl ConditionClass {
             b"<unknown-keyword-error>" => Some(Self::UnknownKeywordError),
             b"<simple-error>" => Some(Self::SimpleError),
             b"<argument-count-error>" => Some(Self::ArgumentCountError),
+            b"<stack-overflow-error>" => Some(Self::StackOverflowError),
             _ => None,
         }
     }
@@ -173,7 +182,8 @@ impl ConditionClass {
             | Self::DivisionByZeroError
             | Self::UnknownKeywordError
             | Self::SimpleError
-            | Self::ArgumentCountError => Some(Self::Error),
+            | Self::ArgumentCountError
+            | Self::StackOverflowError => Some(Self::Error),
         }
     }
 
@@ -181,7 +191,7 @@ impl ConditionClass {
     #[must_use]
     pub const fn slots(self) -> &'static [ConditionSlot] {
         match self {
-            Self::Condition | Self::Error => &[],
+            Self::Condition | Self::Error | Self::StackOverflowError => &[],
             Self::TypeError => &TYPE_ERROR_SLOTS,
             Self::NoApplicableMethod => &NO_APPLICABLE_METHOD_SLOTS,
             Self::SelectError => &SELECT_ERROR_SLOTS,

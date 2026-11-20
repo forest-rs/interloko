@@ -7338,7 +7338,9 @@ pub struct RunLimits {
     pub fuel: u64,
     /// How deep the call's stack may grow, in VM frames: one per Loko call,
     /// plus the frames of closures, adapters and handlers between them.
-    /// Going deeper traps with `call depth limit exceeded`.
+    /// A call going deeper signals `<stack-overflow-error>`, whose
+    /// handlers get [`runtime::driver::STACK_OVERFLOW_HEADROOM`] more
+    /// frames; past those it traps with `call depth limit exceeded`.
     pub max_call_depth: usize,
 }
 
@@ -17589,11 +17591,12 @@ end;";
             let source = format!(
                 "define function helper(x :: <integer>) => <integer>\n  {expression}\nend;\ndefine function main()\n  helper(41)\nend;"
             );
-            // A shallow stack keeps the runaway recursion's instructions
-            // within the trace's limit.
+            // Little fuel ends the runaway recursion in a trap, with its
+            // instructions within the trace's limit. (Running out of stack
+            // signals a condition instead.)
             let mut session = CompilerSession::new();
             session.set_run_limits(RunLimits {
-                max_call_depth: 256,
+                fuel: 2_000,
                 ..RunLimits::DEFAULT
             });
             let id = session.add_source("nested.loko", &source);
@@ -17661,10 +17664,7 @@ end;";
                 let recording::Outcome::Trapped(trap) = outcome.result else {
                     panic!("expected a trap, found {:?}", outcome.result);
                 };
-                assert!(matches!(
-                    trap.trap,
-                    execution_tape::vm::Trap::CallDepthExceeded
-                ));
+                assert!(matches!(trap.trap, execution_tape::vm::Trap::FuelExceeded));
                 // The trap stack is pinned before unwinding: every activation
                 // is still present, each suspended at its call instruction.
                 assert_eq!(stack.len(), view.activation_count());
@@ -17682,7 +17682,7 @@ end;";
             assert!(dump.contains(" call -> helper@0 "));
             assert!(dump.contains(" instr helper@0 (2:") && dump.contains(") depth=2 "));
             assert!(dump.contains(if should_trap {
-                "outcome: trapped: call depth limit exceeded at helper@"
+                "outcome: trapped: fuel limit exceeded at helper@"
             } else {
                 "outcome: returned (42) at main@"
             }));
@@ -28941,6 +28941,14 @@ end;";
         }
     }
 
+    fn overflowed(outcome: Result<FunctionCallOutcome, FunctionCallError>) -> bool {
+        matches!(
+            outcome,
+            Err(FunctionCallError::UnhandledCondition { ref class, .. })
+                if class == "<stack-overflow-error>"
+        )
+    }
+
     #[test]
     fn run_limits_bound_call_depth_and_fuel_for_each_runtime() {
         let mut artifacts = CompilerSession::compile_source(
@@ -28964,10 +28972,12 @@ end;";
         });
         let shallow = runtime.call_function(&artifacts, "down", &[int(500)], None);
         assert_eq!(shallow.expect("within the depth").value, int(500));
-        assert!(matches!(
-            trap_of(runtime.call_function(&artifacts, "down", &[int(2_000)], None)),
-            Trap::CallDepthExceeded
-        ));
+        assert!(overflowed(runtime.call_function(
+            &artifacts,
+            "down",
+            &[int(2_000)],
+            None
+        )));
 
         // Each slot read is a host call, charged as fuel: running out of
         // fuel ends the loop, and no separate count of host calls does.
@@ -28990,14 +29000,62 @@ end;";
             max_call_depth: 1_000,
             ..RunLimits::DEFAULT
         });
-        assert!(matches!(
-            trap_of(artifacts.call_function("down", &[int(2_000)], None)),
-            Trap::CallDepthExceeded
-        ));
+        assert!(overflowed(artifacts.call_function(
+            "down",
+            &[int(2_000)],
+            None
+        )));
         let mut runtime = artifacts.runtime().expect("tape is available");
         assert_eq!(runtime.run_limits(), artifacts.run_limits());
+        assert!(overflowed(runtime.call_function(
+            &artifacts,
+            "down",
+            &[int(2_000)],
+            None
+        )));
+    }
+
+    #[test]
+    fn a_stack_overflow_handler_has_the_headroom_and_no_more() {
+        let source = "\
+define function forever(n :: <integer>) => <integer>
+  1 + forever(n + 1)
+end;
+define function down(n :: <integer>) => <integer>
+  if (n = 0) 0 else 1 + down(n - 1) end
+end;
+define function within(n :: <integer>) => <integer>
+  handle forever(0) with restart e :: <stack-overflow-error> when down(n) = n => n end
+end;
+define function unwound(n :: <integer>) => <integer>
+  block () forever(0) exception (e :: <stack-overflow-error>) down(n) end
+end;
+define function runaway() => <integer>
+  handle forever(0) with restart e :: <stack-overflow-error> when forever(0) = 0 => 0 end
+end;";
+        let mut artifacts =
+            CompilerSession::compile_source("headroom.loko", source, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        artifacts.set_run_limits(RunLimits {
+            max_call_depth: 500,
+            ..RunLimits::DEFAULT
+        });
+        let int = FunctionValue::Integer;
+        let headroom = i64::try_from(runtime::driver::STACK_OVERFLOW_HEADROOM).expect("small");
+        // A handler's guard runs above the stack that ran out, which its
+        // own calls may deepen by the headroom.
+        let handled = artifacts.call_function("within", &[int(headroom - 10)], None);
+        assert_eq!(handled.expect("the guard fits").value, int(headroom - 10));
+        // A `block`'s exception clause runs once the block has exited, back
+        // under the call depth, so it has the whole stack again.
+        let unwound = artifacts.call_function("unwound", &[int(450)], None);
+        assert_eq!(unwound.expect("the clause fits").value, int(450));
+        // A guard that runs out of the headroom too traps: nothing signals
+        // again until the stack is back under the call depth.
+        let overflowed = artifacts.call_function("within", &[int(headroom + 10)], None);
+        assert!(matches!(trap_of(overflowed), Trap::CallDepthExceeded));
         assert!(matches!(
-            trap_of(runtime.call_function(&artifacts, "down", &[int(2_000)], None)),
+            trap_of(artifacts.call_function("runaway", &[], None)),
             Trap::CallDepthExceeded
         ));
     }
@@ -29023,7 +29081,8 @@ end;";
         assert_eq!(trapped.run_limits(), limits);
         assert!(matches!(
             trapped.runtime_result,
-            Some(RuntimeResult::Trap { ref trap }) if matches!(trap.trap, Trap::CallDepthExceeded)
+            Some(RuntimeResult::UnhandledCondition { ref class, .. })
+                if class == "<stack-overflow-error>"
         ));
 
         // An incremental session reruns `main` when only its limits change.
@@ -29042,7 +29101,7 @@ end;";
             .expect("added");
         assert!(matches!(
             trapped.artifacts.runtime_result,
-            Some(RuntimeResult::Trap { .. })
+            Some(RuntimeResult::UnhandledCondition { .. })
         ));
     }
 

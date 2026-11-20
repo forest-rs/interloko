@@ -48,9 +48,9 @@ use execution_tape::program::LinkId;
 use execution_tape::program::ValueType;
 use execution_tape::value::{FuncId, FuncRef, Obj, TagRef, UnitId, Value};
 use execution_tape::vm::{
-    ActivationId, ComputationInspection, GuardKeys, InstallError, LinkGuard, PendingHostCall,
-    PendingSuspension, RelinkError, RunStatus, TagError, Trap, TrapInfo, Turn, TurnOptions,
-    TurnOutcome, Units, Vm,
+    ActivationId, CallDepthException, ComputationInspection, GuardKeys, InstallError, LinkGuard,
+    PendingHostCall, PendingSuspension, RelinkError, RunStatus, TagError, Trap, TrapInfo, Turn,
+    TurnOptions, TurnOutcome, Units, Vm,
 };
 use interloko_model::{ClassId, GenericFunctionId};
 
@@ -67,7 +67,8 @@ use crate::control::{
     CONDITION_GUARD_RESULT, CONDITION_GUARD_UNWOUND, CONDITION_NO_APPLICABLE_METHOD,
     CONDITION_PUSH_HANDLER, CONDITION_SIGNAL, CONDITION_TYPE_ERROR, CONTROL_CHECK_EXIT,
     CONTROL_POP, CONTROL_PUSH_EXIT, ControlFault, ControlState, ControlStats, RESTART_TAG,
-    RETRY_TAG, RestartDescriptor, is_control_symbol, restart_payload, retry_payload,
+    RETRY_TAG, RestartDescriptor, STACK_OVERFLOW_TAG, is_control_symbol, restart_payload,
+    retry_payload,
 };
 use crate::send::senders_attributable;
 
@@ -540,7 +541,8 @@ impl<H: RuntimeHost> Drop for OpenSends<'_, H> {
 }
 
 /// Defines the control tags units import, or finds them when the VM already
-/// has them.
+/// has them, and has a call past the VM's call depth throw the stack-overflow
+/// tag ([`STACK_OVERFLOW_HEADROOM`]).
 fn define_tags<H: Host>(vm: &mut Vm<H>) -> Result<VmTags, LinkError> {
     let mut define = |name: &str, payload: &[ValueType]| match vm.units().defined_tag(name) {
         Some(tag) => Ok(tag),
@@ -548,11 +550,24 @@ fn define_tags<H: Host>(vm: &mut Vm<H>) -> Result<VmTags, LinkError> {
     };
     // Only checking host calls raise it, and only the guest catches it.
     define(CHECK_FAILED_TAG, &[])?;
-    Ok(VmTags {
+    // Only a call past the call depth throws it, and only the guest
+    // catches it, to signal `<stack-overflow-error>`.
+    let stack_overflow = define(STACK_OVERFLOW_TAG, &[])?;
+    let tags = VmTags {
         restart: define(RESTART_TAG, &restart_payload())?,
         abort: define(ABORT_TAG, &[])?,
         retry: define(RETRY_TAG, &retry_payload())?,
-    })
+    };
+    let exception = CallDepthException {
+        tag: stack_overflow,
+        headroom: STACK_OVERFLOW_HEADROOM,
+    };
+    if vm.limits().call_depth_exception != Some(exception) {
+        let mut limits = vm.limits().clone();
+        limits.call_depth_exception = Some(exception);
+        vm.set_limits(limits);
+    }
+    Ok(tags)
 }
 
 /// Copies the live frames and their initialized registers, innermost first.
@@ -614,6 +629,14 @@ fn snapshot_sites(vm: Units<'_>, units: &UnitTable) -> Vec<SiteSnapshot> {
 /// thrash its guard. The guard stays megamorphic until an install or a run
 /// of other code empties it, as a run of the same code keeps it.
 pub const MEGAMORPHIC_FILLS: u32 = 4;
+
+/// Frames a run may use past its call depth to handle a
+/// `<stack-overflow-error>`: the handlers, and whatever they call, run on
+/// top of the stack that ran out. A run catches the overflow, and may
+/// overflow and catch again once it is back under its call depth; a
+/// handler that needs more than this traps with `call depth limit
+/// exceeded`.
+pub const STACK_OVERFLOW_HEADROOM: usize = 4_096;
 
 fn snapshot_frames(
     mut inspection: ComputationInspection<'_>,

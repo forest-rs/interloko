@@ -2,7 +2,7 @@
 // expect: run reports unhandled condition <no-applicable-method>: dispatch.no-applicable-method: no method of area applies to (<square>), called with ({<square>})
 // expect: diagnostics 0
 // expect: dump lowered contains = condition.no-applicable-method g0
-// expect: dump lowered lacks trap
+// expect: dump lowered lacks trap 1 (no applicable method)
 
 // A send whose argument no method accepts signals a
 // `<no-applicable-method>` instead of trapping. Nothing handles it here,

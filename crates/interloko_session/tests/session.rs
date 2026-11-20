@@ -452,7 +452,8 @@ fn run_limits_are_a_runtime_setting_that_edits_keep() {
     let trapped = |session: &Session| {
         matches!(
             session.call("deep", &[], None),
-            Err(FunctionCallError::Trap { .. })
+            Err(FunctionCallError::UnhandledCondition { ref class, .. })
+                if class == "<stack-overflow-error>"
         )
     };
     assert!(trapped(&session));

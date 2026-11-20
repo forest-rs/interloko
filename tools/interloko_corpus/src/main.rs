@@ -12,7 +12,7 @@ use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::{HostClass, HostMetaRegistry, HostSlot, ValueKind};
 use interloko_compiler::session::{
     CompilerSession, DumpStage, FunctionCallError, FunctionValue, IncrementalCompilerSession,
-    RuntimeMode, RuntimeResult, TurnStats,
+    RunLimits, RuntimeMode, RuntimeResult, TurnStats,
 };
 use interloko_compiler::typing::TypingConfig;
 use interloko_diagnostics::DiagnosticRenderer;
@@ -110,6 +110,7 @@ fn heap_command(roots: &[String]) -> Result<Outcome> {
                 display_path: path.display().to_string(),
                 typing_config: parse_typing_config(&path, &source).unwrap_or_default(),
                 codegen_policy: parse_codegen_policy(&path, &source).unwrap_or_default(),
+                run_limits: parse_run_limits(&path, &source).unwrap_or_default(),
                 source,
                 expectations: Vec::new(),
                 host_registry,
@@ -264,6 +265,7 @@ fn dump_command(args: &[String]) -> Result<Outcome> {
     let mut session = CompilerSession::with_grammar_registry(grammar_registry);
     session.set_typing_config(parse_typing_config(Path::new(&args[1]), &source)?);
     session.set_codegen_policy(parse_codegen_policy(Path::new(&args[1]), &source)?);
+    session.set_run_limits(parse_run_limits(Path::new(&args[1]), &source)?);
     let source_file = session.add_source_with_grammar(&args[1], &source, grammar_environment);
     let artifacts = session
         .compile_with_host_registry(source_file, RuntimeMode::CompileOnly, &host_registry)
@@ -283,6 +285,7 @@ fn load_cases(root: &Path) -> Result<Vec<Case>> {
         let (expectations, host_registry, grammar_environment) = parse_header(&path, &source)?;
         let typing_config = parse_typing_config(&path, &source)?;
         let codegen_policy = parse_codegen_policy(&path, &source)?;
+        let run_limits = parse_run_limits(&path, &source)?;
         let display_path = display_path(root, &path);
         cases.push(Case {
             display_path,
@@ -292,6 +295,7 @@ fn load_cases(root: &Path) -> Result<Vec<Case>> {
             grammar_environment,
             typing_config,
             codegen_policy,
+            run_limits,
         });
     }
     Ok(cases)
@@ -407,6 +411,24 @@ fn parse_typing_config(path: &Path, source: &str) -> Result<TypingConfig> {
         break;
     }
     Ok(config)
+}
+
+/// The run limits a `// call-depth: N` header sets, or the defaults.
+fn parse_run_limits(path: &Path, source: &str) -> Result<RunLimits> {
+    let mut limits = RunLimits::default();
+    for (index, line) in source.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            if let Some(rest) = trimmed.strip_prefix("// call-depth:") {
+                limits.max_call_depth = rest.trim().parse().map_err(|_| {
+                    invalid_header(path, index + 1, "call-depth must be a frame count")
+                })?;
+            }
+            continue;
+        }
+        break;
+    }
+    Ok(limits)
 }
 
 fn parse_codegen_policy(path: &Path, source: &str) -> Result<CodegenPolicy> {
@@ -834,6 +856,7 @@ fn compile_case_under(
         let mut session = CompilerSession::with_grammar_registry(grammar_registry);
         session.set_typing_config(case.typing_config);
         session.set_codegen_policy(codegen_policy);
+        session.set_run_limits(case.run_limits);
         let source_file = session.add_source_with_grammar(
             &case.display_path,
             &case.source,
@@ -846,6 +869,7 @@ fn compile_case_under(
         let mut session = IncrementalCompilerSession::with_grammar_registry(grammar_registry);
         session.set_typing_config(case.typing_config);
         session.set_codegen_policy(codegen_policy);
+        session.set_run_limits(case.run_limits);
         let source = session.add_source_with_grammar(
             &case.display_path,
             &case.source,
@@ -955,6 +979,7 @@ struct Case {
     grammar_environment: GrammarEnvironmentSelection,
     typing_config: TypingConfig,
     codegen_policy: CodegenPolicy,
+    run_limits: RunLimits,
 }
 
 #[derive(Debug)]

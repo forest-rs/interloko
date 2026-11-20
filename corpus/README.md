@@ -52,6 +52,9 @@ Supported expectations:
   other policy, and the check fails unless both runs end the same way: the
   same value, or the same runtime outcome code (a failure may be reported at a
   different place, since the code differs).
+- `// call-depth: N`: run `main` with a call depth of `N` frames instead of
+  the default (`RunLimits::DEFAULT_MAX_CALL_DEPTH`), so a case about running
+  out of stack stays quick.
 - `// grammar: base-loko|derived-host`: select the grammar environment used by
   the session. `derived-host` is a trusted fixture that extends the base grammar
   for MOP/trace inspection while delegating parsing to the base parser.

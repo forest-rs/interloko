@@ -1,0 +1,19 @@
+// expect: run 1998
+// expect: diagnostics 0
+// call-depth: 2000
+
+// The overflow is signalled in the frame whose call ran out, with that
+// frame's own handlers in place: the deepest `f` (`main` is frame 1, so
+// it is `f(1998)` at frame 1999) catches it, and returns its own `n`.
+
+define function f(n :: <integer>) => <integer>
+  block ()
+    f(n + 1)
+  exception (e :: <stack-overflow-error>)
+    n
+  end
+end;
+
+define function main() => <integer>
+  f(0)
+end;

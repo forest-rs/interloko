@@ -1,0 +1,16 @@
+// expect: run 7
+// expect: diagnostics 0
+// call-depth: 2000
+
+// A closure recursing through itself runs out of stack in its own frame,
+// which signals, so a handler in the function that made the closure
+// catches it.
+
+define function main() => <integer>
+  let f = method (self, n :: <integer>) => <integer> 1 + self(self, n + 1) end;
+  block ()
+    f(f, 0)
+  exception (e :: <stack-overflow-error>)
+    7
+  end
+end;

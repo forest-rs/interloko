@@ -707,6 +707,9 @@ pub enum LokoTrap {
     /// itself ([`Instr::StringStep`]): the string's host broke the rule that
     /// a `<string>`'s bytes never change.
     StringStepMissing,
+    /// A `<stack-overflow-error>` was resumed: the call that ran out of
+    /// stack cannot go on.
+    StackOverflowResumed,
 }
 
 impl LokoTrap {
@@ -715,6 +718,7 @@ impl LokoTrap {
         Self::MakeClassOutsideBound,
         Self::MakeMissingInitKeyword,
         Self::StringStepMissing,
+        Self::StackOverflowResumed,
     ];
 
     /// Returns the tape trap code for this condition.
@@ -724,6 +728,7 @@ impl LokoTrap {
             Self::MakeClassOutsideBound => 5,
             Self::MakeMissingInitKeyword => 6,
             Self::StringStepMissing => 7,
+            Self::StackOverflowResumed => 8,
         }
     }
 
@@ -734,6 +739,7 @@ impl LokoTrap {
             5 => Some(Self::MakeClassOutsideBound),
             6 => Some(Self::MakeMissingInitKeyword),
             7 => Some(Self::StringStepMissing),
+            8 => Some(Self::StackOverflowResumed),
             _ => None,
         }
     }
@@ -745,6 +751,7 @@ impl LokoTrap {
             Self::MakeClassOutsideBound => "make on a class outside the call's bound",
             Self::MakeMissingInitKeyword => "make on a class needing a missing init keyword",
             Self::StringStepMissing => "a string loop found no character at its own position",
+            Self::StackOverflowResumed => "a stack overflow's handler returned to the call",
         }
     }
 
@@ -754,7 +761,8 @@ impl LokoTrap {
         match self {
             Self::MakeClassOutsideBound
             | Self::MakeMissingInitKeyword
-            | Self::StringStepMissing => DiagnosticCode::RuntimeTrap,
+            | Self::StringStepMissing
+            | Self::StackOverflowResumed => DiagnosticCode::RuntimeTrap,
         }
     }
 }
@@ -828,6 +836,9 @@ pub enum ControlTag {
     /// Retry a frame with its function's current definition. The payload is
     /// how many more retry regions to cross, then the function to call.
     Retry,
+    /// A call past the run's call depth, which the VM throws at the call in
+    /// place of a trap. It has no payload.
+    StackOverflow,
 }
 
 /// One clause of a protected region.
@@ -2936,8 +2947,15 @@ impl<'module> Lowering<'module> {
             })
             .collect::<Result<Vec<_>, LowerError>>()?;
 
+        let stack_overflow = self
+            .module
+            .condition_class(sem::ConditionClass::StackOverflowError)
+            .ok_or_else(|| invalid_semantic("the <stack-overflow-error> class is missing"))?;
         for function in &mut functions {
             peephole::optimize(function);
+            // After the peephole pass, which drops the unreachable blocks
+            // that would otherwise hide where a region's code ends.
+            catch_stack_overflow(function, stack_overflow);
         }
         let dispatch = self.ids.dispatch.clone();
         let check_codegen = merge_check_records(checks);
@@ -4050,7 +4068,14 @@ impl<'module> Lowering<'module> {
         body.home_params(&closure.params, closure.span)?;
         let rets = self.value_kinds(&closure.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
+        // A region of its own, which catches nothing until
+        // [`catch_stack_overflow`] has it catch a stack overflow, so the
+        // closure's own frame signals it.
+        body.instructions.push(Instr::EnterRegion {
+            catches: Vec::new(),
+        });
         body.lower_block(&closure.body, &rets)?;
+        body.instructions.push(Instr::LeaveRegion);
         checks.append(&mut body.checks);
         Ok(Function {
             id: self.lower_closure_id(closure.id)?,
@@ -14060,6 +14085,131 @@ fn kind_expected(module: &sem::Module, kind: ValueKind) -> TypeObject {
         .map_or(TypeObject::Class(sem::OBJECT_CLASS_ID), TypeObject::Class)
 }
 
+/// Has every region of `function` catch a stack overflow
+/// ([`ControlTag::StackOverflow`]) ahead of any catch-all, and signal
+/// `<stack-overflow-error>` from a target inside the region.
+///
+/// The innermost region around the call that ran out catches it in the
+/// frame that made the call, or in the nearest frame below with a region
+/// when that frame has none (a dispatcher's or an adapter's, which bind
+/// no handlers), so the condition is signalled with every handler, exit
+/// and cleanup of that frame still in place, as any other error is: the
+/// target is inside the region, whose own clauses still catch what the
+/// signal throws, such as a restart of a `handle` in the same frame. The
+/// handlers run in the headroom the run keeps above the stack that ran
+/// out ([`interloko_runtime::driver::STACK_OVERFLOW_HEADROOM`]). The call
+/// cannot go on, so a handler that resumes the condition traps.
+///
+/// The labels and registers it adds come after the function's own, which
+/// keep their numbers, and each target sits at the end of its region, so
+/// the code the region protects keeps its place.
+fn catch_stack_overflow(function: &mut Function, class: sem::ClassId) {
+    let mut next_label = function
+        .instructions
+        .iter()
+        .filter_map(|instr| match instr {
+            Instr::Label { label } | Instr::CatchTarget { label, .. } => Some(label.0 + 1),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut label = || {
+        let label = LabelId(next_label);
+        next_label += 1;
+        label
+    };
+    let span = function.span;
+    let instructions = core::mem::take(&mut function.instructions);
+    let mut out = Vec::with_capacity(instructions.len());
+    // The targets of the regions open at each point, innermost last: each
+    // is placed at the end of its region, after the code the region
+    // protects, so that code keeps its place.
+    let mut open = Vec::new();
+    let mut instructions = instructions.into_iter().peekable();
+    while let Some(instr) = instructions.next() {
+        match instr {
+            Instr::EnterRegion { mut catches } => {
+                let target = label();
+                // Ahead of a catch-all, which would otherwise take it first.
+                let at = catches
+                    .iter()
+                    .position(|catch| matches!(catch, Catch::All { .. }))
+                    .unwrap_or(catches.len());
+                catches.insert(
+                    at,
+                    Catch::Tag {
+                        tag: ControlTag::StackOverflow,
+                        target,
+                    },
+                );
+                open.push(target);
+                out.push(Instr::EnterRegion { catches });
+            }
+            Instr::LeaveRegion => {
+                if let Some(target) = open.pop() {
+                    // Code that reaches the region's end goes on past the
+                    // target; code that cannot has nothing to jump over. No
+                    // code reaches the end of a region followed by a catch
+                    // target, which only a throw enters.
+                    let followed_by_target =
+                        matches!(instructions.peek(), Some(Instr::CatchTarget { .. }));
+                    let ended = followed_by_target
+                        || matches!(
+                            out.last(),
+                            Some(
+                                Instr::Return { .. }
+                                    | Instr::Jump { .. }
+                                    | Instr::Branch { .. }
+                                    | Instr::Throw { .. }
+                                    | Instr::Rethrow { .. }
+                                    | Instr::Trap { .. }
+                                    | Instr::SignalTypeError { .. }
+                            )
+                        );
+                    let after = (!ended).then(&mut label);
+                    let mut alloc = |kind| {
+                        let reg = register_at(function.register_kinds.len());
+                        function.register_kinds.push(kind);
+                        reg
+                    };
+                    let exception = alloc(ValueKind::Exn);
+                    let condition = alloc(ValueKind::Object(Some(class)));
+                    if let Some(after) = after {
+                        out.push(Instr::Jump { label: after, span });
+                    }
+                    out.extend([
+                        Instr::CatchTarget {
+                            label: target,
+                            params: vec![exception],
+                        },
+                        Instr::MakeObject {
+                            dst: condition,
+                            class,
+                            fields: Vec::new(),
+                            span,
+                        },
+                        Instr::Signal {
+                            dsts: Vec::new(),
+                            condition,
+                            span,
+                        },
+                        Instr::Trap {
+                            trap: LokoTrap::StackOverflowResumed,
+                            span,
+                        },
+                    ]);
+                    if let Some(after) = after {
+                        out.push(Instr::Label { label: after });
+                    }
+                }
+                out.push(Instr::LeaveRegion);
+            }
+            instr => out.push(instr),
+        }
+    }
+    function.instructions = out;
+}
+
 /// The expected type of a shift count: `limited(<integer>, min: 0, max: 31)`.
 const fn shift_count_expected() -> TypeObject {
     range_expected(IntRange {
@@ -14683,6 +14833,7 @@ pub fn control_tag_name(tag: ControlTag) -> String {
         ControlTag::Restart => "restart".into(),
         ControlTag::Exit(signature) => format!("exit#{}", signature.0),
         ControlTag::Retry => "retry".into(),
+        ControlTag::StackOverflow => "stack-overflow".into(),
     }
 }
 
