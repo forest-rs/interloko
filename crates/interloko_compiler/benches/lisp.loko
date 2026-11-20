@@ -91,7 +91,7 @@ end;
 // --- environments --------------------------------------------------------
 
 define class <environment> (<object>)
-  constant slot bindings :: <table>, init-value: make(<table>);
+  constant slot bindings :: <table> = make(<table>);
   constant slot parent, init-value: #f, init-keyword: parent:;
 end;
 
