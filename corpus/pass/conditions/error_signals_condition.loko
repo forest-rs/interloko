@@ -1,0 +1,22 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// Dylan's `error(condition)` signals the condition, as `signal` does. It
+// does not return, so it fits an arm of any type: here an `<integer>`
+// one.
+
+define class <oops> (<error>)
+  constant slot code :: <integer>, required-init-keyword: code:;
+end;
+
+define function checked(x :: <integer>) => <integer>
+  if (x >= 0) x else error(make(<oops>, code: 42)) end
+end;
+
+define function main() => <integer>
+  block ()
+    checked(-1)
+  exception (e :: <oops>)
+    e.code
+  end
+end;

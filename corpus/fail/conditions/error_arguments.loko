@@ -1,0 +1,11 @@
+// expect: diagnostic contains function `error` expects 1 arguments but got 0
+// expect: diagnostics 2
+
+// `error` takes a condition alone, or a format string and its arguments.
+
+define class <oops> (<error>) end;
+
+define function main() => <integer>
+  error();
+  error(make(<oops>), 1)
+end;

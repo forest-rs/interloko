@@ -648,9 +648,15 @@ The current slices include:
   `<condition>`, `<error>`,
   `<type-error>`, `<no-applicable-method>`, `<select-error>`,
   `<not-found-error>`, `<immutable-collection-error>`,
-  `<collection-modified-error>`, `<constant-cycle-error>` and
-  `<unknown-keyword-error>` defined by
-  the kernel: a runtime check that fails (a cast, a callable value's argument or result,
+  `<collection-modified-error>`, `<constant-cycle-error>`,
+  `<unknown-keyword-error>` and `<simple-error>` defined by
+  the kernel. Dylan's `error(condition)` signals a condition as `signal`
+  does, and `error(format-string, argument, …)` signals a `<simple-error>`
+  whose `condition-format-string` is the string and whose
+  `condition-format-arguments` is a vector of the arguments; either way,
+  like `signal`, it takes the values its context expects, since it does
+  not return unless a handler supplies them (`error`, which takes any
+  number of arguments, is a form, not a value, for now). In the kernel: a runtime check that fails (a cast, a callable value's argument or result,
   a range, an overflow) signals a `<type-error>` naming the value, the
   expected type (a type object: a class, a `<limited-integer>` or a
   `<subclass-type>`, which `instance?` tests values against), the check's

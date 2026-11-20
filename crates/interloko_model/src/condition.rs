@@ -18,6 +18,7 @@
 //!       <collection-modified-error>
 //!       <constant-cycle-error>
 //!       <unknown-keyword-error>
+//!       <simple-error>
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
@@ -37,7 +38,9 @@
 //! initializer was running: the constant, the definition whose code read
 //! it, and the stable code [`CONSTANT_CYCLE_CODE`]. An
 //! `<unknown-keyword-error>` reports a call through a callable value that
-//! passed a keyword its callee does not take: the keyword, as a symbol.
+//! passed a keyword its callee does not take: the keyword, as a symbol. A
+//! `<simple-error>` is what `error(format-string, argument, …)` signals:
+//! the format string and its arguments, as Dylan's has them.
 //! Their slots are read-only, so they add no setter generics to a program.
 //!
 //! A send never finds several equally specific methods: a module whose
@@ -79,6 +82,9 @@ pub enum ConditionClass {
     /// `<unknown-keyword-error>`: a call through a callable value passed a
     /// keyword its callee does not take.
     UnknownKeywordError,
+    /// `<simple-error>`: an error described by a format string and its
+    /// arguments, which `error(string, argument, …)` signals.
+    SimpleError,
 }
 
 impl ConditionClass {
@@ -98,6 +104,7 @@ impl ConditionClass {
         Self::ConstantCycleError,
         Self::DivisionByZeroError,
         Self::UnknownKeywordError,
+        Self::SimpleError,
     ];
 
     /// Returns the Loko-visible class name.
@@ -115,6 +122,7 @@ impl ConditionClass {
             Self::ConstantCycleError => "<constant-cycle-error>",
             Self::DivisionByZeroError => "<division-by-zero-error>",
             Self::UnknownKeywordError => "<unknown-keyword-error>",
+            Self::SimpleError => "<simple-error>",
         }
     }
 
@@ -133,6 +141,7 @@ impl ConditionClass {
             b"<constant-cycle-error>" => Some(Self::ConstantCycleError),
             b"<division-by-zero-error>" => Some(Self::DivisionByZeroError),
             b"<unknown-keyword-error>" => Some(Self::UnknownKeywordError),
+            b"<simple-error>" => Some(Self::SimpleError),
             _ => None,
         }
     }
@@ -152,7 +161,8 @@ impl ConditionClass {
             | Self::CollectionModifiedError
             | Self::ConstantCycleError
             | Self::DivisionByZeroError
-            | Self::UnknownKeywordError => Some(Self::Error),
+            | Self::UnknownKeywordError
+            | Self::SimpleError => Some(Self::Error),
         }
     }
 
@@ -170,6 +180,7 @@ impl ConditionClass {
             Self::ConstantCycleError => &CONSTANT_CYCLE_ERROR_SLOTS,
             Self::DivisionByZeroError => &DIVISION_BY_ZERO_ERROR_SLOTS,
             Self::UnknownKeywordError => &UNKNOWN_KEYWORD_ERROR_SLOTS,
+            Self::SimpleError => &SIMPLE_ERROR_SLOTS,
         }
     }
 }
@@ -267,6 +278,22 @@ pub const UNKNOWN_KEYWORD_ERROR_SLOTS: [ConditionSlot; 1] = [ConditionSlot {
     type_name: "<symbol>",
     init_keyword: "keyword",
 }];
+
+/// The slots of `<simple-error>`, in layout order: Dylan's
+/// `condition-format-string`, the text describing the error, and
+/// `condition-format-arguments`, the values it describes.
+pub const SIMPLE_ERROR_SLOTS: [ConditionSlot; 2] = [
+    ConditionSlot {
+        name: "condition-format-string",
+        type_name: "<string>",
+        init_keyword: "format-string",
+    },
+    ConditionSlot {
+        name: "condition-format-arguments",
+        type_name: "<sequence>",
+        init_keyword: "format-arguments",
+    },
+];
 
 /// The slot of `<select-error>`: the target value that matched no key, as
 /// an `<object>`.

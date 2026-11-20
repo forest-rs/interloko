@@ -20,7 +20,8 @@
 //! A few built-ins take arguments no callable signature can describe:
 //! `apply` and `values` take any number, `make` the keywords of its class,
 //! `as` and `limited` compute a type from one, and `signal` answers what
-//! its handler supplies. Those are forms of the language, and naming one
+//! its handler supplies, as `error` does, which also takes any number of
+//! format arguments. Those are forms of the language, and naming one
 //! as a value is an error. `copy-sequence` and `starts-with?`, whose
 //! keywords default to positions of their string, are not values yet.
 
@@ -41,6 +42,7 @@ pub const FORMS: &[&str] = &[
     "as",
     "limited",
     "signal",
+    "error",
     "copy-sequence",
     "starts-with?",
 ];
