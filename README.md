@@ -690,7 +690,7 @@ The current slices include:
   pair of any two objects, `#()` is the empty list, the one instance of
   `<empty-list>` (so `l == #()` tests for the end), and `list(a, b)` and
   the literal `#(a, b)` make a list of pairs ending in it, evaluating
-  their elements in order (a literal's pairs are made afresh each time,
+  their elements in order (`list` is a value too, taking `#rest`) (a literal's pairs are made afresh each time,
   and unlike a vector literal's they are not constant: storing into one
   is not refused). `head(l)` and `tail(l)` take a list
   apart, and as in Dylan both answer `#()` for `#()`; `head-setter(v, p)`
