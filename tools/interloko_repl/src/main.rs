@@ -3650,6 +3650,7 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::Bar
         | TokenKind::Caret
         | TokenKind::Tilde
+        | TokenKind::Backslash
         | TokenKind::TildeEqual
         | TokenKind::TildeEqualEqual
         | TokenKind::Equal

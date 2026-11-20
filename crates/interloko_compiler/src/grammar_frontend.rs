@@ -3376,8 +3376,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "primary-expression",
-            "statement | method-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | name-expression",
+            "statement | method-expression | vector-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | operator-name | name-expression",
             "syntax.rs:Parser::parse_primary",
+        ),
+        (
+            "operator-name",
+            "`\\` (`==` | `~==` | `~=` | `<=` | `>=` | `+` | `-` | `*` | `/` | `^` | `=` | `<` | `>`)",
+            "base_loko_primary::BaseLokoCstBuilder::build_expr",
         ),
         (
             "method-expression",
@@ -4505,7 +4510,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 92);
+        assert_eq!(grammar.effective_rules.len(), 93);
 
         assert!(
             !records

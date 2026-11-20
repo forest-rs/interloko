@@ -838,6 +838,27 @@ pub type GenericParamKind = Option<ValueKind>;
 /// `<object>` is represented by [`OBJECT_CLASS_ID`].
 pub type MethodSpecializer = Option<ClassId>;
 
+/// The built-in generic an operator's name, written `\+` as a value,
+/// names: the one its operands send to when they are not all numbers
+/// typing knows. Unary `-` is `negative`, so `\-` is subtraction.
+fn operator_generic(name: &str) -> Option<promotion::NumericOperator> {
+    use promotion::NumericOperator::{Arithmetic, Compare};
+    [
+        Arithmetic(BinaryOp::Add),
+        Arithmetic(BinaryOp::Sub),
+        Arithmetic(BinaryOp::Mul),
+        Arithmetic(BinaryOp::Div),
+        Arithmetic(BinaryOp::Pow),
+        Compare(CompareOp::Eq),
+        Compare(CompareOp::Lt),
+        Compare(CompareOp::Le),
+        Compare(CompareOp::Gt),
+        Compare(CompareOp::Ge),
+    ]
+    .into_iter()
+    .find(|operator| operator.name() == name)
+}
+
 /// Whether `specializer` names a class that did not resolve: the
 /// placeholder a method's parameter takes after its type was reported, so
 /// later checks of the method stay quiet rather than cascade.
@@ -10469,6 +10490,28 @@ impl Lowering {
                     .collect::<Vec<_>>();
                 return self.lower_list(ctx, elements, span);
             }
+            // The functions `\==`, `\~==` and `\~=` name, which no call
+            // of a name reaches: their operators' tests of two objects.
+            "==" | "~==" | "~=" if args.len() == 2 => {
+                let (lhs, rhs) = (Box::new(args[0].clone()), Box::new(args[1].clone()));
+                let test = if callee == "~=" {
+                    ast::Expr::Compare {
+                        id,
+                        op: ast::CompareOp::Eq,
+                        lhs,
+                        rhs,
+                        span,
+                    }
+                } else {
+                    ast::Expr::Identical { id, lhs, rhs, span }
+                };
+                let test = if callee == "==" {
+                    test
+                } else {
+                    ast::negation(id, test, span)
+                };
+                return self.lower_expr(ctx, &test);
+            }
             "values" | KERNEL_VALUES => {
                 let mut values = args
                     .iter()
@@ -10800,6 +10843,13 @@ impl Lowering {
         if let Some(generic) = self.slot_getter_named(name) {
             return Expr::KnownCallable {
                 callable: KnownCallable::GenericFunction(generic),
+                span,
+            };
+        }
+        // `\+` names the built-in generic the operator sends to.
+        if let Some(operator) = operator_generic(name) {
+            return Expr::KnownCallable {
+                callable: KnownCallable::GenericFunction(self.numeric_generic(operator)),
                 span,
             };
         }
@@ -15227,7 +15277,11 @@ impl Lowering {
                     return Expr::Error { span };
                 }
                 match test {
-                    ast::Expr::Name { name, .. } if !reassigned(name) => Some(name.clone()),
+                    // An operator's name, `\=`, is no name a call can
+                    // write, so its value is bound as any other test's.
+                    ast::Expr::Name { name, .. } if !reassigned(name) && syntax::is_name(name) => {
+                        Some(name.clone())
+                    }
                     test => {
                         let name = format!("{SELECT_TEST_LOCAL}@{}", span.start);
                         lets.push(self.bind_hidden_local(ctx, id, &name, value, test.span()));

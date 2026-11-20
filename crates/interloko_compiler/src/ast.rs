@@ -658,6 +658,28 @@ pub enum CompareOp {
     Ge,
 }
 
+/// `~test`, Dylan's negation of a `<boolean>`: `if (test) #f else #t end`,
+/// every node of it with the identity `id` and the span `span`.
+#[must_use]
+pub(crate) fn negation(id: AstNodeId, test: Expr, span: Span) -> Expr {
+    let constant = |value: bool| Block {
+        id,
+        statements: Vec::new(),
+        result: Expr::Bool { id, value, span },
+        span,
+    };
+    Expr::If {
+        id,
+        arms: vec![CondArm {
+            span,
+            test,
+            body: constant(false),
+        }],
+        else_body: Some(Box::new(constant(true))),
+        span,
+    }
+}
+
 /// Surface expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expr {
@@ -2412,26 +2434,7 @@ impl<'tree> Lowering<'tree> {
     /// it takes the `<boolean>` an `if` test takes. `a ~= b` and `a ~== b`
     /// negate `a = b` and `a == b` the same way.
     fn negation(&self, node: &CstNode, test: Expr) -> Expr {
-        let constant = |value: bool| Block {
-            id: self.ast_id(node),
-            statements: Vec::new(),
-            result: Expr::Bool {
-                id: self.ast_id(node),
-                value,
-                span: node.span,
-            },
-            span: node.span,
-        };
-        Expr::If {
-            id: self.ast_id(node),
-            arms: vec![CondArm {
-                span: node.span,
-                test,
-                body: constant(false),
-            }],
-            else_body: Some(Box::new(constant(true))),
-            span: node.span,
-        }
+        negation(self.ast_id(node), test, node.span)
     }
 
     fn lower_negative_number(&mut self, unary: &CstNode, number: &CstNode) -> Expr {
@@ -2758,6 +2761,14 @@ impl<'tree> Lowering<'tree> {
     }
 
     fn lower_name(&mut self, node: &CstNode) -> Expr {
+        // `\+` names the function of the operator after the backslash.
+        if let Some(name) = self.escaped_operator_name(node) {
+            return Expr::Name {
+                id: self.ast_id(node),
+                name,
+                span: node.span,
+            };
+        }
         let Some((span, text)) = self.first_token_text(node, TokenKind::Ident) else {
             self.diagnostics.push(Diagnostic::error(
                 node.span,
@@ -3794,6 +3805,22 @@ impl<'tree> Lowering<'tree> {
         DefinitionId::new(self.tree.source_file, kind, name, discriminator)
     }
 
+    /// The operator `\op` names, when `node` is one: the text of the token
+    /// after its backslash.
+    fn escaped_operator_name(&self, node: &CstNode) -> Option<String> {
+        let mut tokens = node.children.iter().filter_map(|child| match child {
+            CstElement::Token(index) => Some(self.tree.tokens[*index]),
+            CstElement::Node(_) => None,
+        });
+        let backslash = tokens.next()?;
+        if backslash.kind != TokenKind::Backslash {
+            return None;
+        }
+        tokens
+            .next()
+            .map(|operator| operator.text(&self.tree.source).to_string())
+    }
+
     fn first_token_text(&self, node: &CstNode, kind: TokenKind) -> Option<(Span, &'tree str)> {
         node.children.iter().find_map(|child| match child {
             CstElement::Token(index) if self.tree.tokens[*index].kind == kind => {
@@ -4595,6 +4622,27 @@ mod tests {
         // `in` is not reserved either.
         assert_eq!(third.binding.name, "in");
         assert!(matches!(&*third.collection, Expr::Name { name, .. } if name == "in"));
+    }
+
+    #[test]
+    fn an_escaped_operator_is_the_name_of_its_function() {
+        let tree = parse("define function f() #[\\+, \\==, \\~=, \\<=, \\-] end;");
+        assert_eq!(tree.diagnostics, Vec::new());
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        let Expr::Vector { elements, .. } = &module.functions[0].body.result else {
+            panic!("expected a vector literal");
+        };
+        let names = elements
+            .iter()
+            .map(|element| match element {
+                Expr::Name { name, .. } => name.as_str(),
+                _ => "?",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["+", "==", "~=", "<=", "-"]);
+        // `\&` names no function: `&` is a form, not an operator call.
+        assert!(!parse("define function f() \\& end;").diagnostics.is_empty());
     }
 
     #[test]

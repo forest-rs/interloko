@@ -257,6 +257,7 @@ fn starts_expression(text: &str) -> bool {
             | "#:"
             | "\""
             | "'"
+            | "\\"
             | "<"
             | "let"
             | "method"
@@ -307,6 +308,7 @@ fn is_expression_rule(rule: &str) -> bool {
             | "list-expression"
             | "call-expression"
             | "name-expression"
+            | "operator-name"
             | "type-expression"
             | "number-literal"
             | "bool-literal"
@@ -718,7 +720,7 @@ impl BaseLokoCstProjector<'_> {
             "call-expression" => self.build_call(node),
             "argument-list" => self.build_argument_list(node),
             "keyword-argument" => self.build_keyword_arg(node),
-            "name-expression" => self.leaf(CstKind::NameExpr, node),
+            "name-expression" | "operator-name" => self.leaf(CstKind::NameExpr, node),
             "type-expression" => self.build_type_expr(node),
             "number-literal" => self.leaf(CstKind::NumberExpr, node),
             "bool-literal" => self.leaf(CstKind::BoolExpr, node),

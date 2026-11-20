@@ -123,6 +123,8 @@ pub fn overloads(name: &str) -> Option<Vec<Vec<&'static str>>> {
     }
     match name {
         "class-of" => return Some(vec![vec!["<object>"]]),
+        // Named `\==`, `\~==` and `\~=`: tests of any two objects.
+        "==" | "~==" | "~=" => return Some(vec![vec!["<object>", "<object>"]]),
         "float-to-string" => return Some(FLOATS.iter().map(|float| vec![*float]).collect()),
         // `concatenate` takes a character for either string.
         "concatenate" => {

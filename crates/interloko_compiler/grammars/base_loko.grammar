@@ -114,7 +114,7 @@ rule member-name = name
 rule index-access = `[` expression `]`
 rule call-arguments = `(` argument-list? `)`
 // As in Dylan, a statement is an operand: `x + if (c) 1 else 2 end`.
-rule primary-expression = statement | method-expression | vector-expression | list-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | name-expression
+rule primary-expression = statement | method-expression | vector-expression | list-expression | parenthesized-expression | call-expression | keyword-symbol | bool-literal | string-literal | character-literal | symbol-literal | number-literal | type-expression | operator-name | name-expression
 rule statement = handle-expression | block-expression | begin-expression | while-expression | until-expression | for-expression | if-expression | unless-expression | case-expression | select-expression
 rule method-expression = `method` `(` parameter-list? `)` result-annotation? body `end`
 rule parenthesized-expression = `(` expression `)`
@@ -130,6 +130,8 @@ rule argument = keyword-argument | expression
 rule keyword-argument = argument-keyword expression
 rule argument-keyword = (name | `end`) `:`
 rule name-expression = name
+// As in Dylan, `\+` names the function an operator calls, as a value.
+rule operator-name raw = `\` (`==` | `~==` | `~=` | `<=` | `>=` | `+` | `-` | `*` | `/` | `^` | `=` | `<` | `>`)
 rule type-expression = expression-type-name
 rule expression-type-name = type-name
 rule number-literal = number
