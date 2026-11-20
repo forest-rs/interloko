@@ -10291,6 +10291,9 @@ impl Lowering {
             "copy-sequence" | "starts-with?" => {
                 return self.lower_keyword_text_call(ctx, id, callee, args, keywords, span);
             }
+            "string-to-integer" => {
+                return self.lower_string_to_integer(ctx, id, args, keywords, span);
+            }
             "make" => return self.lower_make_call(ctx, args, keywords, span),
             "limited" => {
                 // `limited(…)` that writes a type is a type literal; this
@@ -14195,6 +14198,140 @@ impl Lowering {
             result_callable_sigs,
             span,
         }
+    }
+
+    /// Lowers `string-to-integer(s)` and `string-to-integer(s, default:
+    /// d)`, common Dylan's: the value of the optional sign and decimal
+    /// digits `s` starts with, up to the first character that is not a
+    /// digit. A string that starts with no integer answers `d`, or without
+    /// one signals a `<simple-error>`. The string and the default are each
+    /// evaluated once, in order; the result is an `<integer>` unless the
+    /// default is not one, when it is an `<object>`.
+    fn lower_string_to_integer(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        args: &[ast::Expr],
+        keywords: &[ast::KeywordArg],
+        span: Span,
+    ) -> Expr {
+        const CALLEE: &str = "string-to-integer";
+        let mut valid = true;
+        for (index, keyword) in keywords.iter().enumerate() {
+            if keyword.name != "default" {
+                ctx.diagnostics
+                    .push(Self::unexpected_keyword(CALLEE, keyword));
+                valid = false;
+            } else if index > 0 {
+                ctx.diagnostics.push(
+                    Diagnostic::error(keyword.span, DiagnosticCode::DuplicateKeywordArgument)
+                        .with_arg(DiagnosticArg::text("keyword", keyword.name.clone())),
+                );
+                valid = false;
+            }
+        }
+        let [string] = args else {
+            ctx.diagnostics
+                .push(Self::arity_mismatch(CALLEE, 1, args.len(), span));
+            return Expr::Error { span };
+        };
+        if !valid {
+            return Expr::Error { span };
+        }
+        let scope = ctx.scope_start();
+        let string_span = string.span();
+        let string = self.lower_expr(ctx, string);
+        let Some(string_class) = self.builtin_value_class(BuiltinValueClass::String) else {
+            return Expr::Error { span };
+        };
+        let string = self.narrow(string, ValueKind::String(string_class), None);
+        let name = format!("{CALLEE} string@{}", span.start);
+        let bound = self.bind_hidden_local(ctx, id, &name, string, string_span);
+        let read = Expr::Local {
+            local: bound.local,
+            result_kind: ctx.local_kind(bound.local),
+            callable_signature: None,
+            span: string_span,
+        };
+        let mut lets = vec![bound];
+        let test = self.checked_intrinsic_call(
+            ctx,
+            Intrinsic::Text(TextFunction::IsIntegerText),
+            CALLEE,
+            vec![read.clone()],
+            span,
+        );
+        let mut integer = self.checked_intrinsic_call(
+            ctx,
+            Intrinsic::Text(TextFunction::StringToInteger),
+            CALLEE,
+            vec![read],
+            span,
+        );
+        let otherwise = match keywords.first() {
+            Some(default) => {
+                let value = self.lower_expr(ctx, &default.value);
+                let default_name = format!("{CALLEE} default@{}", span.start);
+                let default_span = default.value.span();
+                let bound = self.bind_hidden_local(ctx, id, &default_name, value, default_span);
+                let kind = ctx.local_kind(bound.local);
+                lets.push(bound);
+                let read = Expr::Local {
+                    local: lets[1].local,
+                    result_kind: kind,
+                    callable_signature: None,
+                    span: default_span,
+                };
+                if matches!(kind, ValueKind::I64 | ValueKind::I32 | ValueKind::U32) {
+                    let from = NumericKind::of(kind).unwrap_or(NumericKind::Integer);
+                    promote_operand(read, from, NumericKind::Integer)
+                } else {
+                    // An integer or the default, as an `<object>`.
+                    integer = Expr::Cast {
+                        site: SiteId::PENDING,
+                        value: Box::new(integer),
+                        class: OBJECT_CLASS_ID,
+                        explicit: false,
+                        span,
+                    };
+                    if kind == ValueKind::Any {
+                        read
+                    } else {
+                        Expr::Cast {
+                            site: SiteId::PENDING,
+                            value: Box::new(read),
+                            class: OBJECT_CLASS_ID,
+                            explicit: false,
+                            span: default_span,
+                        }
+                    }
+                }
+            }
+            None => {
+                let error_args = [
+                    ast::Expr::String {
+                        id,
+                        value: "string-to-integer: %= does not start with an integer".into(),
+                        span,
+                    },
+                    ast::Expr::Name {
+                        id,
+                        name: name.clone(),
+                        span: string_span,
+                    },
+                ];
+                self.lower_error(ctx, id, &error_args, Some(&[ValueKind::I64]), span)
+            }
+        };
+        ctx.hide_locals_from(scope);
+        let call = Expr::If {
+            condition: Box::new(test),
+            refinement: None,
+            then_branch: Box::new(integer),
+            else_branch: Box::new(otherwise),
+            span,
+        };
+        with_lets(lets, call, span)
     }
 
     /// Lowers Dylan's `error`: `error(condition)` signals the condition,

@@ -92,6 +92,7 @@ pub fn text_function_name(function: TextFunction) -> &'static str {
         TextFunction::BuilderAddString => "add!(<string-builder>, <string>)",
         TextFunction::StringToSymbol => "as(<symbol>, <string>)",
         TextFunction::SymbolToString => "as(<string>, <symbol>)",
+        TextFunction::IsIntegerText | TextFunction::StringToInteger => "string-to-integer",
         function => NAMED_TEXT_FUNCTIONS
             .iter()
             .find(|(_, functions)| functions.contains(&function))

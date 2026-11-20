@@ -1,0 +1,8 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: diagnostics 0
+
+// Too many digits for an `<integer>` are not an integer to read.
+
+define function main() => <integer>
+  string-to-integer("99999999999999999999")
+end;

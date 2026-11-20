@@ -1,0 +1,8 @@
+// expect: diagnostic contains takes no `base:` argument
+// expect: diagnostics 1
+
+// `string-to-integer` takes `default:` alone for now.
+
+define function main() => <integer>
+  string-to-integer("ff", base: 16)
+end;
