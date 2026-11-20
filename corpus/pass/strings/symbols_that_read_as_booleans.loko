@@ -1,0 +1,13 @@
+// expect: runtime code type-error.cast
+// expect: run reports #(#"t", #t, #"f", #"two words")
+// expect: diagnostics 1
+// expect: diagnostic contains always fails
+
+// A symbol prints as its literal: `#"…"` for a name that is not a word,
+// or that would read back as `#t` or `#f`.
+
+define function main() => <integer>
+  let o :: <object> = list(as(<symbol>, "t"), #t, as(<symbol>, "f"), #"two words");
+  let n :: <integer> = o;
+  n
+end;

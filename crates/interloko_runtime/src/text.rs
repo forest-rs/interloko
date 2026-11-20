@@ -692,7 +692,8 @@ pub fn symbol_literal(name: &str) -> String {
                 || matches!(byte, b'_' | b'?' | b'!' | b'-')
                 || (*byte == b'/' && bytes.get(index + 1) != Some(&b'/') && index > 0)
         });
-    if word {
+    // `#t` and `#f` are the booleans.
+    if word && !matches!(name, "t" | "f") {
         let mut literal = String::with_capacity(name.len() + 1);
         literal.push('#');
         literal.push_str(name);
@@ -795,6 +796,8 @@ mod tests {
         assert_eq!(symbol_literal("1+"), "#\"1+\"");
         assert_eq!(symbol_literal("a//b"), "#\"a//b\"");
         assert_eq!(symbol_literal(""), "#\"\"");
+        assert_eq!(symbol_literal("t"), "#\"t\"");
+        assert_eq!(symbol_literal("f"), "#\"f\"");
     }
 
     #[test]

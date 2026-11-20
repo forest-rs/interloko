@@ -6120,6 +6120,9 @@ struct Lowering {
     /// Whether the code being lowered is the kernel library's, which sees
     /// no definition of the program, only the kernel's.
     kernel_scope: bool,
+    /// The names of the generics the program's own methods join, in
+    /// source order, a name once for each method.
+    program_method_names: Vec<String>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -6155,6 +6158,11 @@ impl Lowering {
             library_functions: Vec::new(),
             library_bodies: Vec::new(),
             kernel_scope: false,
+            program_method_names: module
+                .methods
+                .iter()
+                .map(|method| method.name.clone())
+                .collect(),
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
@@ -9920,11 +9928,11 @@ impl Lowering {
                 self.lower_expr_expected_results(ctx, &call, expected_results)
             }
             ast::Expr::SlotRead {
+                id,
                 receiver,
                 slot,
                 span,
-                ..
-            } => self.lower_slot_read(ctx, receiver, slot, *span),
+            } => self.lower_slot_read(ctx, *id, receiver, slot, *span),
             ast::Expr::SlotAssign {
                 receiver,
                 slot,
@@ -11664,9 +11672,20 @@ impl Lowering {
     fn shadows_collection_generic(&self, name: &str) -> bool {
         self.resolve_function(name).is_some()
             || self.resolve_host_function(name).is_some()
-            || self
-                .resolve_generic(name)
-                .is_some_and(|symbol| !self.is_kernel_generic(symbol.id))
+            || self.resolve_generic(name).is_some_and(|symbol| {
+                !self.is_kernel_generic(symbol.id) && !self.is_slot_getter_generic(symbol.id)
+            })
+    }
+
+    /// Whether `generic` is one the compiler made for slots' getters,
+    /// rather than the program's own: it serves its slots' classes and
+    /// takes no name from a built-in.
+    fn is_slot_getter_generic(&self, generic: GenericFunctionId) -> bool {
+        self.generics
+            .get(generic.0 as usize)
+            .is_some_and(|generic| {
+                matches!(generic.origin, GenericFunctionOrigin::SlotGetter { .. })
+            })
     }
 
     /// Whether `generic` is one of the kernel's open generics a program's
@@ -14547,7 +14566,10 @@ impl Lowering {
                 ctx.diagnostics
                     .push(Self::unexpected_keyword(CALLEE, keyword));
                 valid = false;
-            } else if index > 0 {
+            } else if keywords[..index]
+                .iter()
+                .any(|earlier| earlier.name == keyword.name)
+            {
                 ctx.diagnostics.push(
                     Diagnostic::error(keyword.span, DiagnosticCode::DuplicateKeywordArgument)
                         .with_arg(DiagnosticArg::text("keyword", keyword.name.clone())),
@@ -14663,9 +14685,10 @@ impl Lowering {
     /// the first sequence's kind holding the elements of each in turn.
     /// Strings and characters typing knows join inline, two at a time;
     /// any other sequences join through the kernel library's
-    /// `concatenate-two`. Two arguments of which one is a class of the
-    /// program's own send to the built-in `concatenate` generic, which a
-    /// program's method may join.
+    /// `concatenate-two`. When the program's own methods join the built-in
+    /// `concatenate` generic, a call of two arguments that may be of one of
+    /// its classes, an `<object>` among them, sends to the generic, as it
+    /// did before sequences joined.
     fn lower_concatenate(
         &mut self,
         ctx: &mut FunctionContext,
@@ -14695,13 +14718,9 @@ impl Lowering {
             return joined;
         }
         if args.len() == 2
+            && !self.kernel_scope
+            && self.program_method_names.iter().any(|name| name == CALLEE)
             && self.sends_to_built_in_generic(CALLEE, &args)
-            && args.iter().any(|arg| {
-                matches!(self.expr_kind(arg), ValueKind::Object(class)
-                if self.classes.get(class.0 as usize).is_some_and(|class| {
-                    matches!(class.origin, ClassOrigin::Native | ClassOrigin::HostBacked { .. })
-                }))
-            })
             && let Some(generic) = self.built_in_generic_named(CALLEE)
             && let Some(symbol) = self
                 .generic_symbols
@@ -14774,6 +14793,17 @@ impl Lowering {
             return Expr::Error { span };
         };
         let first_value = self.lower_expr(ctx, first);
+        if self.expr_kind(&first_value) == ValueKind::Any {
+            return self.lower_untyped_error(
+                ctx,
+                id,
+                first,
+                first_value,
+                arguments,
+                expected_results,
+                span,
+            );
+        }
         if !matches!(self.expr_kind(&first_value), ValueKind::String(_)) {
             if !arguments.is_empty() {
                 for argument in arguments {
@@ -14834,6 +14864,106 @@ impl Lowering {
             cleanup: None,
             span,
         }
+    }
+
+    /// Lowers `error(x, argument, …)` for an `x` typing does not know: a
+    /// string signals a `<simple-error>` of it and the arguments, and
+    /// anything else is signalled as the condition it must be (checked to
+    /// be a `<condition>`, as a declaration would check it), the arguments
+    /// left unevaluated.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_untyped_error(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        first: &ast::Expr,
+        first_value: Expr,
+        arguments: &[ast::Expr],
+        expected_results: Option<&[ValueKind]>,
+        span: Span,
+    ) -> Expr {
+        let scope = ctx.scope_start();
+        let name = format!("error value@{}", span.start);
+        let bound = self.bind_hidden_local(ctx, id, &name, first_value, first.span());
+        let value = || ast::Expr::Name {
+            id,
+            name: name.clone(),
+            span: first.span(),
+        };
+        let class = |class_name: &str| ast::Expr::ClassName {
+            id,
+            class_name: class_name.into(),
+            span,
+        };
+        let cast = |class_name: &str| ast::Expr::Cast {
+            id,
+            target: ast::TypeExpr::Named {
+                name: class_name.into(),
+                span,
+            },
+            value: Box::new(value()),
+            span,
+        };
+        let simple_error = ast::Expr::Signal {
+            id,
+            condition: Box::new(ast::Expr::MakeObject {
+                id,
+                class: Box::new(class(ConditionClass::SimpleError.name())),
+                fields: vec![
+                    ast::KeywordArg {
+                        id,
+                        name: "format-string".into(),
+                        value: cast("<string>"),
+                        span,
+                    },
+                    ast::KeywordArg {
+                        id,
+                        name: "format-arguments".into(),
+                        value: ast::Expr::Vector {
+                            id,
+                            elements: arguments.to_vec(),
+                            span,
+                        },
+                        span,
+                    },
+                ],
+                span,
+            }),
+            span,
+        };
+        let condition = ast::Expr::Signal {
+            id,
+            condition: Box::new(cast(ConditionClass::Condition.name())),
+            span,
+        };
+        // The test is the kernel's, whatever the program calls `instance?`.
+        let Some(string) = self.builtin_value_class(BuiltinValueClass::String) else {
+            return Expr::Error { span };
+        };
+        let test = Expr::InstanceOf {
+            site: SiteId::PENDING,
+            value: Box::new(Expr::Local {
+                local: bound.local,
+                result_kind: ValueKind::Any,
+                callable_signature: None,
+                span,
+            }),
+            class: string,
+            conversion: false,
+            span,
+        };
+        let refinement = self.true_branch_refinement(&test);
+        let simple_error = self.lower_expr_expected_results(ctx, &simple_error, expected_results);
+        let condition = self.lower_expr_expected_results(ctx, &condition, expected_results);
+        let signal = Expr::If {
+            condition: Box::new(test),
+            refinement,
+            then_branch: Box::new(simple_error),
+            else_branch: Box::new(condition),
+            span,
+        };
+        ctx.hide_locals_from(scope);
+        with_lets(vec![bound], signal, span)
     }
 
     /// Lets a diverging `signal` take the result kinds of its sibling.
@@ -16925,11 +17055,39 @@ impl Lowering {
     fn lower_slot_read(
         &mut self,
         ctx: &mut FunctionContext,
+        id: AstNodeId,
         receiver: &ast::Expr,
         slot_name: &str,
         span: Span,
     ) -> Expr {
+        let receiver_span = receiver.span();
         let receiver = self.lower_expr(ctx, receiver);
+        // `x.f` is `f(x)`: a receiver typing knows to be of a class no
+        // class with the slot can be, such as a `<pair>` read with `.head`
+        // where a program's class has a `head` slot, calls the built-in.
+        if built_in::names_built_in(slot_name)
+            && !self.program_defines(slot_name)
+            && let Some(class) = self.value_kind_class(self.expr_kind(&receiver))
+            && !self.classes.iter().any(|candidate| {
+                candidate
+                    .direct_slots
+                    .iter()
+                    .any(|slot| slot.accessor.name == slot_name)
+                    && self.classes_may_overlap(candidate.id, class)
+            })
+        {
+            let scope = ctx.scope_start();
+            let name = format!("{slot_name} receiver@{}", span.start);
+            let bound = self.bind_hidden_local(ctx, id, &name, receiver, receiver_span);
+            let arg = ast::Expr::Name {
+                id,
+                name,
+                span: receiver_span,
+            };
+            let call = self.lower_built_in_call(ctx, id, slot_name, &[arg], &[], None, span);
+            ctx.hide_locals_from(scope);
+            return with_lets(vec![bound], call, span);
+        }
         self.lower_accessor_call(ctx, receiver, slot_name, span)
     }
 
@@ -16939,6 +17097,7 @@ impl Lowering {
     fn calls_for_slot_syntax(&self, ctx: &FunctionContext, name: &str) -> bool {
         !self.has_accessor(name)
             && (ctx.binds(name)
+                || CollectionFunction::from_name(name).is_some()
                 || self.resolve_function(name).is_some()
                 || self.resolve_generic(name).is_some()
                 || self.resolve_constant(name).is_some()

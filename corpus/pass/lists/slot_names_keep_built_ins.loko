@@ -1,0 +1,26 @@
+// expect: run 11714
+// expect: diagnostics 0
+
+// A program's class with a `head` or `first` slot keeps its slot, read
+// directly or through the getter, while calls of `head` and `first`, and
+// `.head` of a value typing knows is a list, stay the built-ins.
+
+define class <node> (<object>)
+  slot head, init-value: 7;
+end;
+
+define class <couple> (<object>)
+  slot first, init-value: 4;
+end;
+
+define function main() => <integer>
+  let n = make(<node>);
+  let boxed :: <object> = make(<couple>);
+  let p = pair(1, 2);
+  let a :: <integer> = head(p);
+  let b :: <integer> = p.head;
+  let c :: <integer> = n.head;
+  let d :: <integer> = first(#(1, 2));
+  let e :: <integer> = boxed.first;
+  a * 10000 + b * 1000 + c * 100 + d * 10 + e
+end;

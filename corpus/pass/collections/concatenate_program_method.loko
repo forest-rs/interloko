@@ -1,0 +1,21 @@
+// expect: run "abcabd"
+// expect: diagnostics 0
+
+// A program's method of `concatenate` for its own class serves a call of
+// two arguments, `<object>`s included, as it did before `concatenate`
+// took any sequences.
+
+define class <rope> (<object>)
+  slot text :: <string>, init-keyword: text:;
+end;
+
+define method concatenate (a :: <rope>, b :: <string>) => <string>
+  concatenate(a.text, b)
+end;
+
+define function join (a, b) concatenate(a, b) end;
+
+define function main() => <string>
+  let r = make(<rope>, text: "ab");
+  concatenate(concatenate(r, "c"), join(r, "d"))
+end;

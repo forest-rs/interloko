@@ -1,0 +1,10 @@
+// expect: run 6
+// expect: diagnostics 0
+
+// `x.size` is `size(x)`, as `x.first` is `first(x)`.
+
+define function main() => <integer>
+  let l = #(1, 2);
+  let v = #[1, 2, 3];
+  l.first + l.size + v.size
+end;
