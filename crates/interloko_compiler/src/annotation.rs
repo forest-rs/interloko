@@ -509,6 +509,14 @@ fn collect_block(block: &ast::Block, binders: &mut Vec<Binder>) {
                 collect_expr(expr, binders);
                 continue;
             }
+            // A local method's name binds the method itself, which declares
+            // its own types.
+            ast::Statement::Local(methods) => {
+                for method in methods {
+                    collect_expr(&method.function, binders);
+                }
+                continue;
+            }
         };
         match &binding.pattern {
             ast::LetPattern::Name(name) => binders.push(Binder::from_let(name)),

@@ -402,6 +402,11 @@ pub enum CstKind {
     /// Dylan's `#rest name` parameter: the arguments after the required
     /// ones.
     RestParameter = 73,
+    /// `local method name (…) … end, …;`, binding methods for the rest of
+    /// a body.
+    LocalStmt = 74,
+    /// One method of a [`Self::LocalStmt`].
+    LocalMethod = 75,
     /// Local binding name.
     LetName = 38,
     /// Restart condition binding name.

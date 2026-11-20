@@ -258,6 +258,7 @@ fn starts_expression(text: &str) -> bool {
             | "\""
             | "'"
             | "\\"
+            | "local"
             | "<"
             | "let"
             | "method"
@@ -641,6 +642,8 @@ impl BaseLokoCstProjector<'_> {
             .map(|statement| {
                 if statement.is_rule("let-statement") {
                     self.build_let(statement)
+                } else if statement.is_rule("local-statement") {
+                    self.build_local(statement)
                 } else {
                     self.build_expression_statement(statement)
                 }
@@ -662,6 +665,24 @@ impl BaseLokoCstProjector<'_> {
             children.push(CstElement::Node(expr));
         }
         self.node(CstKind::Body, self.sorted(children), node.span)
+    }
+
+    /// Builds `local method … end, method … end;`: one node per method,
+    /// each built as a defined method's is.
+    fn build_local(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let mut methods = Vec::new();
+        self.collect_local_methods(node, &mut methods);
+        self.node_with_nested(CstKind::LocalStmt, node, methods)
+    }
+
+    fn collect_local_methods(&self, node: &InterpretedRuleNode<'_>, out: &mut Vec<CstNode>) {
+        for child in &node.children {
+            if child.is_rule("local-method") {
+                out.push(self.build_callable(child, CstKind::LocalMethod));
+            } else if !child.is_rule("body") {
+                self.collect_local_methods(child, out);
+            }
+        }
     }
 
     /// Builds `expression ;`, an expression a body evaluates for effect.

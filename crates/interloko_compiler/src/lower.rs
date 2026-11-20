@@ -6802,6 +6802,10 @@ impl<'module> BodyLowering<'module> {
                     continue;
                 }
             };
+            if self.binds_recursively(let_binding) {
+                self.lower_letrec(let_binding)?;
+                continue;
+            }
             if let [local] = let_binding.locals.as_slice() {
                 let (local_name, local_kind) = {
                     let local_info = self
@@ -6850,6 +6854,97 @@ impl<'module> BodyLowering<'module> {
                     reg: value.reg,
                 });
             }
+        }
+        Ok(())
+    }
+
+    /// Whether `binding` is a `letrec`, a local method group's: its value's
+    /// closures capture the shared locals it binds, whose cells must exist
+    /// before the closures are made.
+    fn binds_recursively(&self, binding: &sem::Let) -> bool {
+        let closures = match &binding.value {
+            sem::Expr::Values { values, .. } => values.as_slice(),
+            value => core::slice::from_ref(value),
+        };
+        closures.iter().any(|closure| match closure {
+            sem::Expr::Closure { captures, .. } => captures
+                .iter()
+                .any(|capture| capture.shared && binding.locals.contains(&capture.source)),
+            _ => false,
+        })
+    }
+
+    /// Lowers a `letrec` ([`Self::binds_recursively`]): makes the cell of
+    /// each shared local it binds, holding a placeholder nothing reads,
+    /// then the closures, which capture the cells, then stores each closure
+    /// in its local.
+    fn lower_letrec(&mut self, binding: &sem::Let) -> Result<(), LowerError> {
+        let span = binding.span;
+        for local in &binding.locals {
+            let (name, shared) = self
+                .current_local(*local)
+                .map(|local| (local.name.clone(), local.shared))
+                .ok_or_else(|| invalid_semantic("local id is out of range"))?;
+            if !shared {
+                continue;
+            }
+            let placeholder = self.alloc(ValueKind::Bool);
+            let cell = self.alloc(ValueKind::Object(None));
+            self.instructions.extend([
+                Instr::ConstBool {
+                    dst: placeholder.reg,
+                    value: false,
+                    span,
+                },
+                Instr::CellNew {
+                    dst: cell.reg,
+                    value: placeholder.reg,
+                    kind: ValueKind::Bool,
+                    span,
+                },
+            ]);
+            self.set_local(*local, cell)?;
+            self.locals.push(Local {
+                source: *local,
+                name,
+                kind: cell.kind,
+                reg: cell.reg,
+            });
+        }
+        let values = self.lower_results_expr(&binding.value)?;
+        for (local, value) in binding.locals.iter().copied().zip(values) {
+            let (name, kind, shared) = self
+                .current_local(local)
+                .map(|info| (info.name.clone(), info.kind, info.shared))
+                .ok_or_else(|| invalid_semantic("local id is out of range"))?;
+            let signature = self
+                .current_local(local)
+                .and_then(|local| local.callable_signature.as_ref());
+            let expected = self.value_kind_with_callable_signature(kind, signature)?;
+            let value = self.coerce_value(value, expected, span)?;
+            if shared {
+                let cell = self
+                    .local_regs
+                    .get(local.0 as usize)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| invalid_semantic("a letrec local has no cell"))?;
+                self.instructions.push(Instr::CellSet {
+                    cell: cell.reg,
+                    value: value.reg,
+                    kind: value.kind,
+                    span,
+                });
+                continue;
+            }
+            let value = self.home(local, value, span);
+            self.set_local(local, value)?;
+            self.locals.push(Local {
+                source: local,
+                name,
+                kind: value.kind,
+                reg: value.reg,
+            });
         }
         Ok(())
     }

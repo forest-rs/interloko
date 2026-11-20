@@ -1,0 +1,11 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.duplicate-local
+// expect: diagnostic contains duplicate local `twice`
+
+// The names of a local method group are locals of the body, so a group
+// cannot bind one twice.
+
+define function main() => <integer>
+  local method twice (x) x * 2 end, method twice (x) x + x end;
+  twice(1)
+end;

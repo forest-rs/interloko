@@ -111,6 +111,12 @@ fn clear_block(block: &mut Block) {
                 clear_expr(&mut binding.value);
             }
             Statement::Expr(expr) => clear_expr(expr),
+            Statement::Local(methods) => {
+                for method in methods {
+                    method.span = Span::default();
+                    clear_expr(&mut method.function);
+                }
+            }
         }
     }
     clear_expr(&mut block.result);
@@ -146,10 +152,14 @@ fn clear_expr(expr: &mut Expr) {
             clear_exprs(elements);
         }
         Expr::Function {
-            params, body, span, ..
+            params,
+            rest,
+            body,
+            span,
+            ..
         } => {
             *span = Span::default();
-            for param in params {
+            for param in params.iter_mut().chain(rest.as_deref_mut()) {
                 param.span = Span::default();
             }
             clear_block(body);

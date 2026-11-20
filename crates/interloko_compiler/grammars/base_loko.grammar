@@ -52,7 +52,11 @@ rule class-object-annotation-type = class-object-type annotation-type
 rule annotation-type = type-name
 rule class-object-type = `class`
 rule body = body-statement* expression?
-rule body-statement = let-statement | expression-statement
+rule body-statement = let-statement | local-statement | expression-statement
+// Dylan's `local method name (…) … end, method other (…) … end;`: methods
+// bound for the rest of the body, each able to call itself and the others.
+rule local-statement = `local` list-of<local-method, `,`> `;`
+rule local-method = `method` value-definition-name `(` parameter-list? `)` result-annotation? body `end`
 rule expression-statement = expression `;` !case-label
 rule let-statement = `let` let-binding `=` expression `;`
 rule let-binding = let-name-binding | let-values-binding
