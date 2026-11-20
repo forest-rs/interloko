@@ -24,7 +24,8 @@ end;
 
 define function main() => <integer>
   // The first read exits to the block with 5 from inside the initializer.
-  let first = block (k)
+  // The block's `<integer>` makes its exit a callable the slot can hold.
+  let first :: <integer> = block (k)
     $h.f := k;
     $x
   end;

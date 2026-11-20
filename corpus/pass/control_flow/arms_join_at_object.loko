@@ -1,0 +1,63 @@
+// expect: run 2114
+// expect: diagnostics 0
+
+// As in Dylan, a conditional's value has the union of its arms' types, so
+// arms of any two types join. An `<integer>` arm and a `#f` arm, the
+// "integer or false" of dynamic code, give an `<object>` that boxes the
+// integer on its way out; so do a scalar and an object, and two callables
+// of different signatures give an untyped `<function>`. The same holds for
+// `case`, `select`, `handle` and a `block` with an exit.
+
+define class <bad-input> (<error>) end;
+
+// An integer or `#f`, declared or not.
+define function parse-digit(c :: <character>) => <object>
+  if (digit?(c)) digit-value(c) else #f end
+end;
+
+define function find-digit(c :: <character>)
+  if (digit?(c)) digit-value(c) else #f end
+end;
+
+define function classify(n :: <integer>)
+  case
+    n < 0 => #negative;
+    n = 0 => #f;
+    otherwise => n;
+  end
+end;
+
+define function pick(n :: <integer>)
+  select (n)
+    1 => "one";
+    2 => 2.0;
+    otherwise => n;
+  end
+end;
+
+define function numeric(c :: <boolean>)
+  if (c) as(<real>, 1.5) else 2 end
+end;
+
+define function score(x) => <integer>
+  if (instance?(x, <integer>)) x else 0 end
+end;
+
+define function main() => <integer>
+  let total = 0;
+  total := total + score(parse-digit('7')) + score(parse-digit('x'));
+  total := total + score(find-digit('3'));
+  if (parse-digit('x') == #f) total := total + 100 end;
+  if (classify(0) == #f & classify(-1) == #negative) total := total + 1000 end;
+  total := total + score(classify(1));
+  if (instance?(pick(2), <double-float>)) total := total + 1000 end;
+  total := total + score(pick(-1));
+  if (instance?(numeric(#t), <double-float>)) total := total + score(numeric(#f)) end;
+  // A handle whose restart answers something else.
+  let handled = handle signal(make(<bad-input>)) with restart <bad-input> #f end;
+  if (handled == #f) total := total + 1 end;
+  // A block whose exit takes another type than its body.
+  let early :: <object> = block (return) if (total > 0) return(#early) end; total end;
+  if (early == #early) total := total + 1 end;
+  total
+end;

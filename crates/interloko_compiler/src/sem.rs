@@ -1770,8 +1770,7 @@ impl Module {
                 self.expr_kind(then_branch),
                 self.expr_kind(else_branch),
                 |expected, actual| self.kind_holds(expected, actual),
-            )
-            .unwrap_or(ValueKind::Error),
+            ),
             Expr::Error { .. } => ValueKind::Error,
         }
     }
@@ -2521,9 +2520,8 @@ fn join_arm_kind(
     }
 }
 
-/// Joins two result lists position by position with [`join_arm_kind`],
-/// and runtime objects neither holds with [`join_object_kinds`]. Lists of
-/// different lengths do not join.
+/// Joins two result lists position by position with [`join_kind`]. Lists
+/// of different lengths do not join.
 fn join_arm_kinds(
     classes: &[Class],
     lhs: &[ValueKind],
@@ -2533,22 +2531,38 @@ fn join_arm_kinds(
     if lhs.len() != rhs.len() {
         return None;
     }
-    lhs.iter()
-        .zip(rhs)
-        .map(|(lhs, rhs)| join_kind(classes, *lhs, *rhs, &holds))
-        .collect()
+    Some(
+        lhs.iter()
+            .zip(rhs)
+            .map(|(lhs, rhs)| join_kind(classes, *lhs, *rhs, &holds))
+            .collect(),
+    )
 }
 
 /// Joins two kinds as conditional arms join: the one that holds the other's
 /// values ([`join_arm_kind`]), else for two runtime objects their least
-/// common superclass ([`join_object_kinds`]).
+/// common superclass ([`join_object_kinds`]), else for two callables an
+/// untyped `<callable>`, and otherwise `<object>`.
+///
+/// As in Dylan, a conditional's value has the union of its arms' types,
+/// so arms of any two types join: an `<integer>` arm and a `#f` arm, the
+/// "integer or false" of dynamic code, give an `<object>` that boxes the
+/// integer on its way out. Soft typing still sees the union of the arms'
+/// types, so code reading the joined value is checked against it.
 fn join_kind(
     classes: &[Class],
     lhs: ValueKind,
     rhs: ValueKind,
     holds: impl Fn(ValueKind, ValueKind) -> bool,
-) -> Option<ValueKind> {
-    join_arm_kind(lhs, rhs, holds).or_else(|| join_object_kinds(classes, lhs, rhs))
+) -> ValueKind {
+    let callable = |kind| matches!(kind, ValueKind::Callable | ValueKind::KnownCallable(_));
+    join_arm_kind(lhs, rhs, holds)
+        .or_else(|| join_object_kinds(classes, lhs, rhs))
+        .unwrap_or(if callable(lhs) && callable(rhs) {
+            ValueKind::Callable
+        } else {
+            ValueKind::Any
+        })
 }
 
 /// Joins two kinds of runtime objects, such as two sibling classes, at the
@@ -8783,32 +8797,23 @@ impl Lowering {
             .iter()
             .copied()
             .zip(next.iter().copied())
-            .map(|(current, next)| self.join_result_kind(current, next))
+            .map(|(current, next)| Some(self.join_result_kind(current, next)))
             .collect()
     }
 
-    /// Joins one inferred result position across two methods: the method
-    /// kind that holds the other's values, as an `if` joins its branches,
-    /// else the top category the two share.
-    fn join_result_kind(&self, current: ValueKind, next: ValueKind) -> Option<ValueKind> {
+    /// Joins one inferred result position across two methods as an `if`
+    /// joins its branches ([`join_kind`]); a method whose result did not
+    /// check takes the other's.
+    fn join_result_kind(&self, current: ValueKind, next: ValueKind) -> ValueKind {
         if current == ValueKind::Error {
-            return Some(next);
+            return next;
         }
         if next == ValueKind::Error {
-            return Some(current);
+            return current;
         }
-        if let Some(joined) = join_kind(&self.classes, current, next, |expected, actual| {
+        join_kind(&self.classes, current, next, |expected, actual| {
             self.kinds_match(expected, actual)
-        }) {
-            return Some(joined);
-        }
-        if self.is_callable_kind(current) && self.is_callable_kind(next) {
-            return Some(ValueKind::Callable);
-        }
-        if !self.is_callable_kind(current) && !self.is_callable_kind(next) {
-            return Some(ValueKind::Any);
-        }
-        None
+        })
     }
 
     fn is_callable_kind(&self, kind: ValueKind) -> bool {
@@ -16131,8 +16136,10 @@ impl Lowering {
     ) -> Expr {
         let scope_start = ctx.scope_start();
         let exit = exit.map(|exit| {
+            // As in Dylan, an exit takes any object where nothing narrower
+            // is expected, so it joins the body's values as an arm would.
             let result_kinds =
-                expected_results.map_or_else(provisional_open_result_kinds, <[ValueKind]>::to_vec);
+                expected_results.map_or_else(|| vec![ValueKind::Any], <[ValueKind]>::to_vec);
             if ctx.find_local(&exit.name).is_some() {
                 ctx.diagnostics.push(
                     Diagnostic::error(exit.span, DiagnosticCode::DuplicateLocal)
@@ -18808,8 +18815,7 @@ impl Lowering {
                 self.expr_kind(then_branch),
                 self.expr_kind(else_branch),
                 |expected, actual| self.kinds_match(expected, actual),
-            )
-            .unwrap_or(ValueKind::Error),
+            ),
             Expr::Handle { restart, .. } => scalar_result_kind(&restart.result_kinds),
             Expr::Block { .. } => scalar_result_kind(&self.expr_kinds(expr)),
             Expr::Discard { .. } | Expr::Error { .. } => ValueKind::Error,
@@ -22405,21 +22411,39 @@ mod tests {
     }
 
     #[test]
-    fn reports_invalid_if_condition_and_branch_mismatch() {
+    fn reports_invalid_if_condition() {
         let invalid_condition = lower_source("define function main()\n  if (1) 2 else 3 end\nend;");
         assert!(has_diagnostic(
             &invalid_condition,
             DiagnosticCode::IfConditionTypeMismatch,
             &[("expected", "<boolean>"), ("actual", "<integer>")]
         ));
+    }
 
-        let mismatched_branches =
-            lower_source("define function main(x)\n  if (x = 0) #t else 3 end\nend;");
-        assert!(has_diagnostic(
-            &mismatched_branches,
-            DiagnosticCode::IfBranchTypeMismatch,
-            &[("then", "<boolean>"), ("else", "<integer>")]
-        ));
+    #[test]
+    fn arms_of_different_kinds_join_at_object() {
+        let module = lower_source(
+            "define class <shape> (<object>) end;\n\
+             define function scalar(x)\n  if (x = 0) #t else 3 end\nend;\n\
+             define function object(x)\n  if (x = 0) make(<shape>) else 3 end\nend;\n\
+             define function callable(x)\n  if (x = 0) scalar else object end\nend;\n\
+             define function same(x)\n  if (x = 0) 1 else 3 end\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        let results = module
+            .functions
+            .iter()
+            .map(|function| function.result_kinds.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results,
+            [
+                vec![ValueKind::Any],
+                vec![ValueKind::Any],
+                vec![ValueKind::Callable],
+                vec![ValueKind::I64]
+            ]
+        );
     }
 
     #[test]
@@ -22499,15 +22523,12 @@ mod tests {
             float_branch.diagnostics
         );
 
-        let mismatched_restart = lower_source(
+        let joined_restart = lower_source(
             "define class <bad> (<object>)\n  slot fallback :: <integer>;\nend;\n\
              define function main()\n  handle 1 with restart <bad> #f end\nend;",
         );
-        assert!(has_diagnostic(
-            &mismatched_restart,
-            DiagnosticCode::HandleRestartResultMismatch,
-            &[("body", "<integer>"), ("restart", "<boolean>")]
-        ));
+        assert_eq!(joined_restart.diagnostics, Vec::new());
+        assert_eq!(joined_restart.functions[0].result_kinds, [ValueKind::Any]);
     }
 
     #[test]

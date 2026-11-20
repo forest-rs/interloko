@@ -1,6 +1,0 @@
-// expect: diagnostics 1
-// expect: diagnostic contains if branches must produce the same types, not <boolean> and <integer>
-
-define function main()
-  if (1 = 1) #t else 0 end
-end;

@@ -117,9 +117,15 @@ The current slices include:
   conditional without `else` or `otherwise` produces no values: its arms
   run for their effects, and using it where a value is expected is a type
   error. An `instance?` test narrows its arm, and each later `elseif`,
-  `else` or `case` arm sees what the earlier tests ruled out. Arms of
-  different classes join at their least common superclass (a `<call>` arm
-  and a `<var>` arm at `<node>`), as the type lattice bounds their union.
+  `else` or `case` arm sees what the earlier tests ruled out. As in Dylan,
+  a conditional's value has the union of its arms' types, so any arms join:
+  arms of different classes at their least common superclass (a `<call>`
+  arm and a `<var>` arm at `<node>`), callables of different signatures at
+  `<function>`, and anything else at `<object>`, boxing a scalar arm on its
+  way out, so `if (digit?(c)) digit-value(c) else #f end` is the "integer
+  or false" of dynamic code. Soft typing still sees the union of the arms'
+  types (`<integer> ∪ #f` there). The same holds for `select`, `handle` and
+  a `block` with an exit.
   Where its values are discarded, as in a statement, at the end of a
   body declared `=> ()`, or at the end of a loop's body or a `block`'s
   cleanup, a conditional's arms, or a `handle`'s body and restart, run for
@@ -762,7 +768,9 @@ The current slices include:
   when guard => body end`, whose body and restart are bodies with their
   own `let`s, and Dylan's `block () body cleanup body exception (e :: <c>)
   body end`, a restart around the block's body that runs after its
-  cleanup, with the block's exit procedure in scope (one exception clause
+  cleanup, with the block's exit procedure in scope, which takes the
+  values the block's context expects, or one `<object>` where it expects
+  nothing narrower, as an arm the body's values join (one exception clause
   per block for now, and no `test:` or `init-arguments:` options); with
   `<condition>`, `<error>`,
   `<type-error>`, `<no-applicable-method>`, `<select-error>`,
