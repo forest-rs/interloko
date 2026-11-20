@@ -10,8 +10,8 @@
 //!
 //! It is a built-in open generic like `size` and `element`: a program adds
 //! methods for its own classes, and the kernel's methods serve `<vector>`
-//! (so `<stretchy-vector>`), `<string>`, `<table>` and, as a default,
-//! `<sequence>`,
+//! (so `<stretchy-vector>`), `<string>`, `<table>`, `<list>` (written in
+//! the kernel library) and, as a default, `<sequence>`,
 //! whose integer states run from 0 below `size(c)` and whose elements are
 //! read with `element`. The generic is sealed over `<vector>`, `<table>`
 //! and `<sequence>` itself, so a program's `<sequence>` subclass may define
@@ -46,6 +46,8 @@ pub const SEALED_ITERATION_CLASSES: &[BuiltinValueClass] = &[
     BuiltinValueClass::Vector,
     BuiltinValueClass::String,
     BuiltinValueClass::Table,
+    // Its method is the kernel library's.
+    BuiltinValueClass::List,
 ];
 
 /// The kernel classes with an iteration method, in method order: the

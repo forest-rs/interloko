@@ -212,7 +212,7 @@ impl StrictViolation {
 /// A definition's own `strict` comes first, then its generic's for a
 /// method, then the session's [`StrictScope::All`]. Only functions,
 /// constants, methods from source, and slot defaults that run code are ever
-/// strict: the compiler's numeric and slot-setter methods are not code a
+/// strict (a kernel function never is): the compiler's numeric and slot-setter methods are not code a
 /// program can change. A slot default has no `strict` of its own, so only
 /// the session's policy holds it; a strict function that makes the object
 /// does not make the defaults it runs strict.
@@ -228,7 +228,11 @@ pub fn strictness(
         .iter()
         .find(|function| function.definition == definition)
     {
-        return if function.strict {
+        // A kernel function, a built-in's value or the kernel library's, is
+        // not code the program wrote.
+        return if function.kernel {
+            None
+        } else if function.strict {
             Some(StrictSource::Declared)
         } else {
             policy

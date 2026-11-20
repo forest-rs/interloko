@@ -1,0 +1,14 @@
+// expect: diagnostic code sem.collection-method-overrides-kernel
+// expect: diagnostics 1
+
+// `forward-iteration-protocol` is sealed over `<list>`.
+
+define method forward-iteration-protocol (l :: <empty-list>)
+  values(0, 0, method (c, s) s end, method (c, s, l) #t end,
+         method (c, s) s end, method (c, s) s end, #f)
+end;
+
+define function main() => <integer>
+  for (x in #()) end;
+  0
+end;

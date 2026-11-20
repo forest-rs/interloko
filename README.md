@@ -632,9 +632,15 @@ The current slices include:
   and `tail-setter(v, p)` store into a `<pair>`. An `<object>` argument is
   checked to be a `<list>` (or a `<pair>`) as a declaration would check
   it. As in Dylan, `x.f` is `f(x)` and `x.f := v` is `f-setter(v, x)` for
-  any `f` no class has a slot of, so `p.head` and `p.tail := l` work. A
-  pair is a runtime object of two slots, so `head` and `tail` are a host
-  call each;
+  any `f` no class has a slot of, so `p.head` and `p.tail := l` work. As
+  a sequence a list has `size` (its number of pairs), `l[i]`, `element(l,
+  i, default: d)` and `l[i] := v`, an index past its end without a
+  default signalling an `<error>`, and `for (x in l)` walks it from its
+  first pair to its last, through its `forward-iteration-protocol`, whose
+  states are its pairs. These are the kernel's methods for `<list>`, over
+  which the generics are sealed, written in Loko in the kernel library
+  (below). A pair is a runtime object of two slots, so `head` and `tail`
+  are a host call each;
 - Dylan's collection generics `size(collection)`, `element(collection,
   key, #key default)`, `element-setter(value, collection, key)` and
   `add!(collection, element)` (whose kernel methods take a stretchy vector
@@ -659,6 +665,15 @@ The current slices include:
   default`, testing `default == $unsupplied` when the call passed none. A
   typed `c[k]` runs the kernel's plain operation inline, without testing
   for a default;
+- the kernel library: the parts of the kernel written in Loko
+  (`crates/interloko_compiler/src/sem/library.loko`), today the list
+  methods of the collection generics. A definition of it joins a program
+  only when the program needs it, a method of a collection generic when
+  the program uses the generic, and is the kernel's code: it sees none of
+  the program's definitions, so a program's own `size` or `tail` cannot
+  change what it does, strict typing does not hold it, and its trees carry
+  no source positions. The library is parsed once per compile that needs
+  it;
 - recoverable condition/restart forms: `handle body with restart e :: <c>
   when guard => body end`, whose body and restart are bodies with their
   own `let`s, and Dylan's `block () body cleanup body exception (e :: <c>)
