@@ -18960,8 +18960,9 @@ end;";
                 )
                 .expect("churn should run");
             assert_eq!(outcome.value, FunctionValue::Integer(200));
-            // Each turn allocates cells and strings, and none survive.
-            assert!(outcome.turn.allocated.objects >= 150);
+            // Each turn allocates cells and concatenated strings, and none
+            // survive. A literal's string is made once per turn.
+            assert!(outcome.turn.allocated.objects >= 100);
             assert_eq!(outcome.turn.reachable, HeapStats::default());
             assert_eq!(runtime.heap_stats(), empty);
         }

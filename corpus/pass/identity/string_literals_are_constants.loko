@@ -1,0 +1,18 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// A string literal is a constant, as in Dylan: every evaluation of it, and
+// of any literal with the same text, is the same string. A string built at
+// run time is a new one, though `=` to it (see `distinct_strings.loko`).
+
+define function greeting() => <string>
+  "hello"
+end;
+
+define function main() => <integer>
+  let n = 0;
+  if (greeting() == greeting()) n := n + 1 end;
+  if (greeting() == "hello") n := n + 1 end;
+  if (concatenate("hell", "o") ~== greeting()) n := n + 1 end;
+  n
+end;

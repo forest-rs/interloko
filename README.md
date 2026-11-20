@@ -556,7 +556,9 @@ The current slices include:
   class at run time, as a number does. Unlike Dylan's, symbols keep their
   case: `#Foo` and `#foo` are different symbols;
 - strings: a `<string>` is immutable, validated UTF-8 whose header caches
-  its character count, so `size(s)` is O(1), and whether it is all ASCII;
+  its character count, so `size(s)` is O(1), and whether it is all ASCII.
+  A string literal is a constant, as in Dylan: every evaluation of a
+  literal with the same text during a run is the same string (`==`);
   a Rust host borrows its text as `&str` without a copy. Strings have no
   integer keys. A `<string-position>` is an opaque, unboxed place between
   characters (a byte offset with its own class, never an `<integer>`)
