@@ -292,8 +292,8 @@ call cannot pass, which is not a dispatch failure.
 ## Calls Through `<callable>`
 
 An untyped `<callable>` value says nothing about what it returns, so a
-call through it (`apply(f, ...)`) takes its result types from context: a
-declared binding (`let r :: <integer> = apply(f, 4)`), the enclosing
+call through it (`f(...)`) takes its result types from context: a
+declared binding (`let r :: <integer> = f(4)`), the enclosing
 function's declared result, or an argument's parameter type. With no such
 context it reports `sem.untyped-callable-result`, which suggests declaring
 one or giving the callable a signature such as `callable(<integer>) =>

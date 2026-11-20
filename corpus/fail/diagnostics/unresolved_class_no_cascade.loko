@@ -1,0 +1,19 @@
+// expect: diagnostics 3
+// expect: diagnostic code sem.unresolved-class
+// expect: diagnostic contains unresolved class `<lisp-pair>`
+// expect: diagnostic contains unresolved class `<lisp-symbol>`
+
+// An unresolved class is reported where it is written, once per mention.
+// The methods specializing on it, sends that one of them might have taken
+// and slot reads of a receiver of it do not cascade: no ambiguity between
+// methods whose overlap is unknown, no missing method, no placeholder
+// class id or `<error>` type in a message.
+
+define generic evaluate(x, env);
+define method evaluate(x :: <lisp-pair>, env :: <object>) 1 end;
+define method evaluate(x :: <lisp-symbol>, env :: <object>) 2 end;
+
+define function main() => <integer>
+  let p :: <lisp-pair> = 3;
+  p.size + evaluate(1, 2)
+end;
