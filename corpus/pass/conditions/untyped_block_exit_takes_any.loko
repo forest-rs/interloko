@@ -1,0 +1,14 @@
+// expect: run 1
+// expect: diagnostics 0
+
+// Where nothing narrower is expected, a block's exit takes any object, as
+// in Dylan, and its values join the body's as an arm's would.
+
+define function main() => <integer>
+  let r = block (return)
+    if (1 < 2) return(2.5) end;
+    if (1 < 2) return("s") end;
+    5
+  end;
+  if (instance?(r, <double-float>)) 1 else 2 end
+end;
