@@ -1,11 +1,11 @@
-// expect: diagnostics 3
+// expect: diagnostics 2
 // expect: diagnostic code sem.local-type-mismatch
-// expect: diagnostic code sem.local-assignment-type-mismatch
 
 // A run-time cast checks a value's class, not a callable's signature, so an
-// `<object>` is not checked into a binding that declares or infers one; it
-// is an error there, as before. `as(<function>, ...)` and a `<function>`
-// binding take it without a signature.
+// `<object>` is not checked into a binding that declares one; it is an
+// error there, as before. `as(<function>, ...)` and a `<function>` binding
+// take it without a signature, and so does a `let` that declares no type,
+// which holds any value: assigning the `<object>` makes `f` one.
 
 define function main() => <integer>
   let t = make(<table>);

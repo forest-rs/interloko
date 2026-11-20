@@ -141,9 +141,15 @@ The current slices include:
   end`, `method () => () end`, `begin end`, an empty arm) or ending in a
   `let`, produces no values, as an `if` without `else` does;
 - assignable `let` locals and parameters: `x := v` is an expression whose
-  value is the new value. A local keeps the type it declares, or its
-  initializer's when it declares none, so `let n = 0; n := "s"` is an
-  error, and a limited local checks each value assigned to it. As in
+  value is the new value. A local keeps the type it declares, and a
+  limited local checks each value assigned to it. As in Dylan, a `let`
+  that declares no type is an `<object>`, so `let result = #f; result :=
+  evaluate(form)` and `let n = 0; n := "s"` are fine; it is held in the
+  narrowest representation that holds every value bound to it, its
+  initializer's and each assignment's (closures' included), which the
+  compiler finds as a fixpoint over the module, so a counter that only
+  ever holds integers is still an unboxed `<integer>`, and soft typing
+  tracks the type each assignment stores. As in
   Dylan, a parameter is assignable too, and assigning it changes only the
   parameter: an assigned parameter moves out of the register the call
   passed it in, so retrying a frame after an edit passes the arguments it

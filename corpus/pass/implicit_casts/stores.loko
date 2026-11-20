@@ -3,7 +3,7 @@
 
 // A value whose type is a supertype of a slot's or a local's is checked
 // where it is stored: a `make` keyword, a slot assignment, a slot default,
-// a local assignment and a constant.
+// an assignment of a local that declares its type, and a constant.
 
 define class <cell> (<object>)
   slot value :: <integer>, init-keyword: value:;
@@ -20,7 +20,7 @@ define function main() => <integer>
   let bumped :: <object> = 1004;
   let c = make(<cell>, value: held);
   c.value := bumped;
-  let total = 0;
+  let total :: <integer> = 0;
   total := more;
   c.value + total + c.other + $start - 30
 end;

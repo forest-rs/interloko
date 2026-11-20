@@ -1,0 +1,16 @@
+// expect: run 6
+// expect: diagnostics 0
+
+// An untyped `let` assigned values of different types holds `<object>`s,
+// and strict typing still proves what reads of it rely on: soft typing
+// tracks the type each assignment stores, here an `<integer>` after `#f`.
+
+define strict function bump() => <integer>
+  let x = #f;
+  x := 5;
+  x + 1
+end;
+
+define function main() => <integer>
+  bump()
+end;
