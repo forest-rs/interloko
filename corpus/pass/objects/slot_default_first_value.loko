@@ -7,7 +7,7 @@
 // which holds the values it drops.
 
 define class <cell> (<object>)
-  slot width :: <integer>, init-value: truncate/(7, 2);
+  slot width :: <integer> = truncate/(7, 2);
 end;
 
 define function main() => <integer>

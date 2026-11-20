@@ -1,0 +1,53 @@
+// expect: run 1111111
+// expect: diagnostics 0
+
+// Dylan's three slot defaults. `slot x = expr` evaluates `expr` at each
+// `make` that takes it, so every instance gets a table of its own;
+// `init-function:` calls its function at each such `make`; `init-value:`
+// is evaluated once, so every instance shares its value. A `make` that
+// passes the slot's keyword runs none of them.
+
+define class <counter> (<object>)
+  slot n :: <integer> = 0;
+end;
+
+define constant $made = make(<counter>);
+
+define function fresh-table() => <table>
+  $made.n := $made.n + 1;
+  make(<table>)
+end;
+
+define function maker() => callable() => <table>
+  fresh-table
+end;
+
+define class <env> (<object>)
+  constant slot own :: <table> = make(<table>);
+  constant slot shared :: <table>, init-value: fresh-table();
+  constant slot by-name :: <table>, init-function: fresh-table;
+  constant slot by-method :: <table>, init-function: method () make(<table>) end;
+  constant slot computed :: <table>, init-function: maker();
+  constant slot label :: <string>, init-value: "env";
+end;
+
+define class <child-env> (<env>)
+end;
+
+define function main() => <integer>
+  let a = make(<env>);
+  let b = make(<child-env>);
+  let c = make(<env>, own: a.own, by-name: a.by-name);
+  a.own[1] := 1;
+  a.shared[1] := 1;
+  // fresh-table ran for `shared` once, and for `by-name` and `computed`
+  // at each of three `make`s, but not for `c`'s `by-name`.
+  let made = $made.n;
+  if (size(b.own) = 0) 1 else 0 end
+    + if (size(b.shared) = 1) 10 else 0 end
+    + if (a.by-name ~== b.by-name & c.by-name == a.by-name) 100 else 0 end
+    + if (a.by-method ~== b.by-method) 1000 else 0 end
+    + if (a.computed ~== b.computed) 10000 else 0 end
+    + if (a.label == b.label) 100000 else 0 end
+    + if (made = 6) 1000000 else 0 end
+end;

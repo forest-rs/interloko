@@ -10,7 +10,7 @@ define function three() => <integer>
 end;
 
 define class <base> (<object>)
-  slot code :: <integer>, init-value: block (done)
+  slot code :: <integer> = block (done)
     let n = select (three())
       1 => 100;
       3 => 300;
@@ -22,7 +22,7 @@ define class <base> (<object>)
 end;
 
 define class <derived> (<base>)
-  slot extra :: <integer>, init-value: 1;
+  slot extra :: <integer> = 1;
 end;
 
 define function main() => <integer>

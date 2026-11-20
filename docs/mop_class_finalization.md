@@ -89,12 +89,12 @@ the class. The plan is not another source of slot truth; it is the construction
 view of the effective slots. Plan steps appear in the same inherited-then-direct
 layout order as effective slots. Each step records the accepted keyword, source
 slot identity, declared kind, whether the keyword is required, whether the slot
-has an `init-value:` default, and that explicit init args override defaults.
+has a default, and that explicit init args override defaults.
 
 ## Construction And Reads
 
 `make(<child>, ...)` validates and fills all effective slots. Inherited init
-keywords, required keywords, and `init-value:` defaults are visible during child
+keywords, required keywords, and defaults are visible during child
 construction. Explicit keyword values override defaults.
 
 Semantic IR now records the explicit init arguments at the `make` call site and
@@ -110,7 +110,7 @@ compares the value's class id against each candidate. A candidate requiring an
 init keyword the call does not pass, or a value naming no candidate, traps. The
 result is only known to be in the bound's cone, never its exact class.
 Diagnostics distinguish unknown keywords, duplicate keywords, missing required
-keywords, explicit initializer type mismatches, and default `init-value:` type
+keywords, explicit initializer type mismatches, and slot default type
 mismatches.
 
 Lowered IR consumes the initialization plan when emitting object construction.

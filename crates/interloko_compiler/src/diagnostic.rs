@@ -66,6 +66,10 @@ pub enum DiagnosticCode {
     AstSlotInitValueRequiresExpression,
     /// A slot option is not supported.
     AstUnsupportedSlotOption,
+    /// A slot writes two options that exclude each other, as Dylan's do:
+    /// two defaults, two construction keywords, or a default with
+    /// `required-init-keyword:`.
+    AstSlotOptionConflict,
     /// A result annotation declares `#rest` results, which Loko does not
     /// support: a callee returns a fixed number of values.
     AstRestResultsUnsupported,
@@ -422,6 +426,7 @@ impl DiagnosticCode {
         Self::AstSlotOptionRequiresKeyword,
         Self::AstSlotInitValueRequiresExpression,
         Self::AstUnsupportedSlotOption,
+        Self::AstSlotOptionConflict,
         Self::AstRestResultsUnsupported,
         Self::AstInvalidMethodSpecializer,
         Self::AstAnnotationNotClass,
@@ -587,6 +592,7 @@ impl DiagnosticCode {
             Self::AstSlotOptionRequiresKeyword => "ast.slot-option-requires-keyword",
             Self::AstSlotInitValueRequiresExpression => "ast.slot-init-value-requires-expression",
             Self::AstUnsupportedSlotOption => "ast.unsupported-slot-option",
+            Self::AstSlotOptionConflict => "ast.slot-option-conflict",
             Self::AstRestResultsUnsupported => "ast.rest-results-unsupported",
             Self::AstInvalidMethodSpecializer => "ast.invalid-method-specializer",
             Self::AstAnnotationNotClass => "ast.annotation-not-class",
@@ -755,6 +761,7 @@ impl DiagnosticCode {
             "ast.slot-option-requires-keyword" => Self::AstSlotOptionRequiresKeyword,
             "ast.slot-init-value-requires-expression" => Self::AstSlotInitValueRequiresExpression,
             "ast.unsupported-slot-option" => Self::AstUnsupportedSlotOption,
+            "ast.slot-option-conflict" => Self::AstSlotOptionConflict,
             "ast.rest-results-unsupported" => Self::AstRestResultsUnsupported,
             "ast.invalid-method-specializer" => Self::AstInvalidMethodSpecializer,
             "ast.annotation-not-class" => Self::AstAnnotationNotClass,

@@ -5,10 +5,10 @@
 // a collection, a string builder, a character or a function.
 
 define class <inventory> (<object>)
-  slot items :: <stretchy-vector>, init-value: make(<stretchy-vector>);
-  slot counts :: <table>, init-value: make(<table>);
+  slot items :: <stretchy-vector> = make(<stretchy-vector>);
+  slot counts :: <table> = make(<table>);
   slot all :: <sequence>, init-value: #[1, 2];
-  slot log :: <string-builder>, init-value: make(<string-builder>);
+  slot log :: <string-builder> = make(<string-builder>);
   slot mark :: <character>, init-value: 'x';
   slot step :: <function>, init-value: method (n :: <integer>) => <integer> n + 1 end;
 end;

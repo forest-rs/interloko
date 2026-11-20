@@ -17,18 +17,18 @@ define function bump() => <integer>
 end;
 
 define class <base> (<object>)
-  slot a :: <integer>, init-value: begin
+  slot a :: <integer> = begin
     let t = bump();
     t
   end;
 end;
 
 define class <mid> (<base>)
-  slot b :: <integer>, init-value: bump() * 10;
+  slot b :: <integer> = bump() * 10;
 end;
 
 define class <leaf> (<mid>)
-  slot c :: <integer>, init-value: bump() * 100;
+  slot c :: <integer> = bump() * 100;
 end;
 
 define function build(s :: <base>) => <base>

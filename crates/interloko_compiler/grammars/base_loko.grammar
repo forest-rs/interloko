@@ -7,12 +7,17 @@ rule type-definition-name = type-name
 rule superclass = `(` superclass-type `)`
 rule superclass-type = type-name
 rule slot-declaration = constant-slot-declaration | mutable-slot-declaration
-rule constant-slot-declaration = `constant` `slot` slot-name type-annotation? slot-option-tail* `;`
-rule mutable-slot-declaration = `slot` slot-name type-annotation? slot-option-tail* `;`
+rule constant-slot-declaration = `constant` `slot` slot-name type-annotation? slot-init? slot-option-tail* `;`
+rule mutable-slot-declaration = `slot` slot-name type-annotation? slot-init? slot-option-tail* `;`
+// Dylan's `slot x = expr`: `expr` runs at each `make` that takes it.
+rule slot-init = `=` expression
 rule slot-name = name
 rule slot-option-tail = `,` slot-option
-rule slot-option = init-value-option | init-keyword-option | required-init-keyword-option | extension-slot-option
+rule slot-option = init-value-option | init-function-option | init-keyword-option | required-init-keyword-option | extension-slot-option
+// As in Dylan, `init-value:` is evaluated once and every instance shares
+// its value; `init-function:` is called at each `make` that takes it.
 rule init-value-option = `init-value` `:` expression
+rule init-function-option = `init-function` `:` expression
 rule init-keyword-option = `init-keyword` `:` slot-keyword
 rule required-init-keyword-option = `required-init-keyword` `:` slot-keyword
 rule extension-slot-option = name `:` slot-keyword

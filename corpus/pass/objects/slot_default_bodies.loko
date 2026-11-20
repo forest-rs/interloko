@@ -18,7 +18,7 @@ define constant $log = make(<counter>);
 define class <tally> (<object>)
   slot start :: <integer>, init-value: 1;
   slot digit :: limited(<integer>, min: 0, max: 9), init-value: 7;
-  slot items :: <object>, init-value: begin
+  slot items :: <object> = begin
     let v = make(<stretchy-vector>);
     let i = 0;
     while (i < 3)
@@ -28,7 +28,7 @@ define class <tally> (<object>)
     $log.made := $log.made + 1;
     v
   end;
-  slot scale :: callable(<integer>) => <integer>, init-value: begin
+  slot scale :: callable(<integer>) => <integer> = begin
     let factor = 10;
     method (x :: <integer>) => <integer> x * factor end
   end;

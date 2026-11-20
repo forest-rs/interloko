@@ -3011,8 +3011,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "slot-declaration",
-            "(`slot` | `constant slot`) slot-name type-annotation? slot-option* `;`?",
+            "(`slot` | `constant slot`) slot-name type-annotation? slot-init? slot-option* `;`?",
             "syntax.rs:Parser::parse_slot_decl",
+        ),
+        (
+            "slot-init",
+            "`=` expression",
+            "base_loko_primary::BaseLokoCstBuilder::build_slot",
         ),
         (
             "slot-name",
@@ -3021,8 +3026,13 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "slot-option",
-            "init-value-option | init-keyword-option | required-init-keyword-option | extension-slot-option",
+            "init-value-option | init-function-option | init-keyword-option | required-init-keyword-option | extension-slot-option",
             "syntax.rs:Parser::parse_slot_option",
+        ),
+        (
+            "init-function-option",
+            "`init-function` `:` expression",
+            "base_loko_primary::BaseLokoCstBuilder::build_slot_option",
         ),
         (
             "slot-keyword",
@@ -4553,7 +4563,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 101);
+        assert_eq!(grammar.effective_rules.len(), 103);
 
         assert!(
             !records

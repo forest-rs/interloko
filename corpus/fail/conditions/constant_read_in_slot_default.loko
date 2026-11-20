@@ -7,7 +7,7 @@
 // as the reader.
 
 define class <box> (<object>)
-  slot peer :: <object>, init-value: begin
+  slot peer :: <object> = begin
     let seen = $box;
     seen
   end;

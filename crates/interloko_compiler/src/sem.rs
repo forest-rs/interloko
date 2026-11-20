@@ -17,6 +17,7 @@ mod collection;
 mod iteration;
 mod keywords;
 mod library;
+mod slot_init;
 pub use collection::{BUILTIN_METHODS, BuiltinMethod, CollectionFunction, MethodKey};
 mod text;
 use keywords::{KeywordDefault, KeywordSignature};
@@ -5255,11 +5256,12 @@ pub fn lower_with_host_registry(module: &ast::Module, registry: &HostMetaRegistr
         .iter()
         .map(|function| function.name.as_str())
         .collect::<Vec<_>>();
+    let module = slot_init::desugar(module);
     let keywords::Desugared {
         module,
         functions,
         generics,
-    } = keywords::desugar(module, &host_functions);
+    } = keywords::desugar(&module, &host_functions);
     let mut lowering = Lowering::new(&module, registry, functions, generics);
     lowering.lower_module(&module)
 }
@@ -6789,7 +6791,7 @@ impl Lowering {
         for (class_index, class) in module.classes.iter().enumerate() {
             let lowered_class_index = class_index + 1;
             for (slot_index, slot) in class.slots.iter().enumerate() {
-                let Some(init_value) = &slot.init_value else {
+                let Some(init_value) = slot.init.as_ref().map(|init| &init.value) else {
                     continue;
                 };
                 if let Some(lowered) = self
@@ -6816,7 +6818,7 @@ impl Lowering {
         for (class_index, class) in module.classes.iter().enumerate() {
             let lowered_class_index = class_index + 1;
             for (slot_index, slot) in class.slots.iter().enumerate() {
-                let Some(init_value) = &slot.init_value else {
+                let Some(init_value) = slot.init.as_ref().map(|init| &init.value) else {
                     continue;
                 };
                 let mut ctx = FunctionContext::new();
@@ -20445,7 +20447,7 @@ mod tests {
         // Slot initializers and constants are numbered as their own roots.
         let module = lower_source(
             "define constant $k :: <integer> = 1 + 2 * 3;\n\
-             define class <box> (<object>)\n  slot size :: <integer>, init-value: 4 - 5;\nend;\n\
+             define class <box> (<object>)\n  slot size :: <integer> = 4 - 5;\nend;\n\
              define function main() => <integer>\n  $k + make(<box>).size\nend;",
         );
         assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
@@ -22208,7 +22210,7 @@ mod tests {
     #[test]
     fn resolves_slot_init_values_and_constant_metadata() {
         let module = lower_source(
-            "define class <circle> (<object>)\n  constant slot radius :: <integer>, required-init-keyword: r:, init-value: 10;\n  slot cached, init-value: #t;\nend;\n\
+            "define class <circle> (<object>)\n  constant slot radius :: <integer>, init-keyword: r:, init-value: 10;\n  slot cached, init-value: #t;\nend;\n\
              define function main()\n  make(<circle>).radius\nend;",
         );
 
@@ -22216,7 +22218,7 @@ mod tests {
         let circle = class(&module, "<circle>");
         let radius = &circle.direct_slots[0];
         assert_eq!(radius.init_keyword, "r");
-        assert!(radius.required_init_keyword);
+        assert!(!radius.required_init_keyword);
         assert_eq!(radius.allocation, SlotAllocation::Instance);
         assert_eq!(radius.mutability, SlotMutability::Constant);
         assert!(matches!(
@@ -22232,7 +22234,7 @@ mod tests {
         ));
         let plan = &circle.initialization_plan;
         assert_eq!(plan.steps.len(), 2);
-        assert!(plan.steps[0].required_init_keyword);
+        assert!(!plan.steps[0].required_init_keyword);
         assert!(plan.steps[0].has_default);
         assert!(!plan.steps[1].required_init_keyword);
         assert!(plan.steps[1].has_default);

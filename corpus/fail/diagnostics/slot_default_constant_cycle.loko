@@ -6,7 +6,7 @@
 // reads the constant is a read of it while it is initialized.
 
 define class <a> (<object>)
-  slot n :: <object>, init-value: begin
+  slot n :: <object> = begin
     let seen = $c;
     seen
   end;

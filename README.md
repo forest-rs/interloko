@@ -283,10 +283,17 @@ The current slices include:
   other operand may, so `x + if (c) 1 else 2 end`, `f(select (k) … end)`
   and `begin … end[0]` work. One that produces no values, such as an `if`
   without `else`, has no value to give an operator or argument;
-- nominal classes with typed slots, init keywords and inherited slots. A
-  slot's `init-value:` default may be any expression, a `begin … end` body
-  with its own `let`s, loops and closures included; it runs afresh at each
-  `make` that takes it (a literal default is computed in place);
+- nominal classes with typed slots, init keywords and inherited slots, and
+  Dylan's slot defaults: `slot x = expr` evaluates `expr` at each `make`
+  that takes it, so `slot bindings :: <table> = make(<table>)` gives each
+  instance its own table, and may be any expression, a `begin … end` body
+  with its own `let`s, loops and closures included; `init-function: f`
+  calls `f` at each such `make`; and `init-value: expr` is evaluated once,
+  every instance sharing its value (once per run, as a constant is: a
+  literal, name or anonymous method stays in place, and any other value
+  is kept in a hidden constant). A literal default is computed in place.
+  As in Dylan, a slot takes one default and one construction keyword, and
+  `required-init-keyword:` takes no default;
 - slot getters and setters that are generic functions, as in Dylan: every
   class declaring a slot `power` gives the generic `power` a method reading
   it (and `power-setter` one writing it), so `x.power` of an `<object>`

@@ -8080,10 +8080,10 @@ fn dump_ast(module: &ast::Module) -> String {
                 ast_slot_allocation_label(slot.allocation),
                 ast_slot_mutability_label(slot.mutability)
             );
-            if let Some(init_value) = &slot.init_value {
+            if let Some(init) = &slot.init {
                 indent_line(&mut out, 4);
-                let _ = writeln!(out, "init-value");
-                dump_ast_expr(&mut out, init_value, 6);
+                let _ = writeln!(out, "{}", init.kind.label());
+                dump_ast_expr(&mut out, &init.value, 6);
             }
         }
     }
@@ -19520,7 +19520,7 @@ end;";
             define generic area(x);\n\
             define method area(c :: <circle>) => <integer>\n  7\nend;\n\
             define class <holder> (<object>)\n  \
-            slot size :: <integer>, init-value: area(make(<circle>));\nend;\n\
+            slot size :: <integer> = area(make(<circle>));\nend;\n\
             define constant $seven :: <integer> = area(make(<circle>));\n\
             define function main() => <integer>\n  \
             let first = make(<holder>);\n  let second = make(<holder>);\n  \
@@ -21646,7 +21646,7 @@ end;";
         // The default's code is typed as the slot, so editing it changes the
         // slot's sem output, retypes the slot and lowers again.
         let source = "define class <box> (<object>)\n  \
-                      slot n :: <integer>, init-value: begin\n    \
+                      slot n :: <integer> = begin\n    \
                       let u = 0;\n    while (u < 3) u := u + 1 end;\n    u\n  end;\n\
                       end;\n\
                       define function main() => <integer>\n  make(<box>).n\nend;";
@@ -21691,7 +21691,7 @@ end;";
         // The retried `remake` makes a box under the new code, whose default
         // is the edited one.
         let old = "define class <box> (<object>)\n  \
-                   slot n :: <integer>, init-value: begin let k = 1; k end;\nend;\n\
+                   slot n :: <integer> = begin let k = 1; k end;\nend;\n\
                    define class <oops> (<error>)\nend;\n\
                    define function remake() => <integer>\n  \
                    let b = make(<box>);\n  signal(make(<oops>));\n  b.n\nend;\n\

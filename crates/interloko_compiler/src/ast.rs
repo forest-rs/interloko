@@ -343,14 +343,52 @@ pub struct Slot {
     /// Whether the construction keyword was declared with
     /// `required-init-keyword:`.
     pub required_init_keyword: bool,
-    /// Optional expression used when construction omits this slot.
-    pub init_value: Option<Expr>,
+    /// How the slot's value is computed when construction omits it, if it
+    /// has a default.
+    pub init: Option<SlotInit>,
     /// Slot allocation policy. Only instance slots are supported in this slice.
     pub allocation: SlotAllocation,
     /// Slot mutability metadata.
     pub mutability: SlotMutability,
     /// Source span.
     pub span: Span,
+}
+
+/// A slot's default: the value a `make` that does not pass the slot's
+/// keyword gives it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SlotInit {
+    /// Which of Dylan's forms gives the default.
+    pub kind: SlotInitKind,
+    /// The expression the form writes.
+    pub value: Expr,
+    /// Source span of the whole form, `= expr` or the option.
+    pub span: Span,
+}
+
+/// Dylan's three ways of giving a slot a default.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SlotInitKind {
+    /// `slot x = expr`: `expr` is evaluated at each `make` that takes it.
+    Expression,
+    /// `init-value: expr`: `expr` is evaluated once, and every instance
+    /// that takes it shares its value.
+    Value,
+    /// `init-function: f`: `f` is called with no arguments at each `make`
+    /// that takes it.
+    Function,
+}
+
+impl SlotInitKind {
+    /// The form as source writes it, for diagnostics.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Expression => "= expression",
+            Self::Value => "init-value:",
+            Self::Function => "init-function:",
+        }
+    }
 }
 
 /// Slot allocation policy.
@@ -1694,7 +1732,7 @@ impl<'tree> Lowering<'tree> {
                 init_keyword: None,
                 init_keyword_span: node.span,
                 required_init_keyword: false,
-                init_value: None,
+                init: None,
                 allocation: SlotAllocation::Instance,
                 mutability: SlotMutability::Mutable,
                 span: node.span,
@@ -1710,7 +1748,19 @@ impl<'tree> Lowering<'tree> {
         let mut init_keyword = None;
         let mut init_keyword_span = span;
         let mut required_init_keyword = false;
-        let mut init_value = None;
+        // The keyword option written, for a conflict with another.
+        let mut keyword_option: Option<&'static str> = None;
+        // `slot x = expr` is the one expression child of the slot itself.
+        let mut init = node.children.iter().find_map(|child| match child {
+            CstElement::Node(expr) if !expr.kind.is_role() && expr.kind != CstKind::SlotOption => {
+                Some(SlotInit {
+                    kind: SlotInitKind::Expression,
+                    value: self.lower_expr(expr),
+                    span: expr.span,
+                })
+            }
+            _ => None,
+        });
         for option in node.child_nodes(CstKind::SlotOption) {
             let idents = self.ident_tokens(option);
             let Some((option_span, option_name)) = idents.first() else {
@@ -1723,7 +1773,7 @@ impl<'tree> Lowering<'tree> {
                 .next()
                 .and_then(|keyword| self.first_token_text(keyword, TokenKind::Ident));
             match option_name.as_str() {
-                "init-keyword" => {
+                "init-keyword" | "required-init-keyword" => {
                     let Some((keyword_span, keyword_name)) = slot_keyword else {
                         self.diagnostics.push(
                             Diagnostic::error(
@@ -1734,25 +1784,27 @@ impl<'tree> Lowering<'tree> {
                         );
                         continue;
                     };
-                    init_keyword = Some((*keyword_name).to_string());
-                    init_keyword_span = keyword_span;
-                }
-                "required-init-keyword" => {
-                    let Some((keyword_span, keyword_name)) = slot_keyword else {
-                        self.diagnostics.push(
-                            Diagnostic::error(
-                                option_span,
-                                DiagnosticCode::AstSlotOptionRequiresKeyword,
-                            )
-                            .with_arg(DiagnosticArg::text("option", format!("{option_name}:"))),
-                        );
-                        continue;
+                    let label = if option_name == "init-keyword" {
+                        "init-keyword:"
+                    } else {
+                        "required-init-keyword:"
                     };
+                    // As in Dylan, a slot has one construction keyword.
+                    if let Some(other) = keyword_option {
+                        self.slot_option_conflict(option.span, &name, label, other);
+                        continue;
+                    }
+                    keyword_option = Some(label);
                     init_keyword = Some((*keyword_name).to_string());
                     init_keyword_span = keyword_span;
-                    required_init_keyword = true;
+                    required_init_keyword = option_name == "required-init-keyword";
                 }
-                "init-value" => {
+                "init-value" | "init-function" => {
+                    let kind = if option_name == "init-value" {
+                        SlotInitKind::Value
+                    } else {
+                        SlotInitKind::Function
+                    };
                     let Some(expr) = option.children.iter().find_map(|child| match child {
                         CstElement::Node(expr) if !expr.kind.is_role() => {
                             Some(self.lower_expr(expr))
@@ -1764,17 +1816,37 @@ impl<'tree> Lowering<'tree> {
                                 option_span,
                                 DiagnosticCode::AstSlotInitValueRequiresExpression,
                             )
-                            .with_arg(DiagnosticArg::text("option", "init-value:")),
+                            .with_arg(DiagnosticArg::text("option", kind.label())),
                         );
                         continue;
                     };
-                    init_value = Some(expr);
+                    // As in Dylan, a slot has at most one default.
+                    if let Some(other) = &init {
+                        let other = other.kind.label();
+                        self.slot_option_conflict(option.span, &name, kind.label(), other);
+                        continue;
+                    }
+                    init = Some(SlotInit {
+                        kind,
+                        value: expr,
+                        span: option.span,
+                    });
                 }
                 _ => self.diagnostics.push(
                     Diagnostic::error(option_span, DiagnosticCode::AstUnsupportedSlotOption)
                         .with_arg(DiagnosticArg::text("option", format!("{option_name}:"))),
                 ),
             }
+        }
+        // As in Dylan, a required keyword leaves no use for a default.
+        if required_init_keyword && let Some(default) = &init {
+            self.slot_option_conflict(
+                default.span,
+                &name,
+                default.kind.label(),
+                "required-init-keyword:",
+            );
+            init = None;
         }
         Slot {
             id: self.ast_id(node),
@@ -1787,7 +1859,7 @@ impl<'tree> Lowering<'tree> {
             init_keyword,
             init_keyword_span,
             required_init_keyword,
-            init_value,
+            init,
             allocation: SlotAllocation::Instance,
             mutability: if self.has_token(node, TokenKind::Constant) {
                 SlotMutability::Constant
@@ -1796,6 +1868,17 @@ impl<'tree> Lowering<'tree> {
             },
             span,
         }
+    }
+
+    /// Reports that `slot` writes both the slot option `option` and
+    /// `other`, which exclude each other, at `span`.
+    fn slot_option_conflict(&mut self, span: Span, slot: &str, option: &str, other: &str) {
+        self.diagnostics.push(
+            Diagnostic::error(span, DiagnosticCode::AstSlotOptionConflict)
+                .with_arg(DiagnosticArg::text("slot", slot))
+                .with_arg(DiagnosticArg::text("option", option))
+                .with_arg(DiagnosticArg::text("other", other)),
+        );
     }
 
     fn ident_tokens<'a>(&'a self, node: &'a CstNode) -> Vec<(Span, &'a str)> {
@@ -4481,7 +4564,7 @@ impl FrontendFormLowering {
             init_keyword: slot.init_keyword.clone(),
             init_keyword_span: slot.source_span,
             required_init_keyword: slot.required_init_keyword,
-            init_value: None,
+            init: None,
             allocation: SlotAllocation::Instance,
             mutability: if slot.constant {
                 SlotMutability::Constant
@@ -5394,7 +5477,7 @@ mod tests {
             module.classes[0].slots[0].mutability,
             SlotMutability::Mutable
         );
-        assert!(module.classes[0].slots[0].init_value.is_none());
+        assert!(module.classes[0].slots[0].init.is_none());
         assert_eq!(module.classes[0].slots[1].name, "valid?");
         assert_eq!(
             module.classes[0].slots[1]
@@ -5414,8 +5497,12 @@ mod tests {
             SlotMutability::Constant
         );
         assert!(matches!(
-            module.classes[0].slots[2].init_value,
-            Some(Expr::Number { value: 5, .. })
+            &module.classes[0].slots[2].init,
+            Some(SlotInit {
+                kind: SlotInitKind::Value,
+                value: Expr::Number { value: 5, .. },
+                ..
+            })
         ));
         assert_eq!(module.generics[0].name, "area");
         assert_eq!(module.generics[0].params[0].name, "x");
