@@ -148,6 +148,14 @@ define function copy-like (c, elements :: <list>) => <object>
   end
 end;
 
+// `list` as a value: a call of the name makes its pairs inline, and a call
+// through the value collects the arguments first.
+define function list (#rest elements) => <list>
+  let result :: <list> = #();
+  for (i from size(elements) - 1 to 0 by -1) result := pair(elements[i], result) end;
+  result
+end;
+
 // The elements of `c` in reverse order, as a new list.
 define function reversed-elements (c) => <list>
   let result :: <list> = #();

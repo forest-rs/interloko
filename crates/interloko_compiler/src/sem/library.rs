@@ -30,7 +30,7 @@ pub const SOURCE: &str = include_str!("library.loko");
 
 /// The library functions a program can call or name, by name.
 pub const EXPORTS: &[&str] = &[
-    "empty?", "member?", "reduce", "first", "second", "third", "reverse", "reverse!", "map",
+    "empty?", "member?", "reduce", "first", "second", "third", "reverse", "reverse!", "map", "list",
 ];
 
 /// The logical path the library's source identity derives from.

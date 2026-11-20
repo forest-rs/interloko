@@ -1,0 +1,15 @@
+// expect: run 332
+// expect: diagnostics 0
+
+// `list` is a value as well as a call, a kernel function taking `#rest`:
+// a call of the name makes its pairs inline, and a call through the value
+// collects its arguments first. `apply` spreads into it like any function.
+
+define function main() => <integer>
+  let f :: <function> = list;
+  let l :: <list> = f(1, 2, 3);
+  let m :: <list> = apply(list, 4, #[5]);
+  let g = list;
+  let n :: <list> = g(7);
+  size(l) * 100 + size(m) * 10 + head(n) + head(tail(m))   // 300 + 20 + 7 + 5
+end;
