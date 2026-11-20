@@ -1,0 +1,20 @@
+// expect: run 15
+// expect: diagnostics 0
+
+// As in Dylan, a call through an untyped `<function>` answers `<object>`s:
+// where nothing narrower is expected (an untyped `let`, an unannotated
+// result, an `<object>` argument) it keeps one.
+
+define function call(g :: <function>, x) g(x) end;
+
+define function call-twice(g :: <function>, x)
+  let once = g(x);
+  g(once)
+end;
+
+define function main() => <integer>
+  let a = call(method (y) y end, 5);
+  let b = call-twice(method (y :: <integer>) y + 1 end, 3);
+  let c = call(method (y) if (y == #f) y else "yes" end end, #f);
+  as(<integer>, a) + as(<integer>, b) + if (c == #f) 5 else 0 end
+end;

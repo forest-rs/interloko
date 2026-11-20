@@ -5741,16 +5741,20 @@ fn no_values(span: Span) -> Expr {
 }
 
 /// The results to lower `expr` to where its values are discarded, as in a
-/// statement: none for a conditional or a handle, which then discards each
-/// arm's values, so the arms need not agree, and lowers each arm the same
-/// way; no expectation for anything else, whose values are dropped as they
-/// are. Only these forms take the empty expectation, since elsewhere it
-/// means the expression must produce no values, which would, say, type a
-/// block's exit or an untyped call as taking none.
+/// statement: none for a conditional or a handle, which then discards
+/// each arm's values, so the arms need not agree, and lowers each arm the
+/// same way; none for a call, so a call through an untyped `<function>`
+/// takes none of whatever its callee returns, none included; no
+/// expectation for anything else, whose values are dropped as they are.
+/// Only these forms take the empty expectation, since elsewhere it means
+/// the expression must produce no values, which would, say, type a
+/// block's exit as taking none.
 fn effect_expectation(expr: &ast::Expr) -> Option<&'static [ValueKind]> {
     matches!(
         expr,
         ast::Expr::If { .. }
+            | ast::Expr::Call { .. }
+            | ast::Expr::ValueCall { .. }
             | ast::Expr::Case { .. }
             | ast::Expr::Select { .. }
             | ast::Expr::Handle { .. }
@@ -11516,29 +11520,25 @@ impl Lowering {
                     Expr::Error { span }
                 })
             }
-            None => match expected_results {
-                Some(result_kinds) => self
-                    .checked_callable_call(
-                        ctx,
-                        target,
-                        vec![arguments],
-                        CallArguments::Spread,
-                        CallableSignature::flat(vec![arguments_kind], result_kinds.to_vec()),
-                        Self::untyped_result_check,
-                        span,
-                    )
-                    .unwrap_or_else(|diagnostic| {
-                        ctx.diagnostics.push(diagnostic);
-                        Expr::Error { span }
-                    }),
-                None => {
-                    ctx.diagnostics.push(Diagnostic::error(
-                        target.span(),
-                        DiagnosticCode::UntypedCallableResult,
-                    ));
+            // As for any untyped call, one `<object>` where nothing
+            // narrower is expected.
+            None => self
+                .checked_callable_call(
+                    ctx,
+                    target,
+                    vec![arguments],
+                    CallArguments::Spread,
+                    CallableSignature::flat(
+                        vec![arguments_kind],
+                        expected_results.unwrap_or(&[ValueKind::Any]).to_vec(),
+                    ),
+                    Self::untyped_result_check,
+                    span,
+                )
+                .unwrap_or_else(|diagnostic| {
+                    ctx.diagnostics.push(diagnostic);
                     Expr::Error { span }
-                }
-            },
+                }),
         };
         ctx.hide_locals_from(scope);
         if statements.is_empty() {
@@ -14630,13 +14630,9 @@ impl Lowering {
                     Expr::Error { span }
                 });
         }
-        let Some(result_kinds) = expected_results else {
-            ctx.diagnostics.push(Diagnostic::error(
-                target.span(),
-                DiagnosticCode::UntypedCallableResult,
-            ));
-            return Expr::Error { span };
-        };
+        // As in Dylan, the call's values are `<object>`s: where nothing
+        // narrower is expected, it keeps one.
+        let result_kinds = expected_results.unwrap_or(&[ValueKind::Any]);
         // An untyped callable's register kinds come from the call site, and
         // nothing about the callee backs them. Lowering calls the value's
         // typed entry when its signature has exactly this call's shape, and
@@ -15055,7 +15051,13 @@ impl Lowering {
         let (result_kinds, result_callable_sigs) = ctx
             .matching_restart(condition_class, self)
             .map(|restart| (restart.result_kinds, restart.result_callable_sigs))
-            .or_else(|| expected_results.map(|kinds| (kinds.to_vec(), vec![None; kinds.len()])))
+            // A signal statement resumes with the values a restart supplies,
+            // whatever they are, as it always has.
+            .or_else(|| {
+                expected_results
+                    .filter(|kinds| !kinds.is_empty())
+                    .map(|kinds| (kinds.to_vec(), vec![None; kinds.len()]))
+            })
             .unwrap_or_else(|| {
                 let kinds = provisional_open_result_kinds();
                 let sigs = vec![None; kinds.len()];
@@ -21075,14 +21077,12 @@ mod tests {
             DiagnosticCode::ApplyTargetTypeMismatch,
             &[("actual", "<integer>")]
         ));
-        let untyped = lower_source(
-            "define function run(f :: <callable>)\n  let r = apply(f, #[4]);\n  r\nend;",
-        );
-        assert!(has_diagnostic(
-            &untyped,
-            DiagnosticCode::UntypedCallableResult,
-            &[]
-        ));
+        // With nothing narrower expected, an untyped call keeps one
+        // `<object>`.
+        let untyped =
+            lower_source("define function run(f :: <callable>)\n  let r = apply(f, #[4]);\n  r\nend;");
+        assert_eq!(untyped.diagnostics, Vec::new());
+        assert_eq!(untyped.functions[0].result_kinds, [ValueKind::Any]);
     }
 
     #[test]
