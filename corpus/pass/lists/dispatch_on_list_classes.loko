@@ -1,0 +1,13 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// Methods specialize on `<pair>` and `<empty-list>`, and a `<list>` is
+// always one of the two.
+
+define generic len (l);
+define method len (l :: <empty-list>) 0 end;
+define method len (l :: <pair>) 1 + len(l.tail) end;
+
+define function main() => <integer>
+  len(#(1, 2, 3))
+end;

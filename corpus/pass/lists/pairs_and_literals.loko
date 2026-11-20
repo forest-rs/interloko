@@ -1,0 +1,33 @@
+// expect: run 127
+// expect: diagnostics 0
+
+// Dylan's lists: `pair(head, tail)` makes a `<pair>`, `#()` is the one
+// empty list, `list(a, …)` and the literal `#(a, …)` make a list of pairs
+// ending in it, and `head` and `tail` take one apart. A `<pair>` and the
+// `<empty-list>` are the two kinds of `<list>`, which is a `<sequence>`.
+
+define function classes(x) => <integer>
+  (if (instance?(x, <empty-list>)) 1 else 0 end)
+    + (if (instance?(x, <list>)) 2 else 0 end)
+    + (if (instance?(x, <sequence>)) 4 else 0 end)
+end;
+
+define function main() => <integer>
+  let numbers :: <list> = list(1, 2, 3);
+  let p :: <pair> = pair(0, numbers);
+  let literal = #(1, #"a", "s");
+  let checks = 0;
+  if (head(p) = 0 & head(tail(p)) = 1) checks := checks + 1 end;
+  if (tail(tail(tail(numbers))) == #()) checks := checks + 2 end;
+  if (head(tail(literal)) == #"a") checks := checks + 4 end;
+  if (#() == #() & classes(#()) = 7) checks := checks + 8 end;
+  if (classes(numbers) = 6 & classes(#[1]) = 4) checks := checks + 16 end;
+  // A pair's tail may be any object.
+  if (tail(pair(1, 2)) = 2) checks := checks + 32 end;
+  // The arguments are evaluated in order.
+  let order = 0;
+  let next = method () order := order * 10 + 1; order end;
+  let made = list(next(), next());
+  if (head(made) = 1 & head(tail(made)) = 11) checks := checks + 64 end;
+  checks
+end;

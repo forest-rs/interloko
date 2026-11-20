@@ -120,6 +120,8 @@ pub enum TokenKind {
     Keyword = 41,
     /// Vector literal opener `#[`.
     VectorStart = 44,
+    /// List literal opener `#(`.
+    ListStart = 72,
     /// Nominal type/class name such as `<circle>`.
     TypeName = 11,
     /// `(`.
@@ -265,6 +267,7 @@ impl TokenKind {
             | Self::Symbol
             | Self::Keyword
             | Self::VectorStart
+            | Self::ListStart
             | Self::TypeName
             | Self::LParen
             | Self::RParen
@@ -440,6 +443,8 @@ pub enum CstKind {
     KeywordExpr = 26,
     /// Vector literal expression.
     VectorExpr = 27,
+    /// List literal expression, `#(1, 2)`.
+    ListExpr = 72,
     /// `if (test) body … end` conditional expression.
     IfExpr = 20,
     /// `elseif (test) body` clause of an `if` expression.
@@ -943,6 +948,10 @@ pub fn lex(source: &str) -> Vec<Token> {
             b'#' if bytes.get(pos + 1) == Some(&b'[') => {
                 pos += 2;
                 TokenKind::VectorStart
+            }
+            b'#' if bytes.get(pos + 1) == Some(&b'(') => {
+                pos += 2;
+                TokenKind::ListStart
             }
             b'#' if matches!(bytes.get(pos + 1), Some(b't' | b'f'))
                 && bytes

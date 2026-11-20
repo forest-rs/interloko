@@ -1,13 +1,13 @@
 // expect: runtime code dispatch.no-applicable-method
-// expect: run reports no method of size applies to (<pair>)
+// expect: run reports no method of size applies to (<couple>)
 // expect: diagnostics 0
 
 // The kernel's `<sequence>` iteration sends the kernel's `size`, whatever
 // the program calls `size`: a program's own `size` function shadows the
-// generic for calls of the name, so `<pair>` has no `size` method for
+// generic for calls of the name, so `<couple>` has no `size` method for
 // iteration to find.
 
-define class <pair> (<sequence>)
+define class <couple> (<sequence>)
   slot left :: <integer>, init-value: 3;
   slot right :: <integer>, init-value: 4;
 end;
@@ -16,12 +16,12 @@ define function size (p :: <object>) => <integer>
   99
 end;
 
-define method element (p :: <pair>, k :: <integer>, #key default) => <object>
+define method element (p :: <couple>, k :: <integer>, #key default) => <object>
   if (k = 0) p.left else p.right end
 end;
 
 define function main() => <integer>
   let total = 0;
-  for (x :: <integer> in make(<pair>)) total := total + x end;
+  for (x :: <integer> in make(<couple>)) total := total + x end;
   total + size(total)
 end;

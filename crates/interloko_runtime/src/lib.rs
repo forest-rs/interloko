@@ -19,6 +19,7 @@ pub mod control;
 pub mod driver;
 mod evacuate;
 mod integer;
+mod list;
 mod no_applicable_method;
 mod region;
 mod send;
@@ -263,6 +264,24 @@ pub const TABLE_KEY_EXISTS: &str = "interloko.collection.table_key_exists";
 /// Host-call symbol for removing a key's entry from a `<table>`, returning
 /// whether it had one. It takes [`table_key_signature`].
 pub const TABLE_REMOVE_KEY: &str = "interloko.collection.table_remove_key";
+/// Host-call symbol for `pair(head, tail)`, `(<object>, <object>) ->
+/// <pair>`. It takes [`pair_signature`].
+pub const LIST_PAIR: &str = "interloko.list.pair";
+/// Host-call symbol for `head(list)`, `(<list>) -> <object>`: a pair's
+/// head, or the empty list for the empty list. It takes
+/// [`list_part_signature`].
+pub const LIST_HEAD: &str = "interloko.list.head";
+/// Host-call symbol for `tail(list)`, as [`LIST_HEAD`] reads the head.
+pub const LIST_TAIL: &str = "interloko.list.tail";
+/// Host-call symbol for `head-setter(value, pair)`, `(<object>, <pair>) ->
+/// <object>`. It takes [`pair_part_setter_signature`].
+pub const LIST_HEAD_SETTER: &str = "interloko.list.head_setter";
+/// Host-call symbol for `tail-setter(value, pair)`, as
+/// [`LIST_HEAD_SETTER`] stores the head.
+pub const LIST_TAIL_SETTER: &str = "interloko.list.tail_setter";
+/// Host-call symbol for `#()`, the empty list, `() -> <empty-list>`. It
+/// takes [`empty_list_signature`].
+pub const EMPTY_LIST: &str = "interloko.list.empty";
 /// Host-call symbol for whether a vector is constant, as a literal is. It
 /// takes [`vector_constant_signature`].
 pub const VECTOR_CONSTANT: &str = "interloko.collection.vector_constant";
@@ -1816,8 +1835,8 @@ enum RuntimeObjectStorage {
     SubclassType {
         bound: ClassId,
     },
-    /// A kernel marker: the one object of its kind, a direct `<object>`
-    /// instance, which no other value is `==`.
+    /// A kernel marker: the one object of its kind, which no other value is
+    /// `==`: a direct `<object>` instance, or `#()`, the `<empty-list>`.
     Marker(Marker),
     HostBacked {
         adapter: alloc::boxed::Box<dyn HostObjectAdapter>,
@@ -1870,16 +1889,28 @@ enum Marker {
     /// What a call through a callable value passes for a keyword it does
     /// not pass ([`KEYWORD_ABSENT`]).
     KeywordAbsent,
+    /// `#()`, the empty list, the one instance of `<empty-list>`.
+    EmptyList,
 }
 
 impl Marker {
-    const COUNT: usize = 2;
+    const COUNT: usize = 3;
 
     /// How a value report writes the marker.
     const fn name(self) -> &'static str {
         match self {
             Self::Unsupplied => "$unsupplied",
             Self::KeywordAbsent => "{keyword absent}",
+            Self::EmptyList => "#()",
+        }
+    }
+
+    /// The marker's class: `<empty-list>` for the empty list, and
+    /// `<object>` for the others, which are direct instances of it.
+    const fn class(self) -> Option<BuiltinValueClass> {
+        match self {
+            Self::EmptyList => Some(BuiltinValueClass::EmptyList),
+            Self::Unsupplied | Self::KeywordAbsent => None,
         }
     }
 }
@@ -2547,6 +2578,44 @@ impl Host for InterlokoHost {
                         text: StringText::new(String::from(*value)).ok_or(HostError::Failed)?,
                     },
                 });
+                Ok(0)
+            }
+            LIST_PAIR => {
+                let [head, tail] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.make_pair(head.to_value(), tail.to_value())?;
+                Ok(0)
+            }
+            LIST_HEAD | LIST_TAIL => {
+                let [ValueRef::Obj(list)] = args else {
+                    return Err(HostError::Failed);
+                };
+                let part = if symbol == LIST_HEAD {
+                    list::PairPart::Head
+                } else {
+                    list::PairPart::Tail
+                };
+                rets[0] = self.list_part(*list, part)?;
+                Ok(0)
+            }
+            LIST_HEAD_SETTER | LIST_TAIL_SETTER => {
+                let [value, ValueRef::Obj(pair)] = args else {
+                    return Err(HostError::Failed);
+                };
+                let part = if symbol == LIST_HEAD_SETTER {
+                    list::PairPart::Head
+                } else {
+                    list::PairPart::Tail
+                };
+                rets[0] = self.set_pair_part(value.to_value(), *pair, part)?;
+                Ok(0)
+            }
+            EMPTY_LIST => {
+                let [] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = Value::Obj(self.empty_list());
                 Ok(0)
             }
             IS_KEYWORD_ABSENT => {
@@ -3356,10 +3425,14 @@ impl InterlokoHost {
         if let Some(object) = self.markers[marker as usize] {
             return object;
         }
+        let class = marker
+            .class()
+            .and_then(|kind| self.layout.class_id(kind.name()))
+            .unwrap_or(OBJECT_CLASS_ID);
         let Value::Obj(object) = self.push_object_in(
             Space::Image,
             RuntimeObject {
-                class: OBJECT_CLASS_ID,
+                class,
                 storage: RuntimeObjectStorage::Marker(marker),
             },
         ) else {
@@ -4175,6 +4248,44 @@ pub fn table_element_setter_signature() -> HostSig {
     HostSig {
         args: vec![any_type(), object_type(), any_type()],
         rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`LIST_PAIR`]: `(head, tail) -> <pair>`.
+#[must_use]
+pub fn pair_signature() -> HostSig {
+    HostSig {
+        args: vec![any_type(), any_type()],
+        rets: vec![object_type()],
+    }
+}
+
+/// Host signature for [`LIST_HEAD`] and [`LIST_TAIL`]: `(list) ->
+/// <object>`.
+#[must_use]
+pub fn list_part_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type()],
+        rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`LIST_HEAD_SETTER`] and [`LIST_TAIL_SETTER`]:
+/// `(value, pair) -> value`.
+#[must_use]
+pub fn pair_part_setter_signature() -> HostSig {
+    HostSig {
+        args: vec![any_type(), object_type()],
+        rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`EMPTY_LIST`]: `() -> <empty-list>`.
+#[must_use]
+pub fn empty_list_signature() -> HostSig {
+    HostSig {
+        args: vec![],
+        rets: vec![object_type()],
     }
 }
 

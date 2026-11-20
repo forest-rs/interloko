@@ -1,0 +1,8 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// As in Dylan, the head and the tail of the empty list are the empty list.
+
+define function main() => <integer>
+  (if (head(#()) == #()) 1 else 0 end) + (if (tail(#()) == #()) 2 else 0 end)
+end;

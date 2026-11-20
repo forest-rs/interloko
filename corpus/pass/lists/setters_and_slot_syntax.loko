@@ -1,0 +1,13 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// `head-setter` and `tail-setter` store into a pair. As in Dylan, `x.f` is
+// `f(x)` and `x.f := v` is `f-setter(v, x)` for a name no class has a slot
+// of, so `p.head` reads a pair's head.
+
+define function main() => <integer>
+  let p :: <pair> = pair(1, #());
+  p.head := 2;
+  tail-setter(#(1), p);
+  p.head + p.tail.head
+end;

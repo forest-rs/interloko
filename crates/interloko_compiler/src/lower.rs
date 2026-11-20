@@ -595,6 +595,18 @@ pub enum RuntimeOp {
     TablePositionKey,
     /// Returns whether a vector is constant.
     VectorConstant,
+    /// Makes a `<pair>` of two boxed values.
+    ListPair,
+    /// Returns a list's head, or the empty list for the empty list.
+    ListHead,
+    /// Returns a list's tail, or the empty list for the empty list.
+    ListTail,
+    /// Stores a pair's head.
+    ListHeadSetter,
+    /// Stores a pair's tail.
+    ListTailSetter,
+    /// Returns `#()`, the empty list.
+    EmptyList,
     /// Returns `$unsupplied`.
     Unsupplied,
     /// Returns the marker a call through a callable value passes for a
@@ -12753,6 +12765,12 @@ fn runtime_op_for_intrinsic(intrinsic: sem::Intrinsic) -> Option<RuntimeOp> {
         sem::Intrinsic::TablePositionValue => RuntimeOp::TablePositionValue,
         sem::Intrinsic::TablePositionKey => RuntimeOp::TablePositionKey,
         sem::Intrinsic::VectorConstant => RuntimeOp::VectorConstant,
+        sem::Intrinsic::ListPair => RuntimeOp::ListPair,
+        sem::Intrinsic::ListHead => RuntimeOp::ListHead,
+        sem::Intrinsic::ListTail => RuntimeOp::ListTail,
+        sem::Intrinsic::ListHeadSetter => RuntimeOp::ListHeadSetter,
+        sem::Intrinsic::ListTailSetter => RuntimeOp::ListTailSetter,
+        sem::Intrinsic::EmptyList => RuntimeOp::EmptyList,
         sem::Intrinsic::Unsupplied => RuntimeOp::Unsupplied,
         sem::Intrinsic::KeywordAbsent => RuntimeOp::KeywordAbsent,
         sem::Intrinsic::FloatToString => RuntimeOp::FloatToString,
@@ -12809,6 +12827,11 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         RuntimeOp::TableElementOr => index != 0,
         RuntimeOp::TableElementSetter => index != 1,
         RuntimeOp::Unsupplied | RuntimeOp::InternSymbol => false,
+        // A pair's parts and a stored value are boxed `<object>`s; a list
+        // travels as the object it is.
+        RuntimeOp::ListPair => true,
+        RuntimeOp::ListHead | RuntimeOp::ListTail | RuntimeOp::EmptyList => false,
+        RuntimeOp::ListHeadSetter | RuntimeOp::ListTailSetter => index == 0,
         RuntimeOp::IsKeywordAbsent => true,
         RuntimeOp::KeywordAbsent => false,
         RuntimeOp::InstanceOfType => true,
@@ -13764,6 +13787,12 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::TablePositionValue => "table-position-value",
         RuntimeOp::TablePositionKey => "table-position-key",
         RuntimeOp::VectorConstant => "vector-constant?",
+        RuntimeOp::ListPair => "pair",
+        RuntimeOp::ListHead => "head",
+        RuntimeOp::ListTail => "tail",
+        RuntimeOp::ListHeadSetter => "head-setter",
+        RuntimeOp::ListTailSetter => "tail-setter",
+        RuntimeOp::EmptyList => "empty-list",
         RuntimeOp::Unsupplied => "unsupplied",
         RuntimeOp::IsKeywordAbsent => "keyword-absent?",
         RuntimeOp::KeywordAbsent => "keyword-absent",

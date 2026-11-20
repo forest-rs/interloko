@@ -3637,6 +3637,7 @@ fn style_for_token(kind: TokenKind) -> AnsiStyle {
         | TokenKind::LBracket
         | TokenKind::RBracket
         | TokenKind::VectorStart
+        | TokenKind::ListStart
         | TokenKind::Comma
         | TokenKind::PlusPercent
         | TokenKind::MinusPercent

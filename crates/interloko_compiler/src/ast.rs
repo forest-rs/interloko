@@ -2298,6 +2298,7 @@ impl<'tree> Lowering<'tree> {
             CstKind::SymbolExpr => self.lower_symbol(node),
             CstKind::KeywordExpr => self.lower_keyword_value(node),
             CstKind::VectorExpr => self.lower_vector(node),
+            CstKind::ListExpr => self.lower_list(node),
             CstKind::MethodExpr => self.lower_method_expr(node),
             CstKind::NameExpr => self.lower_name(node),
             CstKind::TypeExpr => self.lower_class_name(node),
@@ -2732,6 +2733,26 @@ impl<'tree> Lowering<'tree> {
         Expr::Vector {
             id: self.ast_id(node),
             elements,
+            span: node.span,
+        }
+    }
+
+    /// `#(a, b)`, a call of the kernel's `list` ([`KERNEL_LIST`]), which
+    /// no binding or definition of the program can shadow.
+    fn lower_list(&mut self, node: &CstNode) -> Expr {
+        let args = node
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                CstElement::Node(expr) => Some(self.lower_expr(expr)),
+                CstElement::Token(_) => None,
+            })
+            .collect();
+        Expr::Call {
+            id: self.ast_id(node),
+            callee: String::from(KERNEL_LIST),
+            args,
+            keywords: Vec::new(),
             span: node.span,
         }
     }
@@ -4090,6 +4111,10 @@ fn let_pattern_definition(pattern: &LetPattern) -> DefinitionId {
 pub const KERNEL_ELEMENT: &str = "%element";
 
 /// The kernel-only name `collection[key] := value` calls, the kernel's
+/// The kernel-only name of `list`, which a list literal `#(a, b)` calls: a
+/// `%` cannot appear in a source name, so no program can shadow it.
+pub const KERNEL_LIST: &str = "%list";
+
 /// `element-setter` generic; see [`KERNEL_ELEMENT`].
 pub const KERNEL_ELEMENT_SETTER: &str = "%element-setter";
 
