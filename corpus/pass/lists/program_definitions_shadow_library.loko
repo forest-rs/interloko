@@ -1,0 +1,14 @@
+// expect: run 730
+// expect: diagnostics 0
+
+// A program's own definition of a kernel library function's name takes
+// the name, as it takes any built-in's; the library's own code goes on
+// using its own.
+
+define function reverse (x) => <integer> 7 end;
+
+define function main() => <integer>
+  let tens = map(method (x) x * 10 end, #(1, 2, 3));   // reverses inside
+  // 7 from the program's `reverse`, and the list in its order.
+  reverse(tens) * 100 + first(tens) + second(tens)
+end;

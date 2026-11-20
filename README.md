@@ -573,7 +573,10 @@ The current slices include:
   from another string signals `type-error.range` with `use-value` rather
   than splitting a character. `=` compares contents and `<` orders by
   character; `as-uppercase` and `as-lowercase` map a whole string fully
-  (`"ß"` to `"SS"`); `concatenate` takes characters too, and `as(<string>,
+  (`"ß"` to `"SS"`); `concatenate` takes characters too (and, as
+  Dylan's does, any number of sequences of any kind: `concatenate(#(1),
+  #[2], #(3))` is a list, of the first one's kind; strings typing knows
+  join inline), and `as(<string>,
   c)` makes one. `string-to-integer(s)`, common Dylan's, reads the
   optional sign and decimal digits `s` starts with, up to the first
   character that is not a digit, and signals a `<simple-error>` when it
@@ -666,10 +669,21 @@ The current slices include:
   typed `c[k]` runs the kernel's plain operation inline, without testing
   for a default;
 - the kernel library: the parts of the kernel written in Loko
-  (`crates/interloko_compiler/src/sem/library.loko`), today the list
-  methods of the collection generics. A definition of it joins a program
-  only when the program needs it, a method of a collection generic when
-  the program uses the generic, and is the kernel's code: it sees none of
+  (`crates/interloko_compiler/src/sem/library.loko`): the list methods
+  of the collection generics, and Dylan's collection functions over any
+  collection, through the iteration protocol: `map(f, c)`, `reduce(f,
+  initial, c)`, `reverse(c)`, `reverse!(c)` (which reuses a list's pairs
+  and copies anything else), `empty?(c)`, `member?(value, c)` (by `==`,
+  Dylan's default test) and `first`, `second` and `third` (by position in
+  a string). One that makes a collection makes one of its argument's
+  kind, as Dylan's `type-for-copy` has it: a list from a list, a string
+  from a string, a stretchy vector from a stretchy vector and a vector
+  from anything else, a table included for now. They are functions, not
+  generics a program's method can join, and take no keywords yet (no
+  `test:` or `default:`); each is a value as a built-in is. A definition
+  of the library joins a program only when the program needs it, a
+  function when a call or a value names it, a method of a collection
+  generic when the program uses the generic, and is the kernel's code: it sees none of
   the program's definitions, so a program's own `size` or `tail` cannot
   change what it does, strict typing does not hold it, and its trees carry
   no source positions. The library is parsed once per compile that needs

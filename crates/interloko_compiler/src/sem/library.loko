@@ -82,3 +82,124 @@ define method forward-iteration-protocol (c :: <list>)
            head-setter(v, s)
          end)
 end;
+
+// --- Sequence functions --------------------------------------------------
+//
+// Dylan's collection functions over any collection, through the iteration
+// protocol. One that makes a collection makes one of its argument's kind,
+// as Dylan's `type-for-copy` has it: a list from a list, a string from a
+// string, a stretchy vector from a stretchy vector, and a vector from any
+// other.
+
+// Whether `c` has no elements.
+define function empty? (c) => <boolean>
+  if (instance?(c, <list>)) c == #() else size(c) = 0 end
+end;
+
+// Whether `c` has an element `==` to `value`, as Dylan's default test has
+// it.
+define function member? (value, c) => <boolean>
+  block (return)
+    for (x in c)
+      if (x == value) return(#t) end
+    end;
+    #f
+  end
+end;
+
+// `f` applied to `initial` and the first element, then to that result and
+// the next, and so on: `initial` for no elements.
+define function reduce (f :: <function>, initial, c) => <object>
+  let result :: <object> = initial;
+  for (x in c) result := f(result, x) end;
+  result
+end;
+
+// The element `n` from the start: a string's keys are positions.
+define function nth (c, n :: <integer>) => <object>
+  if (instance?(c, <string>))
+    let text = as(<string>, c);
+    text[position-at(text, n)]
+  else
+    c[n]
+  end
+end;
+
+define function first (c) => <object> nth(c, 0) end;
+define function second (c) => <object> nth(c, 1) end;
+define function third (c) => <object> nth(c, 2) end;
+
+// A new collection of `c`'s kind holding `elements`, in order.
+define function copy-like (c, elements :: <list>) => <object>
+  if (instance?(c, <list>))
+    elements
+  elseif (instance?(c, <string>))
+    let text = make(<string-builder>);
+    for (x in elements) add!(text, as(<character>, x)) end;
+    as(<string>, text)
+  elseif (instance?(c, <stretchy-vector>))
+    let v = make(<stretchy-vector>);
+    for (x in elements) add!(v, x) end;
+    v
+  else
+    let v = make(<vector>, size: size(elements));
+    for (x in elements, i from 0) v[i] := x end;
+    v
+  end
+end;
+
+// The elements of `c` in reverse order, as a new list.
+define function reversed-elements (c) => <list>
+  let result :: <list> = #();
+  for (x in c) result := pair(x, result) end;
+  result
+end;
+
+// `l` reversed in place: each pair's tail turned to point at the one
+// before it.
+define function reverse-list! (l :: <list>) => <list>
+  let result :: <list> = #();
+  let rest :: <object> = l;
+  while (instance?(rest, <pair>))
+    let following = tail(rest);
+    tail-setter(result, rest);
+    result := rest;
+    rest := following
+  end;
+  result
+end;
+
+// A new collection of `c`'s kind with its elements in reverse order.
+define function reverse (c) => <object>
+  copy-like(c, reversed-elements(c))
+end;
+
+// `c` with its elements in reverse order, reusing a list's pairs; any
+// other collection is copied, as `reverse` does.
+define function reverse! (c) => <object>
+  if (instance?(c, <list>)) reverse-list!(c) else reverse(c) end
+end;
+
+// A new collection of `c`'s kind holding `f` of each of its elements.
+define function map (f :: <function>, c) => <object>
+  let results :: <list> = #();
+  for (x in c)
+    let result :: <object> = f(x);
+    results := pair(result, results)
+  end;
+  copy-like(c, reverse-list!(results))
+end;
+
+// `concatenate(a, b)`: a new collection of `a`'s kind holding the
+// elements of `a`, then those of `b`. A character stands for the string
+// of it, as the kernel's string `concatenate` takes one.
+define function concatenate-two (a, b) => <object>
+  let first-part :: <object> = if (instance?(a, <character>)) as(<string>, a) else a end;
+  let elements :: <list> = reversed-elements(first-part);
+  if (instance?(b, <character>))
+    elements := pair(b, elements)
+  else
+    for (x in b) elements := pair(x, elements) end
+  end;
+  copy-like(first-part, reverse-list!(elements))
+end;

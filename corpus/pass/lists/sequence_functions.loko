@@ -1,0 +1,38 @@
+// expect: run 2047
+// expect: diagnostics 0
+
+// Dylan's collection functions work on any collection: `map`, `reduce`,
+// `reverse` and `reverse!`, `empty?`, `member?` (by `==`) and `first`,
+// `second` and `third`. One that makes a collection makes one of its
+// argument's kind: a list from a list, a string from a string, a stretchy
+// vector from a stretchy vector, a vector from a vector. They are values
+// too.
+
+define function same?(a, b) => <boolean> a = b end;
+
+define function main() => <integer>
+  let checks = 0;
+  let tens = map(method (x) x * 10 end, #(1, 2, 3));
+  let sum = reduce(method (a, b) a + b end, 0, tens);
+  if (instance?(tens, <list>) & same?(sum, 60)) checks := checks + 1 end;
+  let doubled = map(method (x) x * 2 end, #[1, 2, 3]);
+  if (instance?(doubled, <vector>) & same?(second(doubled), 4)) checks := checks + 2 end;
+  if (same?(map(as-uppercase, "abc"), "ABC")) checks := checks + 4 end;
+  if (same?(reverse("abc"), "cba") & same?(first(reverse(#[1, 2])), 2)) checks := checks + 8 end;
+  // `reverse!` reuses a list's pairs; `reverse` makes new ones.
+  let l = list(1, 2, 3);
+  let backwards = reverse!(l);
+  if (same?(first(backwards), 3) & same?(third(backwards), 1) & same?(size(l), 1)) checks := checks + 16 end;
+  let s = make(<stretchy-vector>);
+  add!(s, 1);
+  add!(s, 2);
+  if (instance?(reverse(s), <stretchy-vector>) & same?(first(reverse(s)), 2)) checks := checks + 32 end;
+  if (empty?(#()) & empty?("") & empty?(make(<table>)) & ~empty?(#[0])) checks := checks + 64 end;
+  if (member?(2, #(1, 2)) & ~member?(3, #[1, 2]) & member?('(', "()'")) checks := checks + 128 end;
+  if (same?(first("xyz"), 'x') & same?(third("xyz"), 'z')) checks := checks + 256 end;
+  let null? = empty?;
+  if (null?(#()) & ~null?(#(1))) checks := checks + 512 end;
+  // `reduce` of nothing is its initial value.
+  if (same?(reduce(method (a, b) a end, #"none", #()), #"none")) checks := checks + 1024 end;
+  checks
+end;

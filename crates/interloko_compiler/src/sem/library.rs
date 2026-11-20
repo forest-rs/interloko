@@ -29,7 +29,9 @@ use crate::syntax::Span;
 pub const SOURCE: &str = include_str!("library.loko");
 
 /// The library functions a program can call or name, by name.
-pub const EXPORTS: &[&str] = &[];
+pub const EXPORTS: &[&str] = &[
+    "empty?", "member?", "reduce", "first", "second", "third", "reverse", "reverse!", "map",
+];
 
 /// The logical path the library's source identity derives from.
 const SOURCE_PATH: &str = "interloko:kernel-library.loko";
