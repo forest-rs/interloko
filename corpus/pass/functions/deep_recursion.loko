@@ -1,0 +1,14 @@
+// expect: run 1250025000
+// expect: diagnostics 0
+
+// A call may recurse tens of thousands of calls deep: each level here is
+// one VM frame, and a run allows a hundred thousand
+// (`RunLimits::DEFAULT_MAX_CALL_DEPTH`).
+
+define function sum-to(n :: <integer>) => <integer>
+  if (n = 0) 0 else n + sum-to(n - 1) end
+end;
+
+define function main() => <integer>
+  sum-to(50000)
+end;

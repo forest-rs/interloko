@@ -6,7 +6,7 @@ use interloko_compiler::lower::CodegenPolicy;
 use interloko_compiler::sem::{HostFunction, HostMetaRegistry, HostValueKind};
 use interloko_compiler::session::{
     DumpStage, ExecutionTraceDetail, FunctionCallError, FunctionValue, HostFunctionFailure,
-    HostFunctionHandler, SessionMutation,
+    HostFunctionHandler, RunLimits, SessionMutation,
 };
 use interloko_compiler::typing::{CheckOrigin, TypingConfig};
 use interloko_session::{Session, SessionError};
@@ -431,4 +431,34 @@ end;
         Some(vec![format!("n: {digit}")])
     );
     assert_eq!(session.claims("generic:g99", ClaimDetail::Summary), None);
+}
+
+#[test]
+fn run_limits_are_a_runtime_setting_that_edits_keep() {
+    let source = "define function down(n :: <integer>) => <integer>\n  if (n = 0) 0 else 1 + down(n - 1) end\nend;\ndefine function deep() down(2000) end;";
+    let mut session = Session::new("deep.loko", source).unwrap();
+    assert_eq!(session.run_limits(), RunLimits::DEFAULT);
+    assert_eq!(
+        session.call("deep", &[], None).unwrap().value,
+        FunctionValue::Integer(2000)
+    );
+
+    let shallow = RunLimits {
+        max_call_depth: 1_000,
+        ..RunLimits::DEFAULT
+    };
+    session.set_run_limits(shallow);
+    assert_eq!(session.revision(), 0, "limits are not a source edit");
+    let trapped = |session: &Session| {
+        matches!(
+            session.call("deep", &[], None),
+            Err(FunctionCallError::Trap { .. })
+        )
+    };
+    assert!(trapped(&session));
+
+    let replaced = format!("{source}\ndefine function other() 1 end;");
+    session.replace_source(0, &replaced).unwrap();
+    assert_eq!(session.run_limits(), shallow);
+    assert!(trapped(&session));
 }

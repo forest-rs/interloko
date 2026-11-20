@@ -23,7 +23,8 @@ use interloko_compiler::sem::HostMetaRegistry;
 use interloko_compiler::session::{
     AnnotationOutcome, CompilerSession, DumpStage, EnvironmentObject, ExecutionTraceDetail,
     FunctionCallError, FunctionCallOutcome, FunctionValue, HostFunctionHandler, MutationError,
-    MutationOutcome, RewindError, RewindOutcome, RuntimeMode, SessionArtifacts, SessionMutation,
+    MutationOutcome, RewindError, RewindOutcome, RunLimits, RuntimeMode, SessionArtifacts,
+    SessionMutation,
 };
 use interloko_compiler::typing::TypingConfig;
 
@@ -260,16 +261,17 @@ impl Session {
     /// log. Callers wanting to retain mutations should use the compiler's explicit
     /// replay facilities before choosing which source to publish. The candidate is
     /// compiled under the session's current codegen policy and typing
-    /// configuration.
+    /// configuration, and runs under its limits.
     pub fn replace_source(&mut self, expected: u64, source: &str) -> Result<u64, SessionError> {
         let next = self.next_revision(expected)?;
-        let candidate = compile(
+        let mut candidate = compile(
             &self.artifacts.source.name,
             source,
             &self.host_registry,
             self.codegen_policy(),
             self.typing_config(),
         )?;
+        candidate.set_run_limits(self.run_limits());
         self.artifacts = candidate;
         self.revision = next;
         Ok(next)
@@ -308,6 +310,20 @@ impl Session {
             .map_err(SessionError::Rewind)?;
         self.revision = next;
         Ok(outcome)
+    }
+
+    /// Limits each call of the accepted code runs under.
+    #[must_use]
+    pub const fn run_limits(&self) -> RunLimits {
+        self.artifacts.run_limits()
+    }
+
+    /// Runs later calls under `limits`: fuel, which host calls are charged
+    /// against too, and call depth. A runtime setting rather than a source
+    /// edit, it keeps the revision, and source replacement, mutations and
+    /// rewind keep it.
+    pub fn set_run_limits(&mut self, limits: RunLimits) {
+        self.artifacts.set_run_limits(limits);
     }
 
     /// Calls accepted code with owned scalar arguments and optional tracing.
