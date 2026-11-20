@@ -1,0 +1,58 @@
+// expect: run 21211207
+// expect: diagnostics 0
+// expect: dump lowered contains make <argument-count-error>
+
+// A call through a callable value that passes more or fewer arguments than
+// the value takes signals `<argument-count-error>`, which a handler can
+// catch, rather than ending the run. Its slots say how many required
+// arguments the value takes and how many the call passed. Each path a
+// call can take tests the count: an untyped call, an adapter where an
+// untyped value enters typed code, and a call passing keywords.
+
+define class <prim> (<object>)
+  constant slot code :: <function>, required-init-keyword: code:;
+end;
+
+define function call-with-one(p :: <prim>) => <integer>
+  let r :: <integer> = p.code(1);
+  r
+end;
+
+define function typed-call(f :: callable(<integer>) => <integer>) => <integer>
+  f(5)
+end;
+
+define function step(a :: <integer>, #key by :: <integer> = 1) => <integer>
+  a + by
+end;
+
+define function counts(e :: <argument-count-error>) => <integer>
+  e.argument-count-error-expected * 10 + e.argument-count-error-actual
+end;
+
+define function main() => <integer>
+  let untyped
+    = block ()
+        call-with-one(make(<prim>, code: method (a, b) a + b end))
+      exception (e :: <argument-count-error>)
+        counts(e)
+      end;
+  let adapted
+    = block ()
+        let t :: <callable> = typed-call;
+        let r :: <integer> = t(method (a, b) a + b end);
+        r
+      exception (e :: <argument-count-error>)
+        counts(e)
+      end;
+  let k :: <function> = step;
+  let keyword
+    = block ()
+        let r :: <integer> = k(1, 2, by: 3);
+        r
+      exception (e :: <argument-count-error>)
+        counts(e)
+      end;
+  let fine :: <integer> = k(4, by: 3);
+  untyped * 1000000 + adapted * 10000 + keyword * 100 + fine
+end;

@@ -2043,9 +2043,22 @@ impl<'a> FunctionEmitter<'a> {
                         self.asm.closure_new(boxed_reg, boxed_func, env_reg);
                         boxed_reg
                     }
-                    lower::BoxedEntry::Shared(entry) => *entry,
+                    lower::BoxedEntry::Shared { entry, .. } => *entry,
                 };
                 self.asm.const_u64(shape_reg, *shape);
+                if let lower::BoxedEntry::Shared { shape: shared, .. } = boxed {
+                    // The shared entry counts as the value it came from.
+                    let (mask, counts) = (
+                        self.alloc_temp(ValueType::U64),
+                        self.alloc_temp(ValueType::U64),
+                    );
+                    self.asm
+                        .const_u64(mask, lower::ENTRY_COUNTS_SHAPE)
+                        .u64_and(counts, *shared, mask)
+                        .const_u64(mask, !lower::ENTRY_COUNTS_SHAPE)
+                        .u64_and(shape_reg, shape_reg, mask)
+                        .u64_or(shape_reg, shape_reg, counts);
+                }
                 self.asm.tuple_new(*dst, &[typed_reg, boxed_reg, shape_reg]);
             }
             lower::Instr::OpenCallable {
@@ -2887,6 +2900,25 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 self.set_span(*span);
                 self.asm.u64_and(*dst, *lhs, *rhs);
+            }
+            lower::Instr::U64Field {
+                dst,
+                src,
+                shift,
+                mask,
+                span,
+            } => {
+                let (field, operand) = (
+                    self.alloc_temp(ValueType::U64),
+                    self.alloc_temp(ValueType::U64),
+                );
+                self.set_span(*span);
+                self.asm
+                    .const_u64(operand, u64::from(*shift))
+                    .u64_shr(field, *src, operand)
+                    .const_u64(operand, *mask)
+                    .u64_and(field, field, operand)
+                    .u64_to_i64(*dst, field);
             }
             lower::Instr::ConstStr { dst, value, span } => {
                 let value = self.builder.const_str(value);

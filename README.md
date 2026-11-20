@@ -705,7 +705,8 @@ The current slices include:
   `<type-error>`, `<no-applicable-method>`, `<select-error>`,
   `<not-found-error>`, `<immutable-collection-error>`,
   `<collection-modified-error>`, `<constant-cycle-error>`,
-  `<unknown-keyword-error>` and `<simple-error>` defined by
+  `<unknown-keyword-error>`, `<simple-error>` and `<argument-count-error>`
+  defined by
   the kernel. Dylan's `error(condition)` signals a condition as `signal`
   does, and `error(format-string, argument, …)` signals a `<simple-error>`
   (an `<object>` first argument is told apart at run time)
@@ -722,7 +723,12 @@ The current slices include:
   failed cast checks again); a send that finds no method signals a
   `<no-applicable-method>` naming the generic and the arguments
   (`dispatch.no-applicable-method`), whose `use-value` supplies the send's
-  results, checked against the generic's declared result types;
+  results, checked against the generic's declared result types; and a call
+  through a callable value passing more or fewer arguments than the value
+  takes signals `<argument-count-error>`, holding both counts
+  (`argument-count-error-expected` and `-actual`), instead of trapping:
+  the value's shape records how many it takes, and the call tests that
+  before it crosses;
 - read-only MOP inspection for classes, slots, generics, methods, and dispatch;
 - embedding-declared scalar host functions with typed integer, float,
   32-bit, boolean, and string arguments/results, EOP discovery, and a handler-aware call surface;

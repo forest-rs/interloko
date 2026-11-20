@@ -1,0 +1,15 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports <argument-count-error>
+// expect: diagnostics 0
+
+// With no handler, a call passing the wrong number of arguments ends the
+// run as an unhandled `<argument-count-error>`, not a VM trap.
+
+define function call-with-one(f :: <callable>) => <integer>
+  let r :: <integer> = apply(f, 1);
+  r
+end;
+
+define function main() => <integer>
+  call-with-one(method (a, b) a + b end)
+end;
