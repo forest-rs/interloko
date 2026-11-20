@@ -12133,6 +12133,51 @@ impl Lowering {
         else {
             return call(self, builtin.operation, args);
         };
+        // A string's `default:` may be any object, as Dylan's is: the
+        // kernel method answers it at or past the end, and the character
+        // at the position otherwise.
+        if with_default == Intrinsic::Text(TextFunction::StringElementOr)
+            && let [string, key] = args.as_slice()
+        {
+            let span = Span::default();
+            let end = Expr::IntrinsicCall {
+                intrinsic: Intrinsic::Text(TextFunction::EndPosition),
+                args: vec![string.clone()],
+                result_kind: ValueKind::Position,
+                span,
+            };
+            let past_end = Expr::IntrinsicCall {
+                intrinsic: Intrinsic::PositionCompare(CompareOp::Ge),
+                args: vec![key.clone(), end],
+                result_kind: ValueKind::Bool,
+                span,
+            };
+            let character = || Expr::Cast {
+                site: SiteId::PENDING,
+                value: Box::new(call(self, builtin.operation, args.clone())),
+                class: OBJECT_CLASS_ID,
+                explicit: false,
+                span,
+            };
+            let defaulted = Expr::If {
+                condition: Box::new(past_end),
+                refinement: None,
+                then_branch: Box::new(default.clone()),
+                else_branch: Box::new(character()),
+                span,
+            };
+            return Expr::If {
+                condition: Box::new(Expr::Identical {
+                    lhs: Box::new(default.clone()),
+                    rhs: Box::new(self.unsupplied(span)),
+                    span,
+                }),
+                refinement: None,
+                then_branch: Box::new(character()),
+                else_branch: Box::new(defaulted),
+                span,
+            };
+        }
         let index = args.len();
         let default_arg = if self.intrinsic_arg_matches(with_default, index, ValueKind::Any) {
             default.clone()
@@ -12252,6 +12297,16 @@ impl Lowering {
             .filter(|arg| !arg.is_unsupplied())
             .cloned();
         let first_diagnostic = ctx.diagnostics.len();
+        if function == CollectionFunction::Element
+            && let Some(default) = &default
+            && let [string, key] = args.as_slice()
+            && matches!(self.expr_kind(string), ValueKind::String(_))
+            && self.expr_kind(key) == ValueKind::Position
+            && !matches!(self.expr_kind(default), ValueKind::Char | ValueKind::Error)
+        {
+            let call = self.string_element_or_object(ctx, id, args, default.clone(), span);
+            return with_lets(lets, call, span);
+        }
         let call = match self.lower_kernel_collection_call(ctx, function, &args, default, span) {
             Some(call) => call,
             None => {
@@ -12260,6 +12315,74 @@ impl Lowering {
             }
         };
         name_keyword_mismatches(&mut ctx.diagnostics[first_diagnostic..], &signature);
+        with_lets(lets, call, span)
+    }
+
+    /// `element(s, p, default: d)` of a string, for a default that is not a
+    /// `<character>`, as Dylan's `default:` may be any object: `d` at or
+    /// past the end of `s`, and otherwise the character at `p`, as an
+    /// `<object>`. The string, the position and the default are each
+    /// evaluated once, in order.
+    fn string_element_or_object(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        args: Vec<Expr>,
+        default: Expr,
+        span: Span,
+    ) -> Expr {
+        let scope = ctx.scope_start();
+        let mut lets = Vec::new();
+        let mut reads = Vec::new();
+        for (role, value) in ["string", "key", "default"]
+            .into_iter()
+            .zip(args.into_iter().chain([default]))
+        {
+            let name = format!("element {role}@{}", span.start);
+            let bound = self.bind_hidden_local(ctx, id, &name, value, span);
+            let kind = ctx.local_kind(bound.local);
+            reads.push(Expr::Local {
+                local: bound.local,
+                result_kind: kind,
+                callable_signature: None,
+                span,
+            });
+            lets.push(bound);
+        }
+        ctx.hide_locals_from(scope);
+        let [string, key, default] = <[Expr; 3]>::try_from(reads).expect("three values were bound");
+        let end = Expr::IntrinsicCall {
+            intrinsic: Intrinsic::Text(TextFunction::EndPosition),
+            args: vec![string.clone()],
+            result_kind: ValueKind::Position,
+            span,
+        };
+        let past_end = Expr::IntrinsicCall {
+            intrinsic: Intrinsic::PositionCompare(CompareOp::Ge),
+            args: vec![key.clone(), end],
+            result_kind: ValueKind::Bool,
+            span,
+        };
+        let character = self.checked_intrinsic_call(
+            ctx,
+            Intrinsic::Text(TextFunction::StringElement),
+            "element",
+            vec![string, key],
+            span,
+        );
+        let call = Expr::If {
+            condition: Box::new(past_end),
+            refinement: None,
+            then_branch: Box::new(default),
+            else_branch: Box::new(Expr::Cast {
+                site: SiteId::PENDING,
+                value: Box::new(character),
+                class: OBJECT_CLASS_ID,
+                explicit: false,
+                span,
+            }),
+            span,
+        };
         with_lets(lets, call, span)
     }
 
