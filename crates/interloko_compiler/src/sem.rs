@@ -838,6 +838,13 @@ pub type GenericParamKind = Option<ValueKind>;
 /// `<object>` is represented by [`OBJECT_CLASS_ID`].
 pub type MethodSpecializer = Option<ClassId>;
 
+/// Whether `specializer` names a class that did not resolve: the
+/// placeholder a method's parameter takes after its type was reported, so
+/// later checks of the method stay quiet rather than cascade.
+const fn is_unresolved_specializer(specializer: MethodSpecializer) -> bool {
+    matches!(specializer, Some(ClassId(u32::MAX)))
+}
+
 /// Origin of a semantic generic function metaobject.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum GenericFunctionOrigin {
@@ -8000,6 +8007,16 @@ impl Lowering {
                         .iter()
                         .any(|method| matches!(method.origin, MethodOrigin::Collection { .. }))
                     {
+                        continue;
+                    }
+                    // A method specializing on a class that did not resolve
+                    // was reported there; what it overlaps is unknown.
+                    if [left, right].iter().any(|method| {
+                        method
+                            .specializers
+                            .iter()
+                            .any(|class| is_unresolved_specializer(*class))
+                    }) {
                         continue;
                     }
                     let Some(actuals) = self.intersection_actuals(left, right) else {
@@ -17967,6 +17984,10 @@ impl Lowering {
             .lower_method_against(ctx, value, signature.as_ref())
             .unwrap_or_else(|| self.lower_expr(ctx, value));
         let ValueKind::Object(class_id) = receiver_kind else {
+            // A receiver in error was reported where it went wrong.
+            if receiver_kind == ValueKind::Error {
+                return Expr::Error { span };
+            }
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::SlotReceiverTypeMismatch)
                     .with_arg(DiagnosticArg::text("accessor", slot_name))
@@ -18079,6 +18100,10 @@ impl Lowering {
         }
         let receiver = self.narrow_receiver(receiver, accessor_name);
         let Some(class_id) = self.value_kind_class(self.expr_kind(&receiver)) else {
+            // A receiver in error was reported where it went wrong.
+            if self.expr_kind(&receiver) == ValueKind::Error {
+                return Expr::Error { span };
+            }
             ctx.diagnostics.push(
                 Diagnostic::error(span, DiagnosticCode::SlotReceiverTypeMismatch)
                     .with_arg(DiagnosticArg::text("accessor", accessor_name))
@@ -18804,7 +18829,7 @@ impl Lowering {
         }
         let Some(class) = self.resolve_class(class_name) else {
             self.diagnostics.push(
-                Diagnostic::error(param.span, DiagnosticCode::UnresolvedClass)
+                Diagnostic::error(specializer.span(), DiagnosticCode::UnresolvedClass)
                     .with_arg(DiagnosticArg::text("class", class_name)),
             );
             return (Some(ClassId(u32::MAX)), ValueKind::Error);
@@ -19501,6 +19526,20 @@ impl Lowering {
         }
         let expected = declared.or_else(|| unboxed.then_some(ValueKind::Any))?;
         if self.generic_argument_matches(expected, actual) {
+            return None;
+        }
+        // A method specializing the argument on a class that did not
+        // resolve, reported there, might have taken it.
+        if self
+            .dispatch_specializers
+            .iter()
+            .filter(|(method_generic, _)| *method_generic == generic)
+            .any(|(_, specializers)| {
+                specializers
+                    .get(index)
+                    .is_some_and(|class| is_unresolved_specializer(*class))
+            })
+        {
             return None;
         }
         if expected == ValueKind::Any && unboxed {
@@ -20474,6 +20513,27 @@ mod tests {
             DiagnosticCode::UntypedCallableResult,
             &[]
         ));
+    }
+
+    #[test]
+    fn an_unresolved_class_does_not_cascade() {
+        let source = "define generic evaluate(x, env);\n\
+             define method evaluate(x :: <lisp-pair>, env :: <object>) 1 end;\n\
+             define method evaluate(x :: <lisp-symbol>, env :: <object>) 2 end;\n\
+             define function main() => <integer>\n\
+               let p :: <lisp-pair> = 3;\n  p.size + evaluate(1, 2)\nend;";
+        let module = lower_source(source);
+        let codes = module
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+        assert_eq!(codes, vec![DiagnosticCode::UnresolvedClass; 3]);
+        // Each names its specializer's own span, not the parameter's.
+        let start = source.find("<lisp-pair>").unwrap_or(0);
+        assert!(module.diagnostics.iter().any(|diagnostic| {
+            (diagnostic.span.start, diagnostic.span.end) == (start, start + "<lisp-pair>".len())
+        }));
     }
 
     #[test]
