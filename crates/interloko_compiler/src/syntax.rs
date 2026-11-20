@@ -933,22 +933,7 @@ pub fn lex(source: &str) -> Vec<Token> {
                 TokenKind::Semicolon
             }
             b'"' => {
-                pos += 1;
-                while pos < bytes.len() {
-                    match bytes[pos] {
-                        b'\\' => {
-                            pos += 1;
-                            if pos < bytes.len() {
-                                pos += 1;
-                            }
-                        }
-                        b'"' => {
-                            pos += 1;
-                            break;
-                        }
-                        _ => pos += 1,
-                    }
-                }
+                pos = lex_string_end(bytes, pos);
                 TokenKind::String
             }
             b'\'' => {
@@ -972,6 +957,11 @@ pub fn lex(source: &str) -> Vec<Token> {
             {
                 pos = name_end(bytes, pos + 2);
                 TokenKind::Keyword
+            }
+            // Dylan's general symbol literal, for any name: `#"set!"`.
+            b'#' if bytes.get(pos + 1) == Some(&b'"') => {
+                pos = lex_string_end(bytes, pos + 1);
+                TokenKind::Symbol
             }
             b'#' if bytes.get(pos + 1).is_some_and(|next| is_name_start(*next)) => {
                 pos = name_end(bytes, pos + 1);
@@ -1046,6 +1036,26 @@ pub fn lex(source: &str) -> Vec<Token> {
     }
 
     tokens
+}
+
+/// Returns the end of the string literal whose opening quote is at
+/// `start`: past its closing quote, or the end of the source when it has
+/// none. A backslash escapes the byte after it.
+fn lex_string_end(bytes: &[u8], start: usize) -> usize {
+    let mut pos = start + 1;
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b'\\' => {
+                pos += 1;
+                if pos < bytes.len() {
+                    pos += 1;
+                }
+            }
+            b'"' => return pos + 1,
+            _ => pos += 1,
+        }
+    }
+    pos
 }
 
 /// Suffixes that give a numeric literal a 32-bit type.
@@ -1175,6 +1185,17 @@ mod tests {
         );
         assert_eq!(tokens[0].kind, TokenKind::Define);
         assert_eq!(tokens[2].kind, TokenKind::Function);
+    }
+
+    #[test]
+    fn lex_general_symbol_literals_as_one_symbol_token() {
+        let source = r#"#"set!" #"a \" b" #plain"#;
+        let symbols = lex(source)
+            .into_iter()
+            .filter(|token| token.kind == TokenKind::Symbol)
+            .map(|token| token.text(source).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(symbols, [r#"#"set!""#, r#"#"a \" b""#, "#plain"]);
     }
 
     #[test]

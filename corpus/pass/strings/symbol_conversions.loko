@@ -1,0 +1,21 @@
+// expect: run 31
+// expect: diagnostics 0
+
+// `as(<symbol>, s)` interns, so it answers the literal's symbol, and
+// `as(<string>, s)` gives a symbol's name. `#"…"` writes a symbol whose
+// name is not a word. Symbols keep their case: `#Foo` is not `#foo`.
+// A boxed value converts by its class at run time, as numbers do.
+
+define function name-of(x) => <string> as(<string>, x) end;
+define function intern(x) => <object> as(<symbol>, x) end;
+
+define function main() => <integer>
+  let checks = 0;
+  if (as(<symbol>, "set!") == #set!) checks := checks + 1 end;
+  if (as(<string>, #"two words") = "two words") checks := checks + 2 end;
+  if (#"set!" == #set! & #"Foo" ~== #"foo") checks := checks + 4 end;
+  if (intern("x") == #x & name-of(#x) = "x") checks := checks + 8 end;
+  // A character converts to a string as before.
+  if (name-of('c') = "c") checks := checks + 16 end;
+  checks
+end;

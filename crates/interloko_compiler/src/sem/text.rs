@@ -90,6 +90,8 @@ pub fn text_function_name(function: TextFunction) -> &'static str {
         TextFunction::BuilderToString => "as(<string>, <string-builder>)",
         TextFunction::BuilderAddCharacter => "add!(<string-builder>, <character>)",
         TextFunction::BuilderAddString => "add!(<string-builder>, <string>)",
+        TextFunction::StringToSymbol => "as(<symbol>, <string>)",
+        TextFunction::SymbolToString => "as(<string>, <symbol>)",
         function => NAMED_TEXT_FUNCTIONS
             .iter()
             .find(|(_, functions)| functions.contains(&function))
@@ -107,6 +109,7 @@ pub const fn text_kind_name(kind: TextKind) -> &'static str {
         TextKind::Position => "<string-position>",
         TextKind::String => "<string>",
         TextKind::Builder => "<string-builder>",
+        TextKind::Symbol => "<symbol>",
     }
 }
 
@@ -117,6 +120,8 @@ pub struct TextClasses {
     pub string: ClassId,
     /// `<string-builder>`.
     pub builder: ClassId,
+    /// `<symbol>`.
+    pub symbol: ClassId,
 }
 
 impl TextClasses {
@@ -130,6 +135,7 @@ impl TextClasses {
             TextKind::Position => ValueKind::Position,
             TextKind::String => ValueKind::String(self.string),
             TextKind::Builder => ValueKind::Object(self.builder),
+            TextKind::Symbol => ValueKind::Symbol(self.symbol),
         }
     }
 
@@ -147,6 +153,7 @@ impl TextClasses {
             TextKind::Position => actual == ValueKind::Position,
             TextKind::String => actual == ValueKind::String(self.string),
             TextKind::Builder => actual == ValueKind::Object(self.builder),
+            TextKind::Symbol => actual == ValueKind::Symbol(self.symbol),
         }
     }
 }

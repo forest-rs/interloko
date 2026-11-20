@@ -19,7 +19,7 @@ use interloko_model::types::IntRange;
 use interloko_model::{ClassId, FloatBits, SingleFloatBits, SlotId};
 
 use crate::control::{CHECK_FAILED_TAG, TypeErrorSite};
-use crate::text::{character_literal, string_literal};
+use crate::text::{character_literal, string_literal, symbol_literal};
 use crate::{
     INTERLOKO_OBJECT_TYPE, INTERLOKO_VALUE_TYPE, InterlokoHost, RuntimeError, RuntimeObjectStorage,
     Unboxed,
@@ -213,7 +213,7 @@ impl InterlokoHost {
         match &object.storage {
             RuntimeObjectStorage::String { text } => string_literal(text.as_str()),
             RuntimeObjectStorage::StringBuilder { .. } => "{<string-builder>}".into(),
-            RuntimeObjectStorage::Symbol { name } => format!("#{name}"),
+            RuntimeObjectStorage::Symbol { name } => symbol_literal(name),
             RuntimeObjectStorage::Marker(marker) => marker.name().into(),
             RuntimeObjectStorage::Vector { elements, .. } => {
                 let elements = elements

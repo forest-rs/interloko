@@ -2658,7 +2658,27 @@ impl<'tree> Lowering<'tree> {
         }
     }
 
-    fn lower_symbol(&self, node: &CstNode) -> Expr {
+    fn lower_symbol(&mut self, node: &CstNode) -> Expr {
+        // `#"…"` names a symbol with a string literal's text.
+        if let Some((span, text)) = self.first_token_text(node, TokenKind::Symbol)
+            && text[1..].starts_with('"')
+        {
+            let Some(name) = decode_string_literal(&text[1..]) else {
+                self.diagnostics.push(Diagnostic::error(
+                    span,
+                    DiagnosticCode::AstMalformedStringLiteral,
+                ));
+                return Expr::Error {
+                    id: self.ast_id(node),
+                    span,
+                };
+            };
+            return Expr::Symbol {
+                id: self.ast_id(node),
+                name,
+                span,
+            };
+        }
         let symbol = self
             .first_token_text(node, TokenKind::Symbol)
             .map(|(span, text)| (span, text[1..].to_string()))

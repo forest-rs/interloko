@@ -147,6 +147,8 @@ pub enum TextKind {
     String,
     /// A `<string-builder>`, a runtime object.
     Builder,
+    /// A `<symbol>`, a runtime object.
+    Symbol,
 }
 
 impl TextKind {
@@ -157,7 +159,7 @@ impl TextKind {
             Self::Integer | Self::Position => ValueType::I64,
             Self::Boolean => ValueType::Bool,
             Self::Character => ValueType::U32,
-            Self::String | Self::Builder => object_type(),
+            Self::String | Self::Builder | Self::Symbol => object_type(),
         }
     }
 }
@@ -323,6 +325,13 @@ text_functions! {
     /// `as(<string>, b)`: the text built so far as a `<string>`, moved
     /// without a copy; the builder is empty afterwards.
     BuilderToString = "interloko.text.builder_to_string", (Builder) -> String, None;
+    /// `as(<symbol>, s)`: the symbol named `s`, interned, so every
+    /// conversion of the same text and every literal of that name is the
+    /// same symbol. Case is kept: `#"Foo"` and `#"foo"` are different
+    /// symbols.
+    StringToSymbol = "interloko.text.string_to_symbol", (String) -> Symbol, None;
+    /// `as(<string>, s)`: a new string holding a symbol's name.
+    SymbolToString = "interloko.text.symbol_to_string", (Symbol) -> String, None;
 }
 
 impl TextFunction {
@@ -552,6 +561,20 @@ impl InterlokoHost {
                 *scalars = 0;
                 self.push_string(text).map_err(|_| Failed)?
             }
+            (F::StringToSymbol, [s]) => {
+                let name = String::from(self.text_arg(*s)?.as_str());
+                self.intern_symbol(name).map_err(|_| Failed)?
+            }
+            (F::SymbolToString, [symbol]) => {
+                let ValueRef::Obj(obj) = symbol else {
+                    return Err(Failed);
+                };
+                let name = match &self.object(*obj).map_err(|_| Failed)?.storage {
+                    RuntimeObjectStorage::Symbol { name } => name.clone(),
+                    _ => return Err(Failed),
+                };
+                self.push_string(name).map_err(|_| Failed)?
+            }
             (function, args) => {
                 return function
                     .apply(args)
@@ -612,6 +635,32 @@ pub fn character_literal(value: char) -> String {
     literal
 }
 
+/// Writes a symbol named `name` as a Loko symbol literal: `#name` when the
+/// name is a word a symbol literal can spell, such as `#set!`, and the
+/// general `#"…"` form otherwise, such as `#"two words"`.
+#[must_use]
+pub fn symbol_literal(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let word = bytes
+        .first()
+        .is_some_and(|first| first.is_ascii_alphabetic() || matches!(first, b'$' | b'_'))
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'_' | b'?' | b'!' | b'-')
+                || (*byte == b'/' && bytes.get(index + 1) != Some(&b'/') && index > 0)
+        });
+    if word {
+        let mut literal = String::with_capacity(name.len() + 1);
+        literal.push('#');
+        literal.push_str(name);
+        literal
+    } else {
+        let mut literal = String::from("#");
+        literal.push_str(&string_literal(name));
+        literal
+    }
+}
+
 /// Writes `text` as a Loko string literal, such as `"a\tb"`.
 #[must_use]
 pub fn string_literal(text: &str) -> String {
@@ -653,7 +702,7 @@ fn simple_case(mut mapping: impl Iterator<Item = char>) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TextFunction, TextKind, character_literal, string_literal};
+    use super::{TextFunction, TextKind, character_literal, string_literal, symbol_literal};
     use execution_tape::host::ValueRef;
     use execution_tape::value::Value;
 
@@ -678,6 +727,16 @@ mod tests {
         }
         assert_eq!(TextFunction::from_symbol("interloko.text.nope"), None);
         assert_eq!(TextFunction::from_symbol("interloko.float.sin"), None);
+    }
+
+    #[test]
+    fn symbols_print_as_words_or_as_general_literals() {
+        assert_eq!(symbol_literal("set!"), "#set!");
+        assert_eq!(symbol_literal("truncate/"), "#truncate/");
+        assert_eq!(symbol_literal("two words"), "#\"two words\"");
+        assert_eq!(symbol_literal("1+"), "#\"1+\"");
+        assert_eq!(symbol_literal("a//b"), "#\"a//b\"");
+        assert_eq!(symbol_literal(""), "#\"\"");
     }
 
     #[test]

@@ -86,7 +86,8 @@ use region::{NurserySerials, ObjectRef, OpenTurn, Region, Space};
 pub use send::SendCacheReport;
 use text::StringText;
 pub use text::{
-    STRING_MAX_BYTES, TextFunction, TextKind, character_literal, is_position_offset, string_literal,
+    STRING_MAX_BYTES, TextFunction, TextKind, character_literal, is_position_offset,
+    string_literal, symbol_literal,
 };
 pub use turn::ImageRootId;
 pub use type_error::TypeErrorReport;
