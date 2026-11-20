@@ -471,8 +471,11 @@ The current slices include:
   `copy-sequence` and `starts-with?` are forms whose arguments or results
   no callable type describes yet, and naming one as a value is an error;
 - identity: `a == b` is Dylan's `==`, defined on any two objects, never
-  dispatching and not user-definable; `=` stays the equality of numbers,
-  characters, strings, symbols and types. Heap objects are `==` when they
+  dispatching and not user-definable. `=` is Dylan's equality, defined on
+  any two objects too: numbers compare by value, characters by scalar
+  value, strings by their text, types as types, and anything else by `==`,
+  so `a = b` of two `<object>`s sends to the `=` generic, whose kernel
+  methods those are, and never signals. Heap objects are `==` when they
   are the same object (two strings with the same text need not be).
   Numbers, booleans and characters have no identity apart from their
   value, so they are `==` when they are the same class and value: integers by value whatever limited type holds
