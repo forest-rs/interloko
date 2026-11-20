@@ -1,0 +1,24 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// An `error` whose first argument typing does not know signals a
+// `<simple-error>` when it is a string, and otherwise the condition it is.
+
+define class <oops> (<error>) end;
+
+define function fail (problem, x) error(problem, x) end;
+
+define function main() => <integer>
+  let checks = 0;
+  block ()
+    fail("boom %=", 3)
+  exception (e :: <simple-error>)
+    if (e.condition-format-string = "boom %=") checks := checks + 1 end
+  end;
+  block ()
+    fail(make(<oops>), 3)
+  exception (e :: <oops>)
+    checks := checks + 2
+  end;
+  checks
+end;

@@ -473,7 +473,8 @@ The current slices include:
 - identity: `a == b` is Dylan's `==`, defined on any two objects, never
   dispatching and not user-definable. `=` is Dylan's equality, defined on
   any two objects too: numbers compare by value, characters by scalar
-  value, strings by their text, types as types, and anything else by `==`,
+  value, strings by their text, types as types, and anything else by `==`
+  (collections included, for now: Dylan compares them element by element),
   so `a = b` of two `<object>`s sends to the `=` generic, whose kernel
   methods those are, and never signals. Heap objects are `==` when they
   are the same object (two strings with the same text need not be).
@@ -576,7 +577,8 @@ The current slices include:
   (`"ß"` to `"SS"`); `concatenate` takes characters too (and, as
   Dylan's does, any number of sequences of any kind: `concatenate(#(1),
   #[2], #(3))` is a list, of the first one's kind; strings typing knows
-  join inline), and `as(<string>,
+  join inline, and a program's own `concatenate` methods serve calls of
+  two arguments that may be of their classes), and `as(<string>,
   c)` makes one. `string-to-integer(s)`, common Dylan's, reads the
   optional sign and decimal digits `s` starts with, up to the first
   character that is not a digit, and signals a `<simple-error>` when it
@@ -630,12 +632,17 @@ The current slices include:
   `<empty-list>` (so `l == #()` tests for the end), and `list(a, b)` and
   the literal `#(a, b)` make a list of pairs ending in it, evaluating
   their elements in order (a literal's pairs are made afresh each time,
-  as a vector literal's elements are). `head(l)` and `tail(l)` take a list
+  and unlike a vector literal's they are not constant: storing into one
+  is not refused). `head(l)` and `tail(l)` take a list
   apart, and as in Dylan both answer `#()` for `#()`; `head-setter(v, p)`
   and `tail-setter(v, p)` store into a `<pair>`. An `<object>` argument is
   checked to be a `<list>` (or a `<pair>`) as a declaration would check
   it. As in Dylan, `x.f` is `f(x)` and `x.f := v` is `f-setter(v, x)` for
-  any `f` no class has a slot of, so `p.head` and `p.tail := l` work. As
+  any `f` no class has a slot of, so `p.head`, `l.size` and `p.tail := l`
+  work; where a program's class has a slot `head` too, `.head` of a value
+  typing knows cannot be of that class still calls the built-in, and a
+  call `head(l)` is always the built-in's, but `.head` of an `<object>`
+  reads the slot's getter, which serves only the program's classes. As
   a sequence a list has `size` (its number of pairs), `l[i]`, `element(l,
   i, default: d)` and `l[i] := v`, an index past its end without a
   default signalling an `<error>`, and `for (x in l)` walks it from its
@@ -701,6 +708,7 @@ The current slices include:
   `<unknown-keyword-error>` and `<simple-error>` defined by
   the kernel. Dylan's `error(condition)` signals a condition as `signal`
   does, and `error(format-string, argument, …)` signals a `<simple-error>`
+  (an `<object>` first argument is told apart at run time)
   whose `condition-format-string` is the string and whose
   `condition-format-arguments` is a vector of the arguments; either way,
   like `signal`, it takes the values its context expects, since it does

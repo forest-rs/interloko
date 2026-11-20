@@ -4110,11 +4110,11 @@ fn let_pattern_definition(pattern: &LetPattern) -> DefinitionId {
 /// means the `dylan` module's `element`.
 pub const KERNEL_ELEMENT: &str = "%element";
 
-/// The kernel-only name `collection[key] := value` calls, the kernel's
 /// The kernel-only name of `list`, which a list literal `#(a, b)` calls: a
 /// `%` cannot appear in a source name, so no program can shadow it.
 pub const KERNEL_LIST: &str = "%list";
 
+/// The kernel-only name `collection[key] := value` calls, the kernel's
 /// `element-setter` generic; see [`KERNEL_ELEMENT`].
 pub const KERNEL_ELEMENT_SETTER: &str = "%element-setter";
 
