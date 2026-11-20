@@ -2599,13 +2599,22 @@ impl InterlokoHost {
                 let [ValueRef::Str(value)] = args else {
                     return Err(HostError::Failed);
                 };
+                // A literal is a constant: see `constant.rs`.
+                if let Some(string) = self.constants.literal(value) {
+                    rets[0] = Value::Obj(string);
+                    return Ok(0);
+                }
                 let class = self.builtin_class(BuiltinValueClass::String)?;
-                rets[0] = self.push_object(RuntimeObject {
+                let string = self.push_object(RuntimeObject {
                     class,
                     storage: RuntimeObjectStorage::String {
                         text: StringText::new(String::from(*value)).ok_or(HostError::Failed)?,
                     },
                 });
+                if let Value::Obj(object) = string {
+                    self.constants.remember_literal(value, object);
+                }
+                rets[0] = string;
                 Ok(0)
             }
             LIST_PAIR => {

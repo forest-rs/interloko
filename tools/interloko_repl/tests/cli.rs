@@ -985,8 +985,9 @@ fn repl_turns_keep_the_runtime_image_flat() {
     assert_eq!(images.len(), 10, "{stdout}");
     assert!(images.iter().all(|line| *line == images[0]), "{stdout}");
     assert_eq!(images[0], "image: 0 objects, 0 boxed values, 0 bytes");
+    // Forty concatenations, and the three literals' strings, each made once.
     assert!(
-        stdout.contains("last turn: allocated 160 objects"),
+        stdout.contains("last turn: allocated 43 objects"),
         "{stdout}"
     );
 }

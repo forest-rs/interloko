@@ -29,7 +29,14 @@
 //! its own constant, which the compiler rejects where it can see it, and
 //! the compiled code signals a `<constant-cycle-error>` naming the constant
 //! and the reader instead.
+//!
+//! String literals are constants too, as in Dylan: the first evaluation of
+//! a literal in a run makes its string, and every later evaluation of a
+//! literal with the same text returns that string, so `s() == s()` for a
+//! function `s` returning a literal. Strings are immutable, so nothing but
+//! `==` can tell. The strings are kept like cells, for the run.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -145,12 +152,25 @@ type CellName = (usize, u64);
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConstantCells {
     cells: BTreeMap<CellName, ConstantCell>,
+    /// The string each literal text evaluated to so far.
+    literals: BTreeMap<Box<str>, Obj>,
 }
 
 impl ConstantCells {
-    /// Forgets every cell, as a turn ends or begins.
+    /// Forgets every cell and literal, as a turn ends or begins.
     pub(crate) fn clear(&mut self) {
         self.cells.clear();
+        self.literals.clear();
+    }
+
+    /// The string a literal with this text evaluated to earlier in the run.
+    pub(crate) fn literal(&self, text: &str) -> Option<Obj> {
+        self.literals.get(text).copied()
+    }
+
+    /// Keeps `string` as what a literal with this text evaluates to.
+    pub(crate) fn remember_literal(&mut self, text: &str, string: Obj) {
+        self.literals.insert(Box::from(text), string);
     }
 
     /// Returns how many cells hold a value.
