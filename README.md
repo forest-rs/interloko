@@ -708,8 +708,8 @@ The current slices include:
   first pair to its last, through its `forward-iteration-protocol`, whose
   states are its pairs. These are the kernel's methods for `<list>`, over
   which the generics are sealed, written in Loko in the kernel library
-  (below). A pair is a runtime object of two slots, so `head` and `tail`
-  are a host call each;
+  (below). A pair is a runtime object of two slots, which `head` and
+  `tail` read on the tape, without a host call;
 - Dylan's collection generics `size(collection)`, `element(collection,
   key, #key default)`, `element-setter(value, collection, key)` and
   `add!(collection, element)` (whose kernel methods take a stretchy vector
@@ -935,6 +935,17 @@ integers live in the runtime host's heap.
 layout lists in a few classes read an object's class with `obj.key` on the
 tape, without a host call; only a cast that fails asks the host, which
 signals. A `make` of a class literal reads no class metaobject.
+A slot of a native object (an instance of a program's or the kernel's
+classes) that holds an inline value, anything but a callable, is read
+and stored with `obj.field` and `obj.set_field`: the runtime answers
+them directly, and a store into the image is logged as a `slot_set`
+host call's is. `==` compares boxed handles with `obj.eq`, which
+decides it alone when either operand is such an object; otherwise equal
+handles are identical and the host decides the rest. A run keeps a
+constant's value, a string literal's string and the kernel markers in
+computation globals once it has them (`global.get`), so only the first
+read asks the host. `interloko_lab trace` lists the slot reads and
+stores as object queries.
 
 The runtime heap has two regions. Each call is one *turn*: everything it
 allocates (instances, strings, vectors, metaobjects, heap boxes) goes to a

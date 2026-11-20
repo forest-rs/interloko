@@ -210,9 +210,9 @@ fn run_and_trace_commands_expose_execution_trace() {
     assert!(run.contains("capture: complete"));
     assert!(run.contains("invocation: main [function:f0]"));
     assert!(run.contains("activations: 2 entered"));
-    assert!(run.contains("host-call interloko.slot_get"));
-    assert!(run.contains("at area#method0@"));
-    assert!(run.contains(" from main@"));
+    assert!(run.contains("host-call interloko.make_object"));
+    assert!(run.contains("object queries: 2"));
+    assert!(run.contains("field 0 read 10 at area#method0@"));
     assert!(run.contains("outcome: returned (100) at main@"));
 
     let trace = run_lab(&["trace", path]);
@@ -648,8 +648,7 @@ fn report_handles_plain_loko_sources() {
         .next()
         .unwrap();
     assert!(timeline.contains("<strong>run starts at main</strong>"));
-    assert!(timeline.contains("<strong>host interloko.slot_get · returned</strong>"));
-    assert!(timeline.contains(" · from main@"));
+    assert!(timeline.contains("<strong>host interloko.make_object · returned</strong>"));
     assert!(timeline.contains("<strong>run returns</strong>"));
 }
 

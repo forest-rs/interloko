@@ -726,6 +726,77 @@ struct AbiTables {
     cast_class: Option<(HostSigId, HostSigId)>,
     tags: SharedTags,
     control: Option<ControlAbi>,
+    globals: RunGlobals,
+}
+
+/// The computation globals a program caches values in (`global.get`): what a run computes
+/// once and then reads without a host call. A string literal's string, the kernel markers and
+/// a constant's value each have a global; the first read in a computation asks the host, as
+/// before, and stores what it answered.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct RunGlobals {
+    /// The program's string literals, in the order of their constants: literal `i` caches in
+    /// global `i`.
+    literals: usize,
+    /// Constants whose values are inline, by key: the constant at position `i` caches in global
+    /// `literals + MARKERS + i`.
+    constants: Vec<u64>,
+}
+
+impl RunGlobals {
+    /// Globals for `$unsupplied` and the keyword-absent marker, after the literals'.
+    const MARKERS: usize = 2;
+
+    fn declare(module: &lower::Module, literals: usize) -> Self {
+        let mut constants = Vec::new();
+        for function in &module.functions {
+            for instr in &function.instructions {
+                if let lower::Instr::ConstantRead {
+                    value: Some(value),
+                    key,
+                    ..
+                } = instr
+                    && function
+                        .register_kind(*value)
+                        .is_some_and(|kind| value_type(kind).is_inline())
+                    && !constants.contains(key)
+                {
+                    constants.push(*key);
+                }
+            }
+        }
+        Self {
+            literals,
+            constants,
+        }
+    }
+
+    /// The global index `position` names, when it is below the VM's limit.
+    fn global(position: usize) -> Option<u32> {
+        u32::try_from(position)
+            .ok()
+            .filter(|index| *index < execution_tape::verifier::MAX_GLOBALS)
+    }
+
+    fn literal(&self, index: usize) -> Option<u32> {
+        (index < self.literals)
+            .then(|| Self::global(index))
+            .flatten()
+    }
+
+    fn marker(&self, op: lower::RuntimeOp) -> Option<u32> {
+        let offset = match op {
+            lower::RuntimeOp::Unsupplied => 0,
+            lower::RuntimeOp::KeywordAbsent => 1,
+            _ => return None,
+        };
+        Self::global(self.literals + offset)
+    }
+
+    fn constant(&self, key: u64) -> Option<u32> {
+        let position = self.constants.iter().position(|cached| *cached == key)?;
+        Self::global(self.literals + Self::MARKERS + position)
+    }
 }
 
 /// Control tags every program imports by name, so that code units installed
@@ -1183,6 +1254,7 @@ impl AbiTables {
         let float_functions = float_function_sigs(builder, module);
         let tags = SharedTags::import(builder)?;
         let control = ControlAbi::declare(builder, module)?;
+        let globals = RunGlobals::declare(module, string_literal_consts.len());
         let host_functions = module
             .host_functions
             .iter()
@@ -1229,6 +1301,7 @@ impl AbiTables {
             cast_class,
             tags,
             control,
+            globals,
         })
     }
 
@@ -1247,14 +1320,21 @@ impl AbiTables {
             .ok_or_else(|| invalid_lowered("control signatures are missing"))
     }
 
-    fn string_literal(&self, value: &str) -> Result<(HostSigId, ConstId), TapeError> {
+    /// The literal's host signature and constant, and the global its string is cached in.
+    fn string_literal(&self, value: &str) -> Result<(HostSigId, ConstId, Option<u32>), TapeError> {
         let sig = self
             .string_literal
             .ok_or_else(|| invalid_lowered("string literal signature is missing"))?;
         self.string_literal_consts
             .iter()
-            .find(|(literal, _)| literal == value)
-            .map(|(_, const_id)| (sig, *const_id))
+            .position(|(literal, _)| literal == value)
+            .map(|index| {
+                (
+                    sig,
+                    self.string_literal_consts[index].1,
+                    self.globals.literal(index),
+                )
+            })
             .ok_or_else(|| invalid_lowered("string literal constant is missing"))
     }
 
@@ -1837,6 +1917,60 @@ impl<'a> FunctionEmitter<'a> {
         Ok(Some(done))
     }
 
+    /// Whether every instance of `class` and its subclasses is a native runtime object, whose
+    /// slots the runtime answers `obj.field` and `obj.set_field` for
+    /// ([`runtime::InterlokoHost::object_field`]): not a built-in value, a host-backed object or
+    /// a bare `<object>`.
+    fn native_instances(&self, class: sem::ClassId) -> bool {
+        let Some(layout) = self.layout else {
+            return false;
+        };
+        class != sem::OBJECT_CLASS_ID
+            && layout.classes.iter().enumerate().all(|(index, info)| {
+                let Ok(id) = u32::try_from(index) else {
+                    return false;
+                };
+                !layout.is_same_or_subclass(sem::ClassId(id), class)
+                    || matches!(info.kind, runtime::HostObjectKind::Native)
+            })
+    }
+
+    /// The field instructions' operands for a slot access: the receiver is an object of a
+    /// class with native instances and the slot's value is inline.
+    fn slot_field(&self, receiver: Reg, value: Reg, class: sem::ClassId) -> bool {
+        matches!(
+            self.register_type(receiver),
+            Ok(ValueType::Obj(host_type)) if host_type == runtime::INTERLOKO_OBJECT_TYPE
+        ) && self.register_type(value).is_ok_and(ValueType::is_inline)
+            && self.native_instances(class)
+    }
+
+    /// Emits `compute`, which writes `dst`, or, with a `global`, reads `dst` from the global
+    /// when this computation has stored it, and otherwise computes it and stores it there.
+    fn emit_cached(
+        &mut self,
+        global: Option<u32>,
+        dst: Reg,
+        compute: impl FnOnce(&mut Self) -> Result<(), TapeError>,
+    ) -> Result<(), TapeError> {
+        let Some(global) = global.filter(|_| {
+            self.register_type(dst)
+                .is_ok_and(execution_tape::program::ValueType::is_inline)
+        }) else {
+            return compute(self);
+        };
+        let stored = self.alloc_temp(ValueType::Bool);
+        let (hit, miss, done) = (self.asm.label(), self.asm.label(), self.asm.label());
+        self.asm.global_has(stored, global).br(stored, hit, miss);
+        self.asm.place(hit).map_err(build_error)?;
+        self.asm.global_get(dst, global).jmp(done);
+        self.asm.place(miss).map_err(build_error)?;
+        compute(self)?;
+        self.asm.global_set(global, dst).jmp(done);
+        self.asm.place(done).map_err(build_error)?;
+        Ok(())
+    }
+
     fn emit(mut self) -> Result<Asm, TapeError> {
         let instructions = &self.function.instructions;
         for (index, instr) in instructions.iter().enumerate() {
@@ -2014,12 +2148,16 @@ impl<'a> FunctionEmitter<'a> {
             lower::Instr::StringLiteral {
                 dst, value, span, ..
             } => {
-                let (sig, value_const) = self.abi.string_literal(value)?;
-                let value_reg = self.alloc_temp(ValueType::Str);
+                let (sig, value_const, global) = self.abi.string_literal(value)?;
                 self.set_span(*span);
-                self.asm.const_pool(value_reg, value_const);
-                self.asm
-                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[value_reg], &[*dst]);
+                self.emit_cached(global, *dst, |emitter| {
+                    let value_reg = emitter.alloc_temp(ValueType::Str);
+                    emitter.asm.const_pool(value_reg, value_const);
+                    emitter
+                        .asm
+                        .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[value_reg], &[*dst]);
+                    Ok(())
+                })?;
             }
             lower::Instr::SymbolLiteral {
                 dst, name, span, ..
@@ -2507,9 +2645,32 @@ impl<'a> FunctionEmitter<'a> {
                 );
                 let key_reg = self.alloc_temp(ValueType::U64);
                 self.set_span(*span);
+                let global = value.and(self.abi.globals.constant(*key));
+                let (Some(global), Some(value)) = (global, *value) else {
+                    self.asm.const_u64(key_reg, *key);
+                    self.asm
+                        .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[key_reg], &dsts);
+                    return Ok(());
+                };
+                // A value read once is kept in a global for the rest of the computation;
+                // until it is, the host answers, and its cell decides whether it is ready.
+                let (hit, miss, store, done) = (
+                    self.asm.label(),
+                    self.asm.label(),
+                    self.asm.label(),
+                    self.asm.label(),
+                );
+                self.asm.global_has(*ready, global).br(*ready, hit, miss);
+                self.asm.place(hit).map_err(build_error)?;
+                self.asm.global_get(value, global).jmp(done);
+                self.asm.place(miss).map_err(build_error)?;
                 self.asm.const_u64(key_reg, *key);
                 self.asm
                     .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[key_reg], &dsts);
+                self.asm.br(*ready, store, done);
+                self.asm.place(store).map_err(build_error)?;
+                self.asm.global_set(global, value).jmp(done);
+                self.asm.place(done).map_err(build_error)?;
             }
             lower::Instr::ConstantClaim { dst, key, span } => {
                 let sig = self
@@ -2556,6 +2717,12 @@ impl<'a> FunctionEmitter<'a> {
                 self.asm.const_u64(key_reg, *key);
                 self.asm
                     .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[key_reg, *value], &[]);
+                // The initializer's value is the one later reads would cache.
+                if let Some(global) = self.abi.globals.constant(*key)
+                    && value_type(kind).is_inline()
+                {
+                    self.asm.global_set(global, *value);
+                }
             }
             lower::Instr::ConstantAbandon { key, span } => {
                 let sig = self.builder.host_sig_for(
@@ -2572,16 +2739,27 @@ impl<'a> FunctionEmitter<'a> {
                 dst,
                 lhs,
                 rhs,
+                by_handle,
                 span,
             } => {
-                // Declared at its first use, so a module that never compares
-                // identities does not install it.
-                let sig = self
-                    .builder
-                    .host_sig_for(runtime::IDENTICAL, runtime::identical_signature());
+                // Equal handles are the same value; when the lowering knows the handles
+                // decide it, unequal ones are not, and otherwise the host decides.
                 self.set_span(*span);
-                self.asm
-                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*lhs, *rhs], &[*dst]);
+                self.asm.obj_eq(*dst, *lhs, *rhs);
+                if !*by_handle {
+                    let (ask, done) = (self.asm.label(), self.asm.label());
+                    self.asm.br(*dst, done, ask);
+                    self.asm.place(ask).map_err(build_error)?;
+                    // Declared at its first use, so a module that never compares
+                    // identities does not install it.
+                    let sig = self
+                        .builder
+                        .host_sig_for(runtime::IDENTICAL, runtime::identical_signature());
+                    self.asm
+                        .host_call(Reg::EFFECT, sig, Reg::EFFECT, &[*lhs, *rhs], &[*dst]);
+                    self.asm.jmp(done);
+                    self.asm.place(done).map_err(build_error)?;
+                }
             }
             lower::Instr::Call {
                 dsts,
@@ -2716,8 +2894,14 @@ impl<'a> FunctionEmitter<'a> {
             } => {
                 let sig = self.abi.runtime_call(*op)?;
                 self.set_span(*span);
-                self.asm
-                    .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
+                // A kernel marker is the same object all run long.
+                let global = self.abi.globals.marker(*op);
+                self.emit_cached(global, *dst, |emitter| {
+                    emitter
+                        .asm
+                        .host_call(Reg::EFFECT, sig, Reg::EFFECT, args, &[*dst]);
+                    Ok(())
+                })?;
             }
             lower::Instr::HostCall {
                 dst,
@@ -2739,6 +2923,11 @@ impl<'a> FunctionEmitter<'a> {
                 span,
                 ..
             } => {
+                if self.slot_field(*receiver, *dst, *class) {
+                    self.set_span(*span);
+                    self.asm.obj_field(*dst, *receiver, slot.0);
+                    return Ok(());
+                }
                 let sig = self
                     .abi
                     .slot_get
@@ -2766,6 +2955,16 @@ impl<'a> FunctionEmitter<'a> {
                 span,
                 ..
             } => {
+                // The store's result is the value stored, which an inline slot keeps as given.
+                if self.slot_field(*receiver, *value, *class)
+                    && self.register_type(*dst)? == self.register_type(*value)?
+                {
+                    self.set_span(*span);
+                    self.asm
+                        .obj_set_field(*receiver, slot.0, *value)
+                        .mov(*dst, *value);
+                    return Ok(());
+                }
                 let sig = self
                     .abi
                     .slot_set

@@ -2513,6 +2513,12 @@ impl Host for InterlokoHost {
     fn object_bytes<R>(&self, object: Obj, read: impl FnOnce(Option<&[u8]>) -> R) -> R {
         read(self.string_bytes(object))
     }
+    fn object_field(&self, object: Obj, field: u32) -> Option<Value> {
+        Self::object_field(self, object, field)
+    }
+    fn set_object_field(&mut self, object: Obj, field: u32, value: Value) -> bool {
+        Self::set_object_field(self, object, field, &value)
+    }
     /// Charges every host call [`HOST_CALL_FUEL`], above the instruction
     /// that makes it.
     fn call(
@@ -3419,6 +3425,44 @@ impl InterlokoHost {
 pub const SCALAR_KEY_BIT: u64 = 1 << 63;
 
 impl InterlokoHost {
+    /// The value slot `field` of a native runtime object holds, which `obj.field` reads
+    /// without a host call: `None` for any other object, a slot it lacks, or a value that is
+    /// not inline (a callable's), which compiled code reads through `slot_get` instead.
+    #[must_use]
+    pub fn object_field(&self, object: Obj, field: u32) -> Option<Value> {
+        if object.host_type != INTERLOKO_OBJECT_TYPE {
+            return None;
+        }
+        let RuntimeObjectStorage::Native { slots } = &self.object(object).ok()?.storage else {
+            return None;
+        };
+        slots
+            .get(usize::try_from(field).ok()?)
+            .filter(|value| value.value_type().is_inline())
+            .cloned()
+    }
+
+    /// Stores `value` in slot `field` of a native runtime object for `obj.set_field`, as
+    /// `slot_set` would: checked against the slot's type and logged like any store into the
+    /// image during a turn. Returns whether it stored it.
+    pub fn set_object_field(&mut self, object: Obj, field: u32, value: &Value) -> bool {
+        if object.host_type != INTERLOKO_OBJECT_TYPE || !value.value_type().is_inline() {
+            return false;
+        }
+        let value = match *value {
+            Value::Bool(value) => ValueRef::Bool(value),
+            Value::I64(value) => ValueRef::I64(value),
+            Value::U64(value) => ValueRef::U64(value),
+            Value::F64(value) => ValueRef::F64(value),
+            Value::I32(value) => ValueRef::I32(value),
+            Value::U32(value) => ValueRef::U32(value),
+            Value::F32(value) => ValueRef::F32(value),
+            Value::Obj(value) => ValueRef::Obj(value),
+            _ => return false,
+        };
+        self.write_slot(object, SlotId(field), value).is_ok()
+    }
+
     /// The key `obj.key` reads for `object`: its class id, with
     /// [`SCALAR_KEY_BIT`] set for a boxed value that holds no runtime
     /// object. `None` for a stale or invalid handle, which traps: a handle
