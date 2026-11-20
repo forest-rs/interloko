@@ -1,5 +1,5 @@
 define class <circle> (<object>)
-  constant slot radius :: <integer>, required-init-keyword: r:, init-value: 10;
+  constant slot radius :: <integer>, init-keyword: r:, init-value: 10;
   slot cached, init-value: #t;
 end;
 

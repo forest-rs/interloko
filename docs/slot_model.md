@@ -31,12 +31,34 @@ define class <circle> (<object>)
 end;
 ```
 
-`init-value:` supplies a default expression when construction omits the slot.
+A slot may have a default, the value a `make` that does not pass its keyword
+gives it. As in Dylan, there are three ways to write one, and a slot takes at
+most one of them:
+
+```loko
+define class <env> (<object>)
+  slot bindings :: <table> = make(<table>);          // at each make
+  slot parent, init-value: #f;                        // evaluated once
+  slot log :: <string-builder>, init-function: fresh-log;  // called at each make
+end;
+```
+
+- `slot x = expr` evaluates `expr` at each `make` that takes it, in slot
+  order, so each instance gets its own value. It may be any expression, a
+  `begin … end` body with `let`s, loops and closures included.
+- `init-function: f` calls `f` with no arguments at each such `make`.
+- `init-value: expr` evaluates `expr` once, and every instance that takes it
+  shares the value. A literal, a name or an anonymous method is one value
+  already and stays in place; any other expression is kept in a hidden
+  constant (`<env> parent init-value`), evaluated at its first read in a run
+  as a constant is, so once per run. An `init-function:`'s function is kept
+  the same way.
+
 An explicit construction keyword overrides the default:
 
 ```loko
 define class <circle> (<object>)
-  slot radius :: <integer>, required-init-keyword: r:, init-value: 10;
+  slot radius :: <integer>, init-keyword: r:, init-value: 10;
 end;
 
 define function main()
@@ -44,14 +66,16 @@ define function main()
 end;
 ```
 
-A default is evaluated afresh at each `make` that takes it, in slot order, so
-each instance gets its own value. It may be any expression, a `begin … end`
-body with `let`s, loops and closures included. A default that is more than a
-literal compiles to code of its own, with its own frame, which each such `make`
-calls; it is typed as a definition of its own, held to the session's strict
-policy, and checked against the slot's type and range there. A literal default
-(a number, boolean, symbol, metaobject, known function or constant, and any
-range check on it) is computed in place instead.
+As in Dylan, a slot has at most one construction keyword, and
+`required-init-keyword:` takes no default: a default it could never use is an
+error (`ast.slot-option-conflict`), as are two defaults or both
+`init-keyword:` and `required-init-keyword:`.
+
+A default that is more than a literal compiles to code of its own, with its own
+frame, which each such `make` calls; it is typed as a definition of its own,
+held to the session's strict policy, and checked against the slot's type and
+range there. A literal default (a number, boolean, symbol, metaobject, known
+function or constant, and any range check on it) is computed in place instead.
 
 `constant slot` records mutability metadata. In this slice it means
 construction-time assignment only; slot reads behave the same as ordinary
@@ -117,8 +141,8 @@ end;
 - Init keywords are resolved semantically before lowering. Unknown keywords,
   duplicate keywords, and missing required keywords produce focused
   diagnostics.
-- Required keywords may be omitted when the slot has an `init-value:`.
-- Explicit construction values and `init-value:` expressions are type-checked
+- A required keyword must be passed: a slot that requires one has no default.
+- Explicit construction values and defaults are type-checked
   against the slot type. For nominal object slots, that check accepts the
   declared class or any subclass.
 - Lowered IR emits object construction in initialization-plan order. The

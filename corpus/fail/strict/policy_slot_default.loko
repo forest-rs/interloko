@@ -17,7 +17,7 @@ define function pick(s :: <circle>) => <shape>
   s
 end;
 define class <holder> (<object>)
-  slot size :: <integer>, init-value: begin let s :: <shape> = pick(make(<circle>)); area(s) end;
+  slot size :: <integer> = begin let s :: <shape> = pick(make(<circle>)); area(s) end;
 end;
 define function main() => <integer>
   make(<holder>).size

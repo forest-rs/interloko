@@ -442,12 +442,30 @@ impl BaseLokoCstProjector<'_> {
             })
             .map(|option| self.build_slot_option(option))
             .collect::<Vec<_>>();
+        // `slot x = expr`: the expression is a child of the slot itself,
+        // after its `=` token.
+        let init = inner
+            .children
+            .iter()
+            .filter(|child| child.is_rule("slot-init"))
+            .filter_map(|init| {
+                init.children
+                    .iter()
+                    .find(|child| child.is_rule("expression"))
+            })
+            .map(|expr| self.build_expr(expr))
+            .collect::<Vec<_>>();
         let mut roles = Vec::new();
         self.collect_child_roles(inner, "slot-name", CstKind::SlotName, &mut roles);
         self.collect_type_roles_from_rule_children(inner, &["type-annotation"], &mut roles);
-        let excluded = options.iter().map(|option| option.span).collect::<Vec<_>>();
+        let excluded = options
+            .iter()
+            .chain(&init)
+            .map(|node| node.span)
+            .collect::<Vec<_>>();
         let mut children = self.direct_tokens(inner.span, &excluded);
         children.extend(roles.into_iter().map(CstElement::Node));
+        children.extend(init.into_iter().map(CstElement::Node));
         children.extend(options.into_iter().map(CstElement::Node));
         self.node(CstKind::SlotDecl, self.sorted(children), inner.span)
     }
@@ -460,6 +478,7 @@ impl BaseLokoCstProjector<'_> {
                 matches!(
                     child.name().unwrap_or(""),
                     "init-value-option"
+                        | "init-function-option"
                         | "init-keyword-option"
                         | "required-init-keyword-option"
                         | "extension-slot-option"

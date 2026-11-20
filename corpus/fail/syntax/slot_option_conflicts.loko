@@ -1,0 +1,20 @@
+// expect: diagnostics 4
+// expect: diagnostic code ast.slot-option-conflict
+// expect: diagnostic contains slot `a` cannot take both `init-value:` and `= expression`
+// expect: diagnostic contains slot `b` cannot take both `init-function:` and `init-value:`
+// expect: diagnostic contains slot `c` cannot take both `required-init-keyword:` and `init-keyword:`
+// expect: diagnostic contains slot `d` cannot take both `= expression` and `required-init-keyword:`
+
+// As in Dylan, a slot has at most one default and one construction
+// keyword, and a required keyword leaves no use for a default.
+
+define class <a> (<object>)
+  slot a :: <integer> = 1, init-value: 2;
+  slot b :: <integer>, init-value: 1, init-function: method () 2 end;
+  slot c :: <integer>, init-keyword: c:, required-init-keyword: see:;
+  slot d :: <integer> = 1, required-init-keyword: d:;
+end;
+
+define function main() => <integer>
+  make(<a>, c: 1, d: 2).a
+end;

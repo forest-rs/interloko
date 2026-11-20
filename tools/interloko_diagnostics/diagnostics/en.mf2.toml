@@ -11,6 +11,7 @@
 "ast.slot-option-requires-keyword" = "slot option `{ $option }` requires a keyword value"
 "ast.slot-init-value-requires-expression" = "slot option `{ $option }` requires an expression"
 "ast.unsupported-slot-option" = "unsupported slot option `{ $option }`"
+"ast.slot-option-conflict" = "slot `{ $slot }` cannot take both `{ $option }` and `{ $other }`"
 "ast.rest-results-unsupported" = "`#rest` results are not supported: a function returns a fixed number of values"
 "ast.invalid-method-specializer" = "method parameters must include explicit specializers"
 "ast.annotation-not-class" = "{ $position } `{ $name }` is declared { $type }, but it must name a class"
