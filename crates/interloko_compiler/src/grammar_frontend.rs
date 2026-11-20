@@ -3115,6 +3115,16 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
             "base_loko_primary::BaseLokoCstBuilder::collect_annotation_type_roles",
         ),
         (
+            "local-statement",
+            "`local` list-of<local-method, `,`> `;`",
+            "base_loko_primary::BaseLokoCstBuilder::build_local",
+        ),
+        (
+            "local-method",
+            "`method` value-definition-name `(` parameter-list? `)` result-annotation? body `end`",
+            "base_loko_primary::BaseLokoCstBuilder::build_local",
+        ),
+        (
             "body",
             "body-statement* expression?",
             "base_loko_primary::BaseLokoCstBuilder::build_body",
@@ -4038,6 +4048,8 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::KeywordParameter => Some("keyword-parameter"),
         CstKind::KeywordParameterName => Some("keyword-parameter-name"),
         CstKind::RestParameter => Some("rest-parameter"),
+        CstKind::LocalStmt => Some("local-statement"),
+        CstKind::LocalMethod => Some("local-method"),
         CstKind::LetName => Some("let-name"),
         CstKind::RestartName => Some("restart-name"),
         CstKind::BinaryExpr => None,
@@ -4521,7 +4533,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 95);
+        assert_eq!(grammar.effective_rules.len(), 97);
 
         assert!(
             !records

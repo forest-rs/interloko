@@ -9313,6 +9313,10 @@ impl Lowering {
         for statement in &block.statements {
             let local = match statement {
                 ast::Statement::Let(local) => local,
+                ast::Statement::Local(methods) => {
+                    statements.push(self.lower_local_methods(ctx, methods));
+                    continue;
+                }
                 ast::Statement::Expr(expr) => {
                     // A statement's values are discarded, so the arms of a
                     // conditional or a handle there need not agree.
@@ -10979,6 +10983,119 @@ impl Lowering {
             || self.resolve_function(name).is_some()
             || self.resolve_generic(name).is_some()
             || self.has_accessor(name)
+    }
+
+    /// Lowers `local method …, method …;`, binding each method to its name
+    /// for the rest of the body: one `let` of the group's closures.
+    ///
+    /// Every name is bound before any method is lowered, so each may call
+    /// itself and the others. A method that writes its result types is
+    /// called through its signature there; one that writes none, through
+    /// an untyped `<function>`, since its results are known only once its
+    /// body is. Calls after the group see each method's own signature. When
+    /// a method calls one of the group, the bindings live in shared cells
+    /// that exist before the closures capturing them are made: a `let`
+    /// whose closures capture the locals it binds is the IR's `letrec`,
+    /// which lowering makes the cells for first.
+    fn lower_local_methods(
+        &mut self,
+        ctx: &mut FunctionContext,
+        methods: &[ast::LocalMethod],
+    ) -> Statement {
+        let recursive = ast::local_methods_recursive(methods);
+        let mut locals = Vec::with_capacity(methods.len());
+        for method in methods {
+            if ctx.find_local(&method.name).is_some() {
+                ctx.diagnostics.push(
+                    Diagnostic::error(method.span, DiagnosticCode::DuplicateLocal)
+                        .with_arg(DiagnosticArg::text("local", method.name.clone())),
+                );
+            }
+            let signature = self.declared_method_signature(&method.function);
+            let local = ctx.add_local(
+                self.local_definition(method.definition, &method.name),
+                method.name.clone(),
+                ValueKind::Callable,
+                signature,
+                method.span,
+            );
+            if recursive && let Some(local) = ctx.locals.get_mut(local.0 as usize) {
+                local.shared = true;
+            }
+            locals.push(local);
+        }
+        let values = methods
+            .iter()
+            .map(|method| self.lower_expr(ctx, &method.function))
+            .collect::<Vec<_>>();
+        // Calls after the group, and only those, call each method as it is.
+        for (value, local) in values.iter().zip(&locals) {
+            let signature = self.expr_callable_signature(value);
+            if let Some(binding) = ctx.locals.get_mut(local.0 as usize) {
+                binding.callable_signature = signature;
+            }
+        }
+        let span = methods
+            .iter()
+            .map(|method| method.function.span())
+            .reduce(Span::cover)
+            .unwrap_or_default();
+        let value = match <[Expr; 1]>::try_from(values) {
+            Ok([value]) => value,
+            Err(values) => Expr::Values {
+                result_kinds: vec![ValueKind::Callable; values.len()],
+                values,
+                span,
+            },
+        };
+        Statement::Let(Let {
+            local: locals[0],
+            locals,
+            value,
+            span,
+        })
+    }
+
+    /// The signature a local method declares, before its body is lowered:
+    /// its parameters' written types or `<object>`, a `#rest` parameter's
+    /// `<vector>`, and its written results. `None` when it writes no
+    /// results, which only its body gives.
+    fn declared_method_signature(&mut self, function: &ast::Expr) -> Option<CallableSignature> {
+        let ast::Expr::Function {
+            params,
+            rest,
+            return_type,
+            ..
+        } = function
+        else {
+            return None;
+        };
+        // Lowering the method reports what its types get wrong.
+        let reported = self.diagnostics.len();
+        let results = self.resolve_result_annotation_detail(return_type.as_ref()?);
+        let mut resolved = params
+            .iter()
+            .map(|param| {
+                self.resolve_function_type_detail(param.type_annotation.as_ref(), ValueKind::Any)
+            })
+            .collect::<Vec<_>>();
+        self.diagnostics.truncate(reported);
+        if rest.is_some() {
+            resolved.push(self.rest_param_type());
+        }
+        Some(CallableSignature {
+            params: resolved.iter().map(|param| param.kind).collect(),
+            param_sigs: resolved
+                .iter()
+                .map(|param| param.callable_signature.clone())
+                .collect(),
+            param_ranges: resolved.iter().map(|param| param.range).collect(),
+            results: results.kinds,
+            result_sigs: results.callable_sigs,
+            result_ranges: results.ranges,
+            keywords: Vec::new(),
+            rest: rest.is_some(),
+        })
     }
 
     /// The type of a `#rest` parameter: a `<vector>` of the arguments

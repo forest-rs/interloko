@@ -152,6 +152,15 @@ The current slices include:
   a position takes a signature, not one in an `if` arm or `begin` there,
   and a `define generic`'s parameters carry no callable signatures, so a
   method passed in a send takes none;
+- Dylan's local methods: `local method name (params) => results body end,
+  method other (…) … end;` binds each method to its name for the rest of
+  the body, as an anonymous method closing over the body's locals. Every
+  name of a group is in scope in each of its methods, so they recurse, by
+  themselves or together, and the group's bindings then live in shared
+  cells made before the methods are. Within its group a method that writes
+  its result types is called through them, and one that writes none as an
+  untyped `<function>`, its results known only once its body is; after the
+  group each is called as itself;
 - closures that share assigned locals: a `let` local or parameter that is
   assigned and that a closure refers to lives in a heap cell its frame and
   every capturing closure use, so counters, accumulators and callbacks that

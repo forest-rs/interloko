@@ -470,7 +470,7 @@ impl Block {
             .iter()
             .filter_map(|statement| match statement {
                 Statement::Let(binding) => Some(&**binding),
-                Statement::Expr(_) => None,
+                Statement::Expr(_) | Statement::Local(_) => None,
             })
     }
 }
@@ -482,6 +482,37 @@ pub enum Statement {
     Let(Box<Let>),
     /// `expression;`: evaluated for its effects, its values discarded.
     Expr(Expr),
+    /// Dylan's `local method name (…) … end, method other (…) … end;`:
+    /// methods bound to their names for the rest of the body. Each may
+    /// call itself and the others, which are in scope in every body of the
+    /// group.
+    Local(Vec<LocalMethod>),
+}
+
+/// One method of a [`Statement::Local`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalMethod {
+    /// Stable definition identity for the local binding.
+    pub definition: DefinitionId,
+    /// The name the method is bound to.
+    pub name: String,
+    /// The method, an [`Expr::Function`].
+    pub function: Expr,
+    /// Source span of the name.
+    pub span: Span,
+}
+
+/// Whether some method of the local method group `methods` calls or
+/// mentions a method of the group, itself included: then each is bound
+/// before any is made, as a closure that calls one must capture it.
+#[must_use]
+pub fn local_methods_recursive(methods: &[LocalMethod]) -> bool {
+    let mut assigned = Vec::new();
+    let mut captured = Vec::new();
+    for method in methods {
+        collect_names(&method.function, false, &mut assigned, &mut captured);
+    }
+    methods.iter().any(|method| captured.contains(&method.name))
 }
 
 /// When a conditional loop runs its body.
@@ -1091,6 +1122,11 @@ impl Block {
             match statement {
                 Statement::Let(binding) => visit(&binding.value),
                 Statement::Expr(expr) => visit(expr),
+                Statement::Local(methods) => {
+                    for method in methods {
+                        visit(&method.function);
+                    }
+                }
             }
         }
         visit(&self.result);
@@ -2196,6 +2232,9 @@ impl<'tree> Lowering<'tree> {
                 CstKind::LetStmt => {
                     statements.push(Statement::Let(Box::new(self.lower_let(child_node))));
                 }
+                CstKind::LocalStmt => {
+                    statements.push(Statement::Local(self.lower_local(child_node)));
+                }
                 CstKind::ExprStmt => {
                     let expr = child_node.children.iter().find_map(|child| match child {
                         CstElement::Node(expr) => Some(expr),
@@ -2398,6 +2437,31 @@ impl<'tree> Lowering<'tree> {
                 span: node.span,
             },
         }
+    }
+
+    /// Lowers `local method name (…) … end, …;`: each method as an
+    /// anonymous method bound to its name.
+    fn lower_local(&mut self, node: &CstNode) -> Vec<LocalMethod> {
+        node.child_nodes(CstKind::LocalMethod)
+            .map(|method| {
+                let name_node = method.child_nodes(CstKind::ValueDefinitionName).next();
+                let (name, span) = name_node.map_or_else(
+                    || (String::new(), method.span),
+                    |name| {
+                        (
+                            self.tree.source[name.span.start..name.span.end].to_string(),
+                            name.span,
+                        )
+                    },
+                );
+                LocalMethod {
+                    definition: self.definition(DefinitionKind::Local, &name, ""),
+                    function: self.lower_method_expr(method),
+                    name,
+                    span,
+                }
+            })
+            .collect()
     }
 
     fn lower_method_expr(&mut self, node: &CstNode) -> Expr {
@@ -4677,6 +4741,42 @@ mod tests {
         // `in` is not reserved either.
         assert_eq!(third.binding.name, "in");
         assert!(matches!(&*third.collection, Expr::Name { name, .. } if name == "in"));
+    }
+
+    #[test]
+    fn a_local_method_group_binds_each_method_to_its_name() {
+        let tree = parse(
+            "define function f()\n  \
+               local method even? (n) odd?(n) end, method odd? (n :: <integer>) => <boolean> #t end;\n  \
+               local method one () 1 end;\n  even?(1)\nend;",
+        );
+        assert_eq!(tree.diagnostics, Vec::new());
+        let module = lower(&tree);
+        assert_eq!(module.diagnostics, Vec::new());
+        let groups = module.functions[0]
+            .body
+            .statements
+            .iter()
+            .map(|statement| match statement {
+                Statement::Local(methods) => methods
+                    .iter()
+                    .map(|method| {
+                        assert!(matches!(method.function, Expr::Function { .. }));
+                        method.name.as_str()
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(groups, [vec!["even?", "odd?"], vec!["one"]]);
+        let Statement::Local(methods) = &module.functions[0].body.statements[0] else {
+            panic!("expected a local method group");
+        };
+        assert!(local_methods_recursive(methods));
+        let Statement::Local(methods) = &module.functions[0].body.statements[1] else {
+            panic!("expected a local method group");
+        };
+        assert!(!local_methods_recursive(methods));
     }
 
     #[test]

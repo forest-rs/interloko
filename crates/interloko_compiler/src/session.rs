@@ -8251,6 +8251,14 @@ fn dump_ast_block(out: &mut String, block: &ast::Block, indent: usize) {
                 let _ = writeln!(out, "effect");
                 dump_ast_expr(out, expr, indent + 4);
             }
+            ast::Statement::Local(methods) => {
+                let _ = writeln!(out, "local methods={}", methods.len());
+                for method in methods {
+                    indent_line(out, indent + 4);
+                    let _ = writeln!(out, "method {} {}", method.definition, method.name);
+                    dump_ast_expr(out, &method.function, indent + 6);
+                }
+            }
         }
     }
     indent_line(out, indent + 2);
