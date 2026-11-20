@@ -1,0 +1,450 @@
+// A small Lisp interpreter: a reader, an evaluator over environments and
+// closures, and a printer. The `lisp` bench runs `(fib n)` in it to measure
+// what an interpreted procedure call costs in object-heavy Loko code.
+
+// --- lists and symbols -------------------------------------------------
+
+define abstract class <lisp-list> (<object>) end;
+
+define class <lisp-empty> (<lisp-list>) end;
+
+define constant $nil :: <lisp-empty> = make(<lisp-empty>);
+
+define class <lisp-pair> (<lisp-list>)
+  constant slot head, required-init-keyword: head:;
+  slot tail, required-init-keyword: tail:;
+end;
+
+define function pair(head, tail) => <lisp-pair>
+  make(<lisp-pair>, head: head, tail: tail)
+end;
+
+define function list-size(l) => <integer>
+  let n = 0;
+  while (instance?(l, <lisp-pair>))
+    n := n + 1;
+    l := l.tail
+  end;
+  n
+end;
+
+define function nth(l, n :: <integer>) => <object>
+  for (i from 0 below n) l := as(<lisp-pair>, l).tail end;
+  as(<lisp-pair>, l).head
+end;
+
+define function reverse!(l) => <object>
+  let result :: <object> = $nil;
+  while (instance?(l, <lisp-pair>))
+    let next = l.tail;
+    l.tail := result;
+    result := l;
+    l := next
+  end;
+  result
+end;
+
+define function lisp-map(f :: callable(<object>) => <object>, l) => <object>
+  if (instance?(l, <lisp-pair>)) pair(f(l.head), lisp-map(f, l.tail)) else $nil end
+end;
+
+define class <lisp-symbol> (<object>)
+  constant slot name :: <string>, required-init-keyword: name:;
+end;
+
+define constant $symbols :: <table> = make(<table>);
+
+define function intern(name :: <string>) => <lisp-symbol>
+  if (key-exists?($symbols, name))
+    as(<lisp-symbol>, $symbols[name])
+  else
+    $symbols[name] := make(<lisp-symbol>, name: name)
+  end
+end;
+
+define constant $quote = intern("quote");
+define constant $if = intern("if");
+define constant $define = intern("define");
+define constant $lambda = intern("lambda");
+define constant $let = intern("let");
+define constant $begin = intern("begin");
+define constant $set! = intern("set!");
+
+// --- conditions ----------------------------------------------------------
+
+define abstract class <lisp-error> (<error>) end;
+
+define class <unbound-variable> (<lisp-error>)
+  constant slot variable-name :: <lisp-symbol>, required-init-keyword: name:;
+end;
+
+define class <syntax-error> (<lisp-error>)
+  constant slot form, required-init-keyword: form:;
+  constant slot reason :: <string>, required-init-keyword: reason:;
+end;
+
+define class <read-error> (<lisp-error>)
+  constant slot position :: <string-position>, required-init-keyword: position:;
+  constant slot reason :: <string>, required-init-keyword: reason:;
+end;
+
+// --- environments --------------------------------------------------------
+
+define class <environment> (<object>)
+  constant slot bindings :: <table>, init-value: make(<table>);
+  constant slot parent, init-value: #f, init-keyword: parent:;
+end;
+
+define function binding-frame(env :: <environment>, name :: <lisp-symbol>) => <environment>
+  let frame :: <object> = env;
+  while (instance?(frame, <environment>) & ~key-exists?(frame.bindings, name))
+    frame := frame.parent
+  end;
+  if (instance?(frame, <environment>))
+    frame
+  else
+    signal(make(<unbound-variable>, name: name))
+  end
+end;
+
+define function lookup(env :: <environment>, name :: <lisp-symbol>) => <object>
+  binding-frame(env, name).bindings[name]
+end;
+
+define function define-variable!(env :: <environment>, name :: <lisp-symbol>, value)
+ => <lisp-symbol>
+  env.bindings[name] := value;
+  name
+end;
+
+define function set-variable!(env :: <environment>, name :: <lisp-symbol>, value) => <object>
+  binding-frame(env, name).bindings[name] := value
+end;
+
+// --- procedures ----------------------------------------------------------
+
+define abstract class <procedure> (<object>) end;
+
+define class <primitive> (<procedure>)
+  constant slot name :: <string>, required-init-keyword: name:;
+  constant slot code :: callable(<object>) => <object>, required-init-keyword: code:;
+end;
+
+define class <closure> (<procedure>)
+  constant slot parameters, required-init-keyword: parameters:;
+  constant slot body, required-init-keyword: body:;
+  constant slot environment :: <environment>, required-init-keyword: environment:;
+end;
+
+define generic invoke(procedure, arguments) => <object>;
+
+define method invoke(p :: <primitive>, arguments :: <object>) => <object>
+  p.code(arguments)
+end;
+
+define method invoke(c :: <closure>, arguments :: <object>) => <object>
+  unless (list-size(c.parameters) = list-size(arguments))
+    signal(make(<syntax-error>, form: pair(c, arguments), reason: "wrong number of arguments"))
+  end;
+  let frame = make(<environment>, parent: c.environment);
+  let names = c.parameters;
+  while (instance?(names, <lisp-pair>))
+    define-variable!(frame, as(<lisp-symbol>, names.head), as(<lisp-pair>, arguments).head);
+    names := names.tail;
+    arguments := as(<lisp-pair>, arguments).tail
+  end;
+  evaluate-body(c.body, frame)
+end;
+
+define method invoke(p :: <object>, arguments :: <object>) => <object>
+  signal(make(<syntax-error>, form: p, reason: "not a procedure"))
+end;
+
+// --- the reader ----------------------------------------------------------
+
+define class <reader> (<object>)
+  constant slot text :: <string>, required-init-keyword: text:;
+  slot position :: <string-position>, required-init-keyword: position:;
+end;
+
+define function at-end?(r :: <reader>) => <boolean>
+  r.position = end-position(r.text)
+end;
+
+define function peek-char(r :: <reader>) => <character>
+  r.text[r.position]
+end;
+
+define function advance!(r :: <reader>) => ()
+  r.position := next-position(r.text, r.position)
+end;
+
+define function read-error(r :: <reader>, reason :: <string>) => <object>
+  signal(make(<read-error>, position: r.position, reason: reason))
+end;
+
+define function delimiter?(c :: <character>) => <boolean>
+  whitespace?(c) | c = '(' | c = ')' | c = '\''
+end;
+
+define function skip-whitespace(r :: <reader>) => ()
+  while (~at-end?(r) & whitespace?(peek-char(r))) advance!(r) end
+end;
+
+define function read-datum(r :: <reader>) => <object>
+  skip-whitespace(r);
+  if (at-end?(r))
+    read-error(r, "unexpected end of input")
+  else
+    select (peek-char(r))
+      '(' => advance!(r); read-list-tail(r);
+      ')' => read-error(r, "unexpected )");
+      '\'' => advance!(r); pair($quote, pair(read-datum(r), $nil));
+      otherwise => read-atom(r);
+    end
+  end
+end;
+
+define function read-list-tail(r :: <reader>) => <object>
+  skip-whitespace(r);
+  if (at-end?(r))
+    read-error(r, "unclosed list")
+  elseif (peek-char(r) = ')')
+    advance!(r);
+    $nil
+  else
+    let first = read-datum(r);
+    pair(first, read-list-tail(r))
+  end
+end;
+
+define function parse-integer(token :: <string>) => <object>
+  let result :: <object> = #f;
+  let negative? = starts-with?(token, "-") & size(token) > 1;
+  let p = if (negative?) next-position(token, start-position(token)) else start-position(token) end;
+  unless (p = end-position(token))
+    let n = 0;
+    let digits? = #t;
+    for (c in copy-sequence(token, start: p, end: end-position(token)))
+      if (digit?(c)) n := n * 10 + digit-value(c) end;
+      unless (digit?(c)) digits? := #f end
+    end;
+    if (digits?) result := if (negative?) - n else n end end
+  end;
+  result
+end;
+
+define function read-atom(r :: <reader>) => <object>
+  let start = r.position;
+  while (~at-end?(r) & ~delimiter?(peek-char(r))) advance!(r) end;
+  let token = copy-sequence(r.text, start: start, end: r.position);
+  if (token = "#t")
+    #t
+  elseif (token = "#f")
+    #f
+  else
+    let n = parse-integer(token);
+    if (n == #f) intern(token) else n end
+  end
+end;
+
+define function read-all(text :: <string>) => <object>
+  let r = make(<reader>, text: text, position: start-position(text));
+  let forms :: <object> = $nil;
+  skip-whitespace(r);
+  while (~at-end?(r))
+    forms := pair(read-datum(r), forms);
+    skip-whitespace(r)
+  end;
+  reverse!(forms)
+end;
+
+// --- the evaluator -------------------------------------------------------
+
+define function check-syntax(form, ok? :: <boolean>, reason :: <string>) => ()
+  unless (ok?) signal(make(<syntax-error>, form: form, reason: reason)) end
+end;
+
+define function evaluate-body(body, env :: <environment>) => <object>
+  let result :: <object> = #f;
+  while (instance?(body, <lisp-pair>))
+    result := evaluate(body.head, env);
+    body := body.tail
+  end;
+  result
+end;
+
+define generic evaluate(form, env :: <environment>) => <object>;
+
+define method evaluate(form :: <object>, env :: <environment>) => <object>
+  form
+end;
+
+define method evaluate(form :: <lisp-symbol>, env :: <environment>) => <object>
+  lookup(env, form)
+end;
+
+define method evaluate(form :: <lisp-empty>, env :: <environment>) => <object>
+  signal(make(<syntax-error>, form: form, reason: "empty combination"))
+end;
+
+define method evaluate(form :: <lisp-pair>, env :: <environment>) => <object>
+  let n = list-size(form);
+  select (form.head)
+    $quote =>
+      check-syntax(form, n = 2, "quote takes one datum");
+      nth(form, 1);
+    $if =>
+      check-syntax(form, n = 3 | n = 4, "if takes 2 or 3 operands");
+      if (evaluate(nth(form, 1), env) ~== #f)
+        evaluate(nth(form, 2), env)
+      elseif (n = 4)
+        evaluate(nth(form, 3), env)
+      else
+        #f
+      end;
+    $define =>
+      check-syntax(form, n >= 3, "define takes a name and a value");
+      let target = nth(form, 1);
+      if (instance?(target, <lisp-pair>))
+        define-variable!(env, as(<lisp-symbol>, target.head),
+                         make(<closure>, parameters: target.tail,
+                              body: as(<lisp-pair>, form.tail).tail, environment: env))
+      else
+        define-variable!(env, as(<lisp-symbol>, target), evaluate(nth(form, 2), env))
+      end;
+    $lambda =>
+      check-syntax(form, n >= 3, "lambda takes parameters and a body");
+      make(<closure>, parameters: nth(form, 1), body: as(<lisp-pair>, form.tail).tail,
+           environment: env);
+    $let =>
+      check-syntax(form, n >= 3, "let takes bindings and a body");
+      let frame = make(<environment>, parent: env);
+      let bindings = nth(form, 1);
+      while (instance?(bindings, <lisp-pair>))
+        let binding = bindings.head;
+        define-variable!(frame, as(<lisp-symbol>, nth(binding, 0)), evaluate(nth(binding, 1), env));
+        bindings := bindings.tail
+      end;
+      evaluate-body(as(<lisp-pair>, form.tail).tail, frame);
+    $begin =>
+      evaluate-body(form.tail, env);
+    $set! =>
+      check-syntax(form, n = 3, "set! takes a name and a value");
+      set-variable!(env, as(<lisp-symbol>, nth(form, 1)), evaluate(nth(form, 2), env));
+    otherwise =>
+      invoke(evaluate(form.head, env),
+             lisp-map(method (argument) evaluate(argument, env) end, form.tail));
+  end
+end;
+
+// --- the printer ---------------------------------------------------------
+
+define generic print-to(out :: <string-builder>, datum) => ();
+
+define method print-to(out :: <string-builder>, n :: <integer>) => ()
+  add!(out, integer-to-string(n))
+end;
+
+define method print-to(out :: <string-builder>, b :: <boolean>) => ()
+  add!(out, if (b) "#t" else "#f" end)
+end;
+
+define method print-to(out :: <string-builder>, s :: <lisp-symbol>) => ()
+  add!(out, s.name)
+end;
+
+define method print-to(out :: <string-builder>, l :: <lisp-empty>) => ()
+  add!(out, "()")
+end;
+
+define method print-to(out :: <string-builder>, p :: <lisp-pair>) => ()
+  if (p.head == $quote & list-size(p) = 2)
+    add!(out, '\'');
+    print-to(out, nth(p, 1))
+  else
+    add!(out, '(');
+    print-to(out, p.head);
+    let rest = p.tail;
+    while (instance?(rest, <lisp-pair>))
+      add!(out, ' ');
+      print-to(out, rest.head);
+      rest := rest.tail
+    end;
+    unless (rest == $nil)
+      add!(out, " . ");
+      print-to(out, rest)
+    end;
+    add!(out, ')')
+  end
+end;
+
+define method print-to(out :: <string-builder>, p :: <primitive>) => ()
+  add!(out, "#<primitive ");
+  add!(out, p.name);
+  add!(out, ">")
+end;
+
+define method print-to(out :: <string-builder>, c :: <closure>) => ()
+  add!(out, "#<closure>")
+end;
+
+define function print-datum(datum) => <string>
+  let out = make(<string-builder>);
+  print-to(out, datum);
+  as(<string>, out)
+end;
+
+// --- the global environment ----------------------------------------------
+
+define function fold(f :: callable(<object>, <object>) => <object>, initial, l) => <object>
+  let result = initial;
+  while (instance?(l, <lisp-pair>))
+    result := f(result, l.head);
+    l := l.tail
+  end;
+  result
+end;
+
+define function global-environment() => <environment>
+  let env = make(<environment>);
+  let primitive = method (name :: <string>, code :: callable(<object>) => <object>) => ()
+    define-variable!(env, intern(name), make(<primitive>, name: name, code: code))
+  end;
+  primitive("+", method (xs) fold(method (a, b) a + b end, 0, xs) end);
+  primitive("*", method (xs) fold(method (a, b) a * b end, 1, xs) end);
+  primitive("-", method (xs)
+                   let first = nth(xs, 0);
+                   let rest = as(<lisp-pair>, xs).tail;
+                   if (rest == $nil) - first else fold(method (a, b) a - b end, first, rest) end
+                 end);
+  primitive("<", method (xs) nth(xs, 0) < nth(xs, 1) end);
+  primitive("=", method (xs) nth(xs, 0) = nth(xs, 1) end);
+  primitive("car", method (xs) as(<lisp-pair>, nth(xs, 0)).head end);
+  primitive("cdr", method (xs) as(<lisp-pair>, nth(xs, 0)).tail end);
+  primitive("cons", method (xs) pair(nth(xs, 0), nth(xs, 1)) end);
+  primitive("null?", method (xs) nth(xs, 0) == $nil end);
+  primitive("list", method (xs) xs end);
+  env
+end;
+
+define function run(source :: <string>, env :: <environment>) => <object>
+  evaluate-body(read-all(source), env)
+end;
+
+define function run-to-string(source :: <string>) => <string>
+  print-datum(run(source, global-environment()))
+end;
+
+
+// --- benchmark entry points ----------------------------------------------
+
+define function fib-program(n :: <string>) => <string>
+  run-to-string(concatenate("(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))",
+                            concatenate(" (fib ", concatenate(n, ")"))))
+end;
+
+define function fib-1() => <string> fib-program("1") end;
+define function fib-2() => <string> fib-program("2") end;
+define function fib-5() => <string> fib-program("5") end;
+define function fib-16() => <string> fib-program("16") end;

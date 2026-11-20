@@ -38,3 +38,8 @@ required-features = ["std"]
 name = "typed"
 harness = false
 required-features = ["std"]
+
+[[bench]]
+name = "lisp"
+harness = false
+required-features = ["std"]
