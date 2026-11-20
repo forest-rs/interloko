@@ -164,6 +164,7 @@ impl KernelTree {
         Expr::Function {
             id: self.id(),
             params,
+            rest: None,
             return_type: Some(ResultAnnotation {
                 values: vec![named(result)],
                 span: Self::span(),

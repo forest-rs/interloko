@@ -1476,6 +1476,11 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::make_vector_signature(),
         ),
         (
+            RuntimeOp::VectorTail,
+            runtime::VECTOR_TAIL,
+            runtime::vector_tail_signature(),
+        ),
+        (
             RuntimeOp::MakeTable,
             runtime::MAKE_TABLE,
             runtime::make_table_signature(),
@@ -3900,10 +3905,10 @@ mod tests {
     }
 
     #[test]
-    fn emits_known_callable_apply_through_indirect_call_signature() {
+    fn emits_known_callable_call_through_indirect_call_signature() {
         let module = lower_source(
             "define function inc(x :: <integer>)\n  x + 1\nend;\n\
-             define function main()\n  let f = inc;\n  apply(f, 2)\nend;",
+             define function main()\n  let f = inc;\n  (f)(2)\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
         let program = tape.program().program();
@@ -3917,12 +3922,12 @@ mod tests {
     }
 
     #[test]
-    fn emits_generic_callable_apply_through_indirect_dispatcher() {
+    fn emits_generic_callable_call_through_indirect_dispatcher() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
-             define function main()\n  let g = area;\n  apply(g, make(<circle>, radius: 5))\nend;",
+             define function main()\n  let g = area;\n  (g)(make(<circle>, radius: 5))\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");
         let program = tape.program().program();
@@ -3941,10 +3946,10 @@ mod tests {
     }
 
     #[test]
-    fn emits_runtime_callable_parameter_apply_through_indirect_call() {
+    fn emits_runtime_callable_parameter_call_through_indirect_call() {
         let module = lower_source(
             "define function inc(x)\n  x + 1\nend;\n\
-             define function callit(f :: <callable>) => <integer>\n  apply(f, 41)\nend;\n\
+             define function callit(f :: <callable>) => <integer>\n  f(41)\nend;\n\
              define function main()\n  callit(inc)\nend;",
         );
         let tape = emit(&module).expect("tape emission should succeed");

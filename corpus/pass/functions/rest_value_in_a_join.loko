@@ -1,0 +1,18 @@
+// expect: run 13
+// expect: diagnostics 0
+
+// A call through a value that may be either of two methods, one taking
+// `#rest`, passes it its arguments as the value's shape says.
+
+define function pick(c :: <boolean>) => <integer>
+  let f = if (c)
+            method (a :: <integer>, #rest xs) => <integer> 10 * a + size(xs) end
+          else
+            method (a :: <integer>, b :: <string>) => <integer> 1000 end
+          end;
+  f(1, 2, 3, 4)
+end;
+
+define function main() => <integer>
+  pick(#t)
+end;

@@ -317,6 +317,26 @@ pub struct CallableSignature {
     /// pass it, and the value's entry fills its default and checks its
     /// type.
     pub keywords: Vec<CallableKeyword>,
+    /// Whether the last of `params` is a `#rest` parameter, a `<vector>`:
+    /// a call passes the arguments after the required ones in a vector
+    /// it makes, rather than one for each parameter.
+    pub rest: bool,
+}
+
+/// How an [`Expr::CallableCall`] passes the value its arguments.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum CallArguments {
+    /// One argument for each of the value's parameters, as its signature
+    /// declares them, or for each the untyped call passes.
+    #[default]
+    Each,
+    /// The value's signature takes `#rest`: the last argument is the
+    /// `<vector>` of the arguments after the required ones, which the
+    /// call made.
+    Rest,
+    /// `apply`'s: the one argument is a `<vector>` of every argument,
+    /// however many the value takes.
+    Spread,
 }
 
 /// One `#key` parameter of a [`CallableSignature`].
@@ -341,7 +361,15 @@ impl CallableSignature {
             params,
             results,
             keywords: Vec::new(),
+            rest: false,
         }
+    }
+
+    /// The number of arguments a call must pass at least: every
+    /// parameter's, or every one before the `#rest` parameter.
+    #[must_use]
+    pub fn required(&self) -> usize {
+        self.params.len() - usize::from(self.rest)
     }
 
     /// Returns the signature of the zero-based parameter `index`, when it is
@@ -397,6 +425,14 @@ const BUILT_IN_TAG: u64 = 0x0062_7569_6c74_696e;
 
 /// The parameters of a built-in's value, in order.
 const BUILT_IN_PARAMS: &[&str] = &["a", "b", "c", "d"];
+
+/// The hidden locals `apply` evaluates into: its function, the vector of
+/// its arguments, its sequence, and each element as it is collected. A
+/// space cannot appear in a source name.
+const APPLY_FUNCTION: &str = "apply function";
+const APPLY_ARGUMENTS: &str = "apply arguments";
+const APPLY_SEQUENCE: &str = "apply sequence";
+const APPLY_ELEMENT: &str = "apply element";
 
 /// How diagnostics name the callee of a call of an operand's value, such
 /// as `f(1)(2)`, which has no name of its own.
@@ -1492,7 +1528,11 @@ impl Module {
             ),
             None => self.value_contracts(&method.result_kinds, &[], &[], &mut outer),
         };
-        Contract { params, results }
+        Contract {
+            params,
+            results,
+            rest: false,
+        }
     }
 
     /// Returns `function`'s contract; see [`Self::contract`].
@@ -1528,6 +1568,7 @@ impl Module {
                 &generic.result_ranges,
                 outer,
             ),
+            rest: false,
         }
     }
 
@@ -1549,6 +1590,7 @@ impl Module {
                 &function.result_ranges,
                 outer,
             ),
+            rest: function.rest,
         }
     }
 
@@ -1614,6 +1656,7 @@ impl Module {
                         &signature.result_ranges,
                         outer,
                     ),
+                    rest: signature.rest,
                 };
                 outer.pop();
                 Some(CallableContract::Signature(Box::new(contract)))
@@ -3378,6 +3421,11 @@ pub struct Function {
     pub entry_checks: Vec<EntryCheck>,
     /// The `#key` parameters, the last of `params`, in declaration order.
     pub keywords: Vec<KeywordParam>,
+    /// Whether the last of `params` is Dylan's `#rest` parameter, a
+    /// `<vector>` of the arguments after the required ones. A direct call
+    /// makes the vector; a call through the function's value passes its
+    /// boxed entry every argument in one.
+    pub rest: bool,
     /// `define strict function`: typing must prove the checks the compiler
     /// inserts into the body (see [`crate::typing`]).
     pub strict: bool,
@@ -3519,6 +3567,9 @@ pub struct Closure {
     /// Checks the closure's entry makes; a closure is only ever entered
     /// indirectly. Its sites belong to the body that creates it.
     pub entry_checks: Vec<EntryCheck>,
+    /// Whether the last of `params` is Dylan's `#rest` parameter, a
+    /// `<vector>` of the arguments after the required ones.
+    pub rest: bool,
     /// Whether this is a `handle` clause's restart guard, which the handler
     /// search calls with the condition at the clause's class and which never
     /// becomes a callable value. Every other closure is a callable value,
@@ -4556,6 +4607,8 @@ pub enum Expr {
         callable: Box<Expr>,
         /// Argument expressions.
         args: Vec<Expr>,
+        /// How `args` pass the value its arguments.
+        arguments: CallArguments,
         /// Expected argument categories for this indirect call.
         arg_kinds: Vec<ValueKind>,
         /// The keywords the last `keywords.len()` arguments pass, each a
@@ -5215,7 +5268,10 @@ pub fn lower_with_host_registry(module: &ast::Module, registry: &HostMetaRegistr
 struct FunctionSymbol {
     name: String,
     id: FunctionId,
+    /// The parameters' kinds, a `#rest` parameter's last.
     param_kinds: Vec<ValueKind>,
+    /// Whether the last parameter is a `#rest` parameter.
+    rest: bool,
     param_callable_sigs: Vec<Option<CallableSignature>>,
     param_ranges: Vec<Option<IntRange>>,
     return_kinds: Vec<ValueKind>,
@@ -5228,6 +5284,12 @@ struct FunctionSymbol {
 impl FunctionSymbol {
     fn arity(&self) -> usize {
         self.param_kinds.len()
+    }
+
+    /// The number of arguments a call passes at least: every parameter's,
+    /// or every one before the `#rest` parameter.
+    fn required(&self) -> usize {
+        self.arity() - usize::from(self.rest)
     }
 }
 
@@ -8177,13 +8239,16 @@ impl Lowering {
     /// The symbol of `function`, whose id is `id`: its parameters' and
     /// declared results' types.
     fn function_symbol(&mut self, id: FunctionId, function: &ast::Function) -> FunctionSymbol {
-        let params = function
+        let mut params = function
             .params
             .iter()
             .map(|param| {
                 self.resolve_function_type_detail(param.type_annotation.as_ref(), ValueKind::Any)
             })
             .collect::<Vec<_>>();
+        if function.rest.is_some() {
+            params.push(self.rest_param_type());
+        }
         let param_callable_sigs = params
             .iter()
             .map(|param| param.callable_signature.clone())
@@ -8205,6 +8270,7 @@ impl Lowering {
             name: function.name.clone(),
             id,
             param_kinds,
+            rest: function.rest.is_some(),
             param_callable_sigs,
             param_ranges,
             return_kinds,
@@ -9035,7 +9101,13 @@ impl Lowering {
         let mut params = Vec::new();
         let symbol = self.functions.get(id.0 as usize).cloned();
 
-        for (index, param) in function.params.iter().enumerate() {
+        // A `#rest` parameter is the last, a `<vector>` the call makes.
+        for (index, param) in function
+            .params
+            .iter()
+            .chain(function.rest.as_ref())
+            .enumerate()
+        {
             if ctx.find_local(&param.name).is_some() {
                 ctx.diagnostics.push(
                     Diagnostic::error(param.span, DiagnosticCode::DuplicateLocal)
@@ -9173,6 +9245,7 @@ impl Lowering {
             return_annotation,
             entry_checks: Vec::new(),
             keywords: self.keyword_params(self.keyword_functions.iter(), &function.name),
+            rest: function.rest.is_some(),
             strict: function.strict,
             kernel: false,
             span: function.span,
@@ -9609,6 +9682,7 @@ impl Lowering {
         let signature = signature?;
         let ast::Expr::Function {
             params,
+            rest,
             return_type,
             body,
             span,
@@ -9620,6 +9694,7 @@ impl Lowering {
         Some(self.lower_closure_expr(
             ctx,
             params,
+            rest.as_deref(),
             return_type.as_ref(),
             body,
             *span,
@@ -9835,11 +9910,20 @@ impl Lowering {
             },
             ast::Expr::Function {
                 params,
+                rest,
                 return_type,
                 body,
                 span,
                 ..
-            } => self.lower_closure_expr(ctx, params, return_type.as_ref(), body, *span, None),
+            } => self.lower_closure_expr(
+                ctx,
+                params,
+                rest.as_deref(),
+                return_type.as_ref(),
+                body,
+                *span,
+                None,
+            ),
             // `$unsupplied` is reserved, so it always means the kernel's.
             ast::Expr::Name { name, span, .. } if name == keywords::UNSUPPLIED => {
                 self.unsupplied(*span)
@@ -10482,7 +10566,7 @@ impl Lowering {
             return self.lower_integer_division(ctx, id, rounding, args, span, expected_results);
         }
         match callee {
-            "apply" => return self.lower_apply(ctx, args, expected_results, span),
+            "apply" => return self.lower_apply(ctx, id, args, expected_results, span),
             "list" | ast::KERNEL_LIST => {
                 let elements = args
                     .iter()
@@ -10897,13 +10981,28 @@ impl Lowering {
             || self.has_accessor(name)
     }
 
+    /// The type of a `#rest` parameter: a `<vector>` of the arguments
+    /// after the required ones, which the call makes.
+    fn rest_param_type(&self) -> ResolvedType {
+        ResolvedType {
+            kind: ValueKind::Vector(
+                self.builtin_value_class(BuiltinValueClass::Vector)
+                    .unwrap_or(ClassId(u32::MAX)),
+            ),
+            callable_signature: None,
+            range: None,
+        }
+    }
+
     /// Lowers the anonymous method `method (params) => return_type body
     /// end`, taking what it leaves unwritten from the `expected` signature
     /// of the position it is written in; see [`ExpectedSignature`].
+    #[allow(clippy::too_many_arguments)]
     fn lower_closure_expr(
         &mut self,
         ctx: &mut FunctionContext,
         params: &[ast::FunctionParam],
+        rest: Option<&ast::FunctionParam>,
         return_type: Option<&ast::ResultAnnotation>,
         body: &ast::Block,
         span: Span,
@@ -10928,15 +11027,20 @@ impl Lowering {
             result_ranges: vec![None],
             return_annotation: None,
             entry_checks: Vec::new(),
+            rest: false,
             restart_guard: false,
             expected: None,
             span,
         });
 
         // A signature of the method's arity without keywords lends its
-        // types to what the method leaves unwritten.
+        // types to what the method leaves unwritten; a method taking
+        // `#rest` takes none.
         let expected = expected.filter(|signature| {
-            signature.params.len() == params.len() && signature.keywords.is_empty()
+            signature.params.len() == params.len()
+                && signature.keywords.is_empty()
+                && !signature.rest
+                && rest.is_none()
         });
         let mut closure_ctx =
             FunctionContext::for_closure(ctx.visible_local_sources(), ctx.exit_definitions.clone());
@@ -10978,6 +11082,33 @@ impl Lowering {
                 param.span,
             );
             closure_ctx.limit_local(local, resolved.range);
+            closure_ctx.allow_assignment(local);
+            param_ids.push(local);
+        }
+        // A `#rest` parameter is the last, a `<vector>` the call makes.
+        if let Some(rest) = rest {
+            if closure_ctx.find_local(&rest.name).is_some() {
+                closure_ctx.diagnostics.push(
+                    Diagnostic::error(rest.span, DiagnosticCode::DuplicateLocal)
+                        .with_arg(DiagnosticArg::text("local", rest.name.clone())),
+                );
+            }
+            let kind = self.rest_param_type().kind;
+            param_kinds.push(kind);
+            param_callable_sigs.push(None);
+            param_ranges.push(None);
+            let local = closure_ctx.add_local(
+                DefinitionId::new(
+                    self.source_file,
+                    DefinitionKind::Local,
+                    &rest.name,
+                    &format!("closure:{}:param", id.0),
+                ),
+                rest.name.clone(),
+                kind,
+                None,
+                rest.span,
+            );
             closure_ctx.allow_assignment(local);
             param_ids.push(local);
         }
@@ -11094,6 +11225,7 @@ impl Lowering {
                 result_ranges: result_ranges.clone(),
                 return_annotation,
                 entry_checks: Vec::new(),
+                rest: rest.is_some(),
                 restart_guard: false,
                 expected: expected
                     .map(|signature| ExpectedSignature {
@@ -11117,6 +11249,7 @@ impl Lowering {
             result_sigs: result_callable_sigs,
             result_ranges,
             keywords: Vec::new(),
+            rest: rest.is_some(),
         };
         Expr::Closure {
             closure: id,
@@ -11127,58 +11260,40 @@ impl Lowering {
         }
     }
 
+    /// Lowers Dylan's `apply(f, a, …, sequence)`: a call of `f` with `a,
+    /// …` and then each element of `sequence`, which it spreads. `f` is
+    /// evaluated first, then the arguments in order. The arguments travel
+    /// in one `<vector>`, `sequence` itself when nothing precedes it and it
+    /// is one, and lowering calls the value with its elements
+    /// ([`CallArguments::Spread`]), checked by its entry as any boxed
+    /// call's are. `apply` passes no keywords.
     fn lower_apply(
         &mut self,
         ctx: &mut FunctionContext,
+        id: AstNodeId,
         args: &[ast::Expr],
         expected_results: Option<&[ValueKind]>,
         span: Span,
     ) -> Expr {
-        let Some((target, args)) = args.split_first() else {
+        let [target, rest @ ..] = args else {
             ctx.diagnostics
                 .push(Diagnostic::error(span, DiagnosticCode::ApplyArityMismatch));
             return Expr::Error { span };
         };
+        let Some((sequence, prefix)) = rest.split_last() else {
+            ctx.diagnostics
+                .push(Diagnostic::error(span, DiagnosticCode::ApplyArityMismatch));
+            return Expr::Error { span };
+        };
+        let scope = ctx.scope_start();
+        let mut statements = Vec::new();
         let target = self.lower_expr(ctx, target);
-        let signatures = self
-            .callable_signature_of(&target)
-            .map(|signature| signature.param_sigs)
-            .unwrap_or_default();
-        let lowered_args = self.lower_args_against(ctx, args, &signatures);
-        // A function or generic that takes keywords is called through its
-        // value's typed entry, which fills the defaults `apply` leaves out.
-        if self
-            .callable_signature_of(&target)
-            .is_some_and(|signature| !signature.keywords.is_empty())
-        {
-            return self.lower_applied_dynamic_callable_call(
-                ctx,
-                target,
-                lowered_args,
-                false,
-                Vec::new(),
-                expected_results,
-                span,
-            );
-        }
-        match self.expr_kind(&target) {
-            ValueKind::KnownCallable(KnownCallable::DirectFunction(function)) => {
-                self.lower_applied_direct_call(ctx, target, function, lowered_args, span)
-            }
-            ValueKind::KnownCallable(KnownCallable::GenericFunction(generic))
-            | ValueKind::GenericFunctionObject(generic) => {
-                self.lower_applied_generic_callable_call(ctx, target, generic, lowered_args, span)
-            }
-            ValueKind::Callable => self.lower_applied_dynamic_callable_call(
-                ctx,
-                target,
-                lowered_args,
-                false,
-                Vec::new(),
-                expected_results,
-                span,
-            ),
-            ValueKind::Error => Expr::Error { span },
+        let target = match self.expr_kind(&target) {
+            ValueKind::Callable
+            | ValueKind::KnownCallable(_)
+            | ValueKind::GenericFunctionObject(_)
+            | ValueKind::Error => target,
+            ValueKind::Any => self.narrow(target, ValueKind::Callable, None),
             actual => {
                 ctx.diagnostics.push(
                     Diagnostic::error(target.span(), DiagnosticCode::ApplyTargetTypeMismatch)
@@ -11187,7 +11302,242 @@ impl Lowering {
                 );
                 Expr::Error { span }
             }
+        };
+        // The function is evaluated before the arguments, which may assign
+        // a local holding it; only a binding of a definition always holds
+        // the same one.
+        let target = match target {
+            Expr::KnownCallable { .. } | Expr::Error { .. } => target,
+            target if matches!(self.expr_kind(&target), ValueKind::KnownCallable(_)) => target,
+            target => {
+                let name = format!("{APPLY_FUNCTION}@{}", span.start);
+                let bound = self.bind_hidden_local(ctx, id, &name, target, span);
+                let read = Expr::Local {
+                    local: bound.local,
+                    result_kind: ctx.local_kind(bound.local),
+                    callable_signature: ctx.local_callable_signature(bound.local),
+                    span,
+                };
+                statements.push(Statement::Let(bound));
+                read
+            }
+        };
+        let prefix = prefix
+            .iter()
+            .map(|arg| self.lower_expr(ctx, arg))
+            .collect::<Vec<_>>();
+        let sequence_span = sequence.span();
+        let sequence = self.lower_expr(ctx, sequence);
+        let arguments =
+            if prefix.is_empty() && matches!(self.expr_kind(&sequence), ValueKind::Vector(_)) {
+                sequence
+            } else {
+                self.apply_arguments(
+                    ctx,
+                    id,
+                    prefix,
+                    sequence,
+                    sequence_span,
+                    &mut statements,
+                    span,
+                )
+            };
+        if self.expr_kind(&target) == ValueKind::Error
+            || self.expr_kind(&arguments) == ValueKind::Error
+        {
+            ctx.hide_locals_from(scope);
+            return Expr::Error { span };
         }
+        let arguments_kind = self.expr_kind(&arguments);
+        let signature = match self.expr_kind(&target) {
+            ValueKind::GenericFunctionObject(generic) => {
+                self.known_callable_signature(KnownCallable::GenericFunction(generic))
+            }
+            _ => self.callable_signature_of(&target),
+        };
+        let call = match signature {
+            // A block's exit procedure never returns, so nothing relies on
+            // its results.
+            Some(signature) if ctx.is_block_exit(&target) => {
+                let result_len = signature.results.len();
+                Expr::CallableCall {
+                    callable: Box::new(target),
+                    args: vec![arguments],
+                    arguments: CallArguments::Spread,
+                    arg_kinds: vec![arguments_kind],
+                    keywords: Vec::new(),
+                    result_kinds: signature.results,
+                    result_callable_sigs: vec![None; result_len],
+                    span,
+                }
+            }
+            Some(signature) => {
+                let called = CallableSignature {
+                    results: signature.results,
+                    result_sigs: signature.result_sigs,
+                    result_ranges: signature.result_ranges,
+                    ..CallableSignature::flat(vec![arguments_kind], Vec::new())
+                };
+                self.checked_callable_call(
+                    ctx,
+                    target,
+                    vec![arguments],
+                    CallArguments::Spread,
+                    called,
+                    Self::signature_result_check,
+                    span,
+                )
+                .unwrap_or_else(|diagnostic| {
+                    ctx.diagnostics.push(diagnostic);
+                    Expr::Error { span }
+                })
+            }
+            None => match expected_results {
+                Some(result_kinds) => self
+                    .checked_callable_call(
+                        ctx,
+                        target,
+                        vec![arguments],
+                        CallArguments::Spread,
+                        CallableSignature::flat(vec![arguments_kind], result_kinds.to_vec()),
+                        Self::untyped_result_check,
+                        span,
+                    )
+                    .unwrap_or_else(|diagnostic| {
+                        ctx.diagnostics.push(diagnostic);
+                        Expr::Error { span }
+                    }),
+                None => {
+                    ctx.diagnostics.push(Diagnostic::error(
+                        target.span(),
+                        DiagnosticCode::UntypedCallableResult,
+                    ));
+                    Expr::Error { span }
+                }
+            },
+        };
+        ctx.hide_locals_from(scope);
+        if statements.is_empty() {
+            return call;
+        }
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements,
+                result: call,
+                span,
+            }),
+            cleanup: None,
+            span,
+        }
+    }
+
+    /// The `<vector>` of `apply`'s arguments, `prefix` and then each
+    /// element of `sequence`, which is checked to be a `<sequence>`: a
+    /// `<stretchy-vector>` the statements pushed to `statements` fill, in
+    /// order. A `for` collects the elements, so any sequence the iteration
+    /// protocol covers spreads.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_arguments(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        prefix: Vec<Expr>,
+        sequence: Expr,
+        sequence_span: Span,
+        statements: &mut Vec<Statement>,
+        span: Span,
+    ) -> Expr {
+        let collected = format!("{APPLY_ARGUMENTS}@{}", span.start);
+        let make = Expr::IntrinsicCall {
+            intrinsic: Intrinsic::MakeStretchyVector,
+            args: vec![
+                Expr::ConstI64 { value: 0, span },
+                Expr::ConstBool { value: false, span },
+            ],
+            result_kind: self.intrinsic_result_kind(Intrinsic::MakeStretchyVector),
+            span,
+        };
+        let bound = self.bind_hidden_local(ctx, id, &collected, make, span);
+        let read = Expr::Local {
+            local: bound.local,
+            result_kind: ctx.local_kind(bound.local),
+            callable_signature: None,
+            span,
+        };
+        statements.push(Statement::Let(bound));
+        for arg in prefix {
+            let arg_span = arg.span();
+            statements.push(Statement::Expr(Expr::IntrinsicCall {
+                intrinsic: Intrinsic::StretchyAdd,
+                args: vec![read.clone(), arg],
+                result_kind: self.intrinsic_result_kind(Intrinsic::StretchyAdd),
+                span: arg_span,
+            }));
+        }
+        let actual = self.expr_kind(&sequence);
+        let expected = self
+            .resolve_class("<sequence>")
+            .map_or(ValueKind::Error, |class| ValueKind::Object(class.id));
+        let sequence = self.narrow(sequence, expected, None);
+        if actual != ValueKind::Error && !self.kinds_match(expected, self.expr_kind(&sequence)) {
+            ctx.diagnostics.push(
+                Diagnostic::error(sequence_span, DiagnosticCode::ApplySequenceTypeMismatch)
+                    .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
+            );
+            return Expr::Error { span };
+        }
+        let elements = format!("{APPLY_SEQUENCE}@{}", span.start);
+        statements.push(Statement::Let(self.bind_hidden_local(
+            ctx,
+            id,
+            &elements,
+            sequence,
+            sequence_span,
+        )));
+        let name = |name: &str| ast::Expr::Name {
+            id,
+            name: name.into(),
+            span: sequence_span,
+        };
+        let element = format!("{APPLY_ELEMENT}@{}", span.start);
+        let collect = ast::Expr::For {
+            id,
+            clauses: vec![ast::ForClause::Collection(ast::CollectionFor {
+                binding: ast::LetBinding {
+                    definition: DefinitionId::new(
+                        self.source_file,
+                        DefinitionKind::Local,
+                        &element,
+                        &id.raw().to_string(),
+                    ),
+                    name: element.clone(),
+                    type_annotation: None,
+                    span: sequence_span,
+                },
+                collection: Box::new(name(&elements)),
+                span: sequence_span,
+            })],
+            body: Box::new(ast::Block {
+                id,
+                statements: Vec::new(),
+                result: ast::Expr::Call {
+                    id,
+                    callee: CollectionFunction::Add.kernel_name().into(),
+                    args: vec![name(&collected), name(&element)],
+                    keywords: Vec::new(),
+                    span: sequence_span,
+                },
+                span: sequence_span,
+            }),
+            span: sequence_span,
+        };
+        statements.push(Statement::Expr(self.lower_expr_expected_results(
+            ctx,
+            &collect,
+            Some(&[]),
+        )));
+        read
     }
 
     /// The index of the first keyword parameter of the generic `name` of
@@ -11556,6 +11906,20 @@ impl Lowering {
         callee: &str,
         span: Span,
     ) -> Expr {
+        // A function taking `#rest` gets the arguments after its required
+        // ones in a vector the call makes.
+        if symbol.rest {
+            if lowered_args.len() < symbol.required() {
+                ctx.diagnostics.push(Self::too_few_arguments(
+                    callee,
+                    symbol.required(),
+                    lowered_args.len(),
+                    span,
+                ));
+                return Expr::Error { span };
+            }
+            lowered_args = self.pack_rest_args(lowered_args, symbol.required(), span);
+        }
         if symbol.arity() == lowered_args.len() {
             adapt_literal_args(&mut lowered_args, symbol.param_kinds.iter().map(Some));
             self.narrow_args(
@@ -11858,6 +12222,7 @@ impl Lowering {
             name: name.into(),
             id,
             param_kinds: param_kinds.clone(),
+            rest: false,
             param_callable_sigs: vec![None; arity],
             param_ranges: vec![None; arity],
             return_kinds: result_kinds.clone(),
@@ -11884,6 +12249,7 @@ impl Lowering {
                 return_annotation: Some(result_kinds),
                 entry_checks: Vec::new(),
                 keywords: Vec::new(),
+                rest: false,
                 strict: false,
                 kernel: true,
                 span: Span::default(),
@@ -12315,15 +12681,10 @@ impl Lowering {
             | CollectionFunction::Add => ValueKind::Any,
             CollectionFunction::ForwardIterationProtocol => {
                 let callable = |params: usize, result: ValueKind| {
-                    Some(CallableSignature {
-                        params: vec![ValueKind::Any; params],
-                        param_sigs: vec![None; params],
-                        param_ranges: vec![None; params],
-                        results: vec![result],
-                        result_sigs: vec![None],
-                        result_ranges: vec![None],
-                        keywords: Vec::new(),
-                    })
+                    Some(CallableSignature::flat(
+                        vec![ValueKind::Any; params],
+                        vec![result],
+                    ))
                 };
                 let sigs = vec![
                     None,
@@ -13186,6 +13547,41 @@ impl Lowering {
 
     /// The diagnostic for a call of `callee` with `actual` arguments where
     /// it takes `expected`.
+    /// The error for a call passing `actual` arguments to `callee`, which
+    /// takes `#rest` after `required` ones.
+    fn too_few_arguments(callee: &str, required: usize, actual: usize, span: Span) -> Diagnostic {
+        Diagnostic::error(span, DiagnosticCode::FunctionTooFewArguments)
+            .with_arg(DiagnosticArg::text("callee", callee))
+            .with_arg(DiagnosticArg::unsigned(
+                "expected_count",
+                u64::try_from(required).unwrap_or(u64::MAX),
+            ))
+            .with_arg(DiagnosticArg::unsigned(
+                "actual_count",
+                u64::try_from(actual).unwrap_or(u64::MAX),
+            ))
+    }
+
+    /// `args` for a callee taking `required` arguments and then a `#rest`
+    /// parameter: the required ones, then a `<vector>` of the others, which
+    /// is constant as a vector literal is. Dylan's rest sequence is not
+    /// for the callee to modify.
+    fn pack_rest_args(&self, mut args: Vec<Expr>, required: usize, span: Span) -> Vec<Expr> {
+        let rest = args.split_off(required.min(args.len()));
+        let rest_span = match (rest.first(), rest.last()) {
+            (Some(first), Some(last)) => first.span().cover(last.span()),
+            _ => Span::new(span.end, span.end),
+        };
+        args.push(Expr::VectorLiteral {
+            elements: rest,
+            class: self
+                .builtin_value_class(BuiltinValueClass::Vector)
+                .unwrap_or(ClassId(u32::MAX)),
+            span: rest_span,
+        });
+        args
+    }
+
     fn arity_mismatch(callee: &str, expected: usize, actual: usize, span: Span) -> Diagnostic {
         Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
             .with_arg(DiagnosticArg::text("callee", callee.to_string()))
@@ -13624,98 +14020,6 @@ impl Lowering {
         }
     }
 
-    fn lower_applied_direct_call(
-        &self,
-        ctx: &mut FunctionContext,
-        target: Expr,
-        function: FunctionId,
-        mut args: Vec<Expr>,
-        span: Span,
-    ) -> Expr {
-        let Some(symbol) = self.functions.get(function.0 as usize) else {
-            return Expr::Error { span };
-        };
-        if symbol.arity() != args.len() {
-            ctx.diagnostics.push(
-                Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
-                    .with_arg(DiagnosticArg::text("callee", symbol.name.clone()))
-                    .with_arg(DiagnosticArg::unsigned(
-                        "expected_count",
-                        u64::try_from(symbol.arity()).unwrap_or(u64::MAX),
-                    ))
-                    .with_arg(DiagnosticArg::unsigned(
-                        "actual_count",
-                        u64::try_from(args.len()).unwrap_or(u64::MAX),
-                    )),
-            );
-            return Expr::Error { span };
-        }
-        adapt_literal_args(&mut args, symbol.param_kinds.iter().map(Some));
-        self.narrow_args(&mut args, &symbol.param_kinds, &symbol.param_callable_sigs);
-        for (index, (arg, expected)) in args.iter().zip(&symbol.param_kinds).enumerate() {
-            let actual = self.expr_kind(arg);
-            if !self.kinds_match(*expected, actual) {
-                ctx.diagnostics.push(
-                    Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
-                        .with_arg(DiagnosticArg::text("function", symbol.name.clone()))
-                        .with_arg(DiagnosticArg::unsigned(
-                            "argument_index",
-                            u64::try_from(index + 1).unwrap_or(u64::MAX),
-                        ))
-                        .with_arg(DiagnosticArg::text("expected", self.kind_name(*expected)))
-                        .with_arg(DiagnosticArg::text("actual", self.kind_name(actual))),
-                );
-            }
-            if let Some(expected) = symbol
-                .param_callable_sigs
-                .get(index)
-                .and_then(|signature| signature.as_ref())
-            {
-                let actual_signature = self.expr_callable_signature(arg);
-                if !self.callable_signatures_match(Some(expected), actual_signature.as_ref()) {
-                    let diagnostic = self
-                        .callable_variance_diagnostic(
-                            arg.span(),
-                            expected,
-                            actual_signature.as_ref(),
-                        )
-                        .unwrap_or_else(|| {
-                            Diagnostic::error(
-                                arg.span(),
-                                DiagnosticCode::FunctionArgumentTypeMismatch,
-                            )
-                            .with_arg(DiagnosticArg::text("function", symbol.name.clone()))
-                            .with_arg(DiagnosticArg::unsigned(
-                                "argument_index",
-                                u64::try_from(index + 1).unwrap_or(u64::MAX),
-                            ))
-                            .with_arg(DiagnosticArg::text(
-                                "expected",
-                                self.callable_signature_name(expected),
-                            ))
-                            .with_arg(DiagnosticArg::text(
-                                "actual",
-                                actual_signature.as_ref().map_or_else(
-                                    || self.kind_name(actual),
-                                    |signature| self.callable_signature_name(signature),
-                                ),
-                            ))
-                        });
-                    ctx.diagnostics.push(diagnostic);
-                }
-            }
-        }
-        Expr::CallableCall {
-            callable: Box::new(target),
-            args,
-            arg_kinds: symbol.param_kinds.clone(),
-            keywords: Vec::new(),
-            result_kinds: symbol.return_kinds.clone(),
-            result_callable_sigs: symbol.return_callable_sigs.clone(),
-            span,
-        }
-    }
-
     fn lower_applied_generic_callable_call(
         &self,
         ctx: &mut FunctionContext,
@@ -13751,6 +14055,7 @@ impl Lowering {
         Expr::CallableCall {
             callable: Box::new(target),
             args,
+            arguments: CallArguments::Each,
             arg_kinds: (0..symbol.arity())
                 .map(|index| self.generic_callable_arg_kind(generic, index))
                 .collect(),
@@ -14078,8 +14383,8 @@ impl Lowering {
 
     /// Lowers a call through `target` with `args`. For a typed callable,
     /// `with_keywords` says whether `args` end with one argument per
-    /// keyword of its signature; otherwise the call passes none, as `apply`
-    /// does. For an untyped one, the last `untyped_keywords.len()` of
+    /// keyword of its signature; otherwise the call passes none, and the
+    /// value fills each default. For an untyped one, the last `untyped_keywords.len()` of
     /// `args` pass those keywords.
     #[allow(clippy::too_many_arguments)]
     fn lower_applied_dynamic_callable_call(
@@ -14103,10 +14408,27 @@ impl Lowering {
                     .map(|_| self.keyword_absent(span))
                     .collect()
             };
+            // A value taking `#rest` gets the arguments after its required
+            // ones in a vector the call makes.
+            let arguments = if signature.rest {
+                if args.len() < signature.required() {
+                    ctx.diagnostics.push(Self::too_few_arguments(
+                        VALUE_CALLEE,
+                        signature.required(),
+                        args.len(),
+                        span,
+                    ));
+                    return Expr::Error { span };
+                }
+                args = self.pack_rest_args(args, signature.required(), span);
+                CallArguments::Rest
+            } else {
+                CallArguments::Each
+            };
             if signature.params.len() != args.len() {
                 ctx.diagnostics.push(
                     Diagnostic::error(span, DiagnosticCode::FunctionArityMismatch)
-                        .with_arg(DiagnosticArg::text("callee", "apply target"))
+                        .with_arg(DiagnosticArg::text("callee", VALUE_CALLEE))
                         .with_arg(DiagnosticArg::unsigned(
                             "expected_count",
                             u64::try_from(signature.params.len()).unwrap_or(u64::MAX),
@@ -14124,7 +14446,7 @@ impl Lowering {
                 let actual = self.expr_kind(arg);
                 let mismatch = |expected: String, actual: String| {
                     Diagnostic::error(arg.span(), DiagnosticCode::FunctionArgumentTypeMismatch)
-                        .with_arg(DiagnosticArg::text("function", "apply target"))
+                        .with_arg(DiagnosticArg::text("function", VALUE_CALLEE))
                         .with_arg(DiagnosticArg::unsigned(
                             "argument_index",
                             u64::try_from(index + 1).unwrap_or(u64::MAX),
@@ -14153,6 +14475,7 @@ impl Lowering {
                 return Expr::CallableCall {
                     callable: Box::new(target),
                     args,
+                    arguments: CallArguments::Each,
                     arg_kinds: signature.params,
                     keywords: Vec::new(),
                     result_kinds: signature.results,
@@ -14173,6 +14496,7 @@ impl Lowering {
                     ctx,
                     target,
                     args,
+                    arguments,
                     signature,
                     Self::signature_result_check,
                     span,
@@ -14218,11 +14542,19 @@ impl Lowering {
                 kind: ValueKind::Any,
             })
             .collect();
-        self.checked_callable_call(ctx, target, args, called, Self::untyped_result_check, span)
-            .unwrap_or_else(|diagnostic| {
-                ctx.diagnostics.push(diagnostic);
-                Expr::Error { span }
-            })
+        self.checked_callable_call(
+            ctx,
+            target,
+            args,
+            CallArguments::Each,
+            called,
+            Self::untyped_result_check,
+            span,
+        )
+        .unwrap_or_else(|diagnostic| {
+            ctx.diagnostics.push(diagnostic);
+            Expr::Error { span }
+        })
     }
 
     /// Builds a call through a `<callable>` value as `called`: arguments at
@@ -14235,11 +14567,13 @@ impl Lowering {
     /// [`Self::check_values`] checks them. When no check can establish a
     /// result, this returns a [`DiagnosticCode::UncheckedCallableResult`]
     /// error.
+    #[allow(clippy::too_many_arguments)]
     fn checked_callable_call(
         &self,
         ctx: &mut FunctionContext,
         target: Expr,
         args: Vec<Expr>,
+        arguments: CallArguments,
         called: CallableSignature,
         check: fn(&Self, ValueKind, Option<IntRange>) -> Option<CallableResultCheck>,
         span: Span,
@@ -14264,6 +14598,7 @@ impl Lowering {
         let call = Expr::CallableCall {
             callable: Box::new(target),
             args,
+            arguments,
             arg_kinds,
             keywords: called
                 .keywords
@@ -15784,8 +16119,15 @@ impl Lowering {
             result: guard.clone(),
             span,
         };
-        let closure =
-            self.lower_closure_expr(ctx, core::slice::from_ref(&param), None, &body, span, None);
+        let closure = self.lower_closure_expr(
+            ctx,
+            core::slice::from_ref(&param),
+            None,
+            None,
+            &body,
+            span,
+            None,
+        );
         if let Expr::Closure { closure, .. } = &closure
             && let Some(closure) = self.closures.get_mut(closure.0 as usize)
         {
@@ -15811,8 +16153,8 @@ impl Lowering {
     ///
     /// The left operand keeps the legacy integer result hint used by
     /// open-result forms such as `apply` and `signal`; the right operand is
-    /// hinted with the left operand's numeric kind, so `x * apply(f)` with a
-    /// float `x` expects a float result.
+    /// hinted with the left operand's numeric kind, so `x * apply(f, v)`
+    /// with a float `x` expects a float result.
     fn lower_numeric_operands(
         &mut self,
         ctx: &mut FunctionContext,
@@ -18698,6 +19040,7 @@ impl Lowering {
                         result_sigs: results.callable_sigs,
                         result_ranges: results.ranges,
                         keywords,
+                        rest: false,
                     }),
                     range: None,
                 }
@@ -19160,6 +19503,7 @@ impl Lowering {
                             result_sigs: function.return_callable_sigs.clone(),
                             result_ranges: function.return_ranges.clone(),
                             keywords: Vec::new(),
+                            rest: function.rest,
                         },
                         names,
                     )
@@ -19179,6 +19523,7 @@ impl Lowering {
                             result_sigs: generic.return_callable_sigs.clone(),
                             result_ranges: generic.return_ranges.clone(),
                             keywords: Vec::new(),
+                            rest: false,
                         },
                         self.generic_keyword_names(generic),
                     )
@@ -19222,9 +19567,13 @@ impl Lowering {
     ) -> Option<SignatureMismatch> {
         // A value's typed entry takes its keywords, boxed, after its
         // required parameters, so callers must agree on them exactly.
+        // A caller makes a `#rest` parameter's vector itself, so a value
+        // taking one never stands in for one that does not, nor the other
+        // way round, though their register types agree.
         if expected.params.len() != actual.params.len()
             || expected.results.len() != actual.results.len()
             || expected.keywords != actual.keywords
+            || expected.rest != actual.rest
         {
             return Some(SignatureMismatch::Incompatible);
         }
@@ -19439,7 +19788,14 @@ impl Lowering {
 
     fn callable_signature_name(&self, signature: &CallableSignature) -> String {
         let mut params = (0..signature.params.len())
-            .map(|index| self.signature_value_name(signature.param_value(index)))
+            .map(|index| {
+                let name = self.signature_value_name(signature.param_value(index));
+                if signature.rest && index == signature.required() {
+                    format!("#rest {name}")
+                } else {
+                    name
+                }
+            })
             .collect::<Vec<_>>();
         for (index, keyword) in signature.keywords.iter().enumerate() {
             let prefix = if index == 0 { "#key " } else { "" };
@@ -20336,13 +20692,13 @@ mod tests {
     }
 
     #[test]
-    fn resolves_known_callable_values_and_apply() {
+    fn resolves_known_callable_values_and_their_calls() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
              define function inc(x :: <integer>)\n  x + 1\nend;\n\
-             define function main()\n  let f = inc;\n  let g = area;\n  apply(f, 2) + apply(g, make(<circle>, radius: 3))\nend;",
+             define function main()\n  let f = inc;\n  let g = area;\n  (f)(2) + (g)(make(<circle>, radius: 3))\nend;",
         );
 
         assert_eq!(module.diagnostics, Vec::new());
@@ -20462,7 +20818,7 @@ mod tests {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define class <wheel> (<object>)\n  slot radius :: <integer>;\nend;\n\
-             define function main()\n  let getter = radius;\n  apply(getter, make(<circle>, radius: 3))\nend;",
+             define function main()\n  let getter = radius;\n  (getter)(make(<circle>, radius: 3))\nend;",
         );
 
         assert_eq!(module.diagnostics, Vec::new());
@@ -20525,7 +20881,7 @@ mod tests {
     fn resolves_runtime_callable_parameters() {
         let module = lower_source(
             "define function inc(x)\n  x + 1\nend;\n\
-             define function callit(f :: <callable>) => <integer>\n  apply(f, 41)\nend;\n\
+             define function callit(f :: <callable>) => <integer>\n  f(41)\nend;\n\
              define function main()\n  callit(inc)\nend;",
         );
 
@@ -20553,15 +20909,46 @@ mod tests {
     }
 
     #[test]
+    fn a_rest_call_makes_its_vector_and_apply_spreads_its_last_argument() {
+        let module = lower_source(
+            "define function count(a, #rest xs) => <integer>\n  size(xs)\nend;\n\
+             define function direct() => <integer>\n  count(1, 2, 3)\nend;\n\
+             define function spread() => <integer>\n  apply(count, 1, #[2, 3])\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        assert!(module.functions[0].rest);
+        let Expr::DirectCall { args, .. } = &module.functions[1].body.result else {
+            panic!("expected a direct call");
+        };
+        assert_eq!(args.len(), 2);
+        assert!(matches!(&args[1], Expr::VectorLiteral { elements, .. } if elements.len() == 2));
+        // `apply` collects its arguments into one vector, then calls through
+        // the function's value with it.
+        let mut spread = false;
+        visit_evaluated(&module.functions[2].body.result, &mut |expr| {
+            spread |= matches!(
+                expr,
+                Expr::CallableCall {
+                    arguments: CallArguments::Spread,
+                    args,
+                    ..
+                } if args.len() == 1
+            );
+        });
+        assert!(spread);
+    }
+
+    #[test]
     fn reports_invalid_apply_targets() {
-        let non_callable = lower_source("define function main()\n  apply(1, 2)\nend;");
+        let non_callable = lower_source("define function main()\n  apply(1, #[2])\nend;");
         assert!(has_diagnostic(
             &non_callable,
             DiagnosticCode::ApplyTargetTypeMismatch,
             &[("actual", "<integer>")]
         ));
-        let untyped =
-            lower_source("define function run(f :: <callable>)\n  let r = apply(f, 4);\n  r\nend;");
+        let untyped = lower_source(
+            "define function run(f :: <callable>)\n  let r = apply(f, #[4]);\n  r\nend;",
+        );
         assert!(has_diagnostic(
             &untyped,
             DiagnosticCode::UntypedCallableResult,
@@ -21232,7 +21619,7 @@ mod tests {
              define method area(s :: <square>) => <integer>\n  2\nend;\n";
         for (call, actual, class) in [
             ("area(5)", "<integer>", "<integer>"),
-            ("apply(area, 2.5)", "<double-float>", "<double-float>"),
+            ("area(2.5)", "<double-float>", "<double-float>"),
             ("area(#t)", "<boolean>", "<boolean>"),
             ("area(area)", "generic `area`", "<function>"),
         ] {
@@ -22094,7 +22481,7 @@ mod tests {
             "define function f(g :: callable(<shape>) => <integer>)\n  1\nend;\n\
              define function main()\n  f(radius-of)\nend;",
             "define function f(g :: callable(<shape>) => <integer>)\n  1\nend;\n\
-             define function main()\n  apply(f, radius-of)\nend;",
+             define function main()\n  (f)(radius-of)\nend;",
             "define function main()\n  let g :: callable(<shape>) => <integer> = radius-of;\n  1\nend;",
             "define function two()\n  values(radius-of, 1)\nend;\n\
              define function main()\n  let (g :: callable(<shape>) => <integer>, n :: <integer>) = two();\n  n\nend;",

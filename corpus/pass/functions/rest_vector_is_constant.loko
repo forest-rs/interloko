@@ -1,0 +1,21 @@
+// expect: run 2
+// expect: diagnostics 0
+
+// A `#rest` vector is constant, as Dylan leaves it to its callee to read
+// rather than change: storing into it signals an
+// `<immutable-collection-error>`, however the function was called.
+
+define function poke(#rest xs) => <integer>
+  block ()
+    xs[0] := 9;
+    0
+  exception (e :: <immutable-collection-error>)
+    1
+  end
+end;
+
+define function main() => <integer>
+  let f :: <function> = poke;
+  let through :: <integer> = f(1);
+  poke(1) + through
+end;

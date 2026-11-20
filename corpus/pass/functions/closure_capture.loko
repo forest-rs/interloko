@@ -18,5 +18,5 @@ end;
 
 define function main() => <integer>
   let add-one :: <callable> = make-adder(1);
-  apply(add-one, 41)
+  add-one(41)
 end;

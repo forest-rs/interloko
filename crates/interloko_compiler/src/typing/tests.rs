@@ -2380,7 +2380,7 @@ fn an_exit_resumes_with_what_the_body_may_have_assigned() {
     // assignment, so after the block `n` may hold either value: the
     // conversion cannot rely on the `0` it was bound to.
     let (module, artifact) = decisions_for(
-        "define function call(f :: <callable>) => <integer>\n  apply(f, 1)\nend;\n\
+        "define function call(f :: <callable>) => <integer>\n  f(1)\nend;\n\
          define function main() => <i32>\n  \
          let n = 0;\n  \
          let ignored = block (out)\n    n := 5000000000;\n    call(out)\n  end;\n  \

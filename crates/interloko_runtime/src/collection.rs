@@ -396,6 +396,27 @@ impl InterlokoHost {
             .cloned())
     }
 
+    /// A new constant `<vector>` of the elements of `vector` from `start`
+    /// on: the vector a `#rest` parameter takes, of the arguments after the
+    /// required ones. Like a vector literal's, it is not for its receiver
+    /// to change.
+    pub(crate) fn vector_tail(&mut self, vector: Obj, start: i64) -> Result<Value, HostError> {
+        let elements = self.vector_elements(vector)?;
+        let tail = usize::try_from(start)
+            .ok()
+            .and_then(|start| elements.get(start..))
+            .ok_or(HostError::Failed)?
+            .to_vec();
+        let class = self.builtin_class(BuiltinValueClass::Vector)?;
+        Ok(self.push_object(RuntimeObject {
+            class,
+            storage: RuntimeObjectStorage::Vector {
+                elements: tail,
+                constant: true,
+            },
+        }))
+    }
+
     /// Stores `value` at `index` of `vector` and returns it, or returns
     /// `None` for an index outside it or a constant vector, which the
     /// caller tells apart by the index.

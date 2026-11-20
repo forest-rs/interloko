@@ -82,6 +82,15 @@ pub enum DiagnosticCode {
     /// An anonymous function declares `#key` parameters, which only
     /// defined functions take yet.
     AstAnonymousKeywordParameter,
+    /// A `#rest` parameter declares a type: it is always a `<vector>` of the
+    /// arguments after the required ones.
+    AstRestParameterType,
+    /// A generic function or a method declares a `#rest` parameter, which only
+    /// functions and anonymous methods take yet.
+    AstGenericRestParameter,
+    /// A parameter list declares both `#rest` and `#key` parameters, which no
+    /// definition takes yet.
+    AstRestWithKeywords,
     /// A definition repeats an adjective, as in `define sealed sealed class`.
     AstDuplicateAdjective,
     /// A definition has two adjectives that contradict each other, such as
@@ -126,6 +135,9 @@ pub enum DiagnosticCode {
     DuplicateLocal,
     /// A function or callable was called with the wrong number of arguments.
     FunctionArityMismatch,
+    /// A function or callable taking `#rest` was called with fewer arguments
+    /// than it requires.
+    FunctionTooFewArguments,
     /// A direct function argument has the wrong type.
     FunctionArgumentTypeMismatch,
     /// A direct function body does not satisfy its result annotation.
@@ -192,6 +204,9 @@ pub enum DiagnosticCode {
     ApplyArityMismatch,
     /// `apply` target is not a function, generic, or callable value.
     ApplyTargetTypeMismatch,
+    /// `apply`'s last argument is not a `<sequence>`, whose elements it
+    /// passes as the call's last arguments.
+    ApplySequenceTypeMismatch,
     /// A call through a `<callable>` value cannot check at runtime that its
     /// results are the kinds the call site relies on.
     UncheckedCallableResult,
@@ -411,6 +426,9 @@ impl DiagnosticCode {
         Self::AstInvalidSignal,
         Self::AstInvalidSlotAssignment,
         Self::AstAnonymousKeywordParameter,
+        Self::AstRestParameterType,
+        Self::AstGenericRestParameter,
+        Self::AstRestWithKeywords,
         Self::AstDuplicateAdjective,
         Self::AstConflictingAdjectives,
         Self::DuplicateDefinition,
@@ -431,6 +449,7 @@ impl DiagnosticCode {
         Self::BuiltInFormValue,
         Self::DuplicateLocal,
         Self::FunctionArityMismatch,
+        Self::FunctionTooFewArguments,
         Self::FunctionArgumentTypeMismatch,
         Self::FunctionReturnTypeMismatch,
         Self::ConstantInitializerTypeMismatch,
@@ -462,6 +481,7 @@ impl DiagnosticCode {
         Self::ComparisonOperandTypeMismatch,
         Self::ApplyArityMismatch,
         Self::ApplyTargetTypeMismatch,
+        Self::ApplySequenceTypeMismatch,
         Self::UncheckedCallableResult,
         Self::UntypedCallableResult,
         Self::CallableParameterVariance,
@@ -570,6 +590,9 @@ impl DiagnosticCode {
             Self::AstInvalidSignal => "ast.invalid-signal",
             Self::AstInvalidSlotAssignment => "ast.invalid-slot-assignment",
             Self::AstAnonymousKeywordParameter => "ast.anonymous-keyword-parameter",
+            Self::AstRestParameterType => "ast.rest-parameter-type",
+            Self::AstGenericRestParameter => "ast.generic-rest-parameter",
+            Self::AstRestWithKeywords => "ast.rest-with-keywords",
             Self::AstDuplicateAdjective => "ast.duplicate-adjective",
             Self::AstConflictingAdjectives => "ast.conflicting-adjectives",
             Self::DuplicateDefinition => "sem.duplicate-definition",
@@ -590,6 +613,7 @@ impl DiagnosticCode {
             Self::BuiltInFormValue => "sem.built-in-form-value",
             Self::DuplicateLocal => "sem.duplicate-local",
             Self::FunctionArityMismatch => "sem.function-arity-mismatch",
+            Self::FunctionTooFewArguments => "sem.function-too-few-arguments",
             Self::FunctionArgumentTypeMismatch => "sem.function-argument-type-mismatch",
             Self::FunctionReturnTypeMismatch => "sem.function-return-type-mismatch",
             Self::ConstantInitializerTypeMismatch => "sem.constant-initializer-type-mismatch",
@@ -623,6 +647,7 @@ impl DiagnosticCode {
             Self::ComparisonOperandTypeMismatch => "sem.comparison-operand-type-mismatch",
             Self::ApplyArityMismatch => "sem.apply-arity-mismatch",
             Self::ApplyTargetTypeMismatch => "sem.apply-target-type-mismatch",
+            Self::ApplySequenceTypeMismatch => "sem.apply-sequence-type-mismatch",
             Self::UncheckedCallableResult => "sem.unchecked-callable-result",
             Self::UntypedCallableResult => "sem.untyped-callable-result",
             Self::CallableParameterVariance => "sem.callable-parameter-variance",
@@ -732,6 +757,9 @@ impl DiagnosticCode {
             "ast.invalid-signal" => Self::AstInvalidSignal,
             "ast.invalid-slot-assignment" => Self::AstInvalidSlotAssignment,
             "ast.anonymous-keyword-parameter" => Self::AstAnonymousKeywordParameter,
+            "ast.rest-parameter-type" => Self::AstRestParameterType,
+            "ast.generic-rest-parameter" => Self::AstGenericRestParameter,
+            "ast.rest-with-keywords" => Self::AstRestWithKeywords,
             "ast.duplicate-adjective" => Self::AstDuplicateAdjective,
             "ast.conflicting-adjectives" => Self::AstConflictingAdjectives,
             "sem.duplicate-definition" => Self::DuplicateDefinition,
@@ -752,6 +780,7 @@ impl DiagnosticCode {
             "sem.built-in-form-value" => Self::BuiltInFormValue,
             "sem.duplicate-local" => Self::DuplicateLocal,
             "sem.function-arity-mismatch" => Self::FunctionArityMismatch,
+            "sem.function-too-few-arguments" => Self::FunctionTooFewArguments,
             "sem.function-argument-type-mismatch" => Self::FunctionArgumentTypeMismatch,
             "sem.function-return-type-mismatch" => Self::FunctionReturnTypeMismatch,
             "sem.constant-initializer-type-mismatch" => Self::ConstantInitializerTypeMismatch,
@@ -785,6 +814,7 @@ impl DiagnosticCode {
             "sem.comparison-operand-type-mismatch" => Self::ComparisonOperandTypeMismatch,
             "sem.apply-arity-mismatch" => Self::ApplyArityMismatch,
             "sem.apply-target-type-mismatch" => Self::ApplyTargetTypeMismatch,
+            "sem.apply-sequence-type-mismatch" => Self::ApplySequenceTypeMismatch,
             "sem.unchecked-callable-result" => Self::UncheckedCallableResult,
             "sem.untyped-callable-result" => Self::UntypedCallableResult,
             "sem.callable-parameter-variance" => Self::CallableParameterVariance,

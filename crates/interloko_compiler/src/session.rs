@@ -14591,13 +14591,15 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
         sem::Expr::CallableCall {
             callable,
             args,
+            arguments,
             result_kinds,
             ..
         } => {
             let _ = writeln!(
                 out,
-                "callable-call result={}",
-                sem_kind_list_label_for_expr(result_kinds)
+                "callable-call result={}{}",
+                sem_kind_list_label_for_expr(result_kinds),
+                call_arguments_label(*arguments)
             );
             dump_sem_expr(out, callable, indent + 2);
             for arg in args {
@@ -16064,11 +16066,13 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
         sem::Expr::CallableCall {
             callable,
             args,
+            arguments,
             result_kinds,
             ..
         } => {
             let result = sem_kind_list_fingerprint(module, result_kinds);
-            let _ = write!(out, "callable({result}:");
+            let arguments = call_arguments_label(*arguments);
+            let _ = write!(out, "callable({result}{arguments}:");
             fingerprint_sem_expr(module, callable, out);
             out.push(':');
             fingerprint_args(module, args, out);
@@ -16467,6 +16471,16 @@ fn indent_line(out: &mut String, indent: usize) {
     }
 }
 
+/// How a dump marks a callable call whose arguments are not one for each
+/// parameter: ` rest` when the call made a `#rest` vector, ` spread` for
+/// `apply`'s.
+const fn call_arguments_label(arguments: sem::CallArguments) -> &'static str {
+    match arguments {
+        sem::CallArguments::Each => "",
+        sem::CallArguments::Rest => " rest",
+        sem::CallArguments::Spread => " spread",
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -21714,13 +21728,13 @@ end;";
         let before = CompilerSession::compile_source(
             "closure.loko",
             "define function main()\n  \
-             let f = method (x :: <integer>) => <integer> x + 1 end;\n  apply(f, 2)\nend;",
+             let f = method (x :: <integer>) => <integer> x + 1 end;\n  (f)(2)\nend;",
             RuntimeMode::CompileOnly,
         );
         let after = CompilerSession::compile_source(
             "closure.loko",
             "define function main()\n  \
-             let f = method (x :: <integer>) => <integer> x + 2 end;\n  apply(f, 2)\nend;",
+             let f = method (x :: <integer>) => <integer> x + 2 end;\n  (f)(2)\nend;",
             RuntimeMode::CompileOnly,
         );
         assert!(!before.has_errors());
@@ -22005,13 +22019,13 @@ end;";
                       define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
                       define function inc(x)\n  x + 1\nend;\n\
                       define function dec(x)\n  x - 1\nend;\n\
-                      define function main()\n  let f = inc;\n  apply(f, 10) + area(make(<circle>, radius: 2))\nend;";
+                      define function main()\n  let f = inc;\n  (f)(10) + area(make(<circle>, radius: 2))\nend;";
         let after = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
                      define generic area(x);\n\
                      define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
                      define function inc(x)\n  x + 1\nend;\n\
                      define function dec(x)\n  x - 1\nend;\n\
-                     define function main()\n  let f = dec;\n  apply(f, 10) + area(make(<circle>, radius: 2))\nend;";
+                     define function main()\n  let f = dec;\n  (f)(10) + area(make(<circle>, radius: 2))\nend;";
         let mut session = IncrementalCompilerSession::new();
         let file = session.add_source("callable.loko", before);
         let first = session
@@ -24310,7 +24324,7 @@ end;
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define class <square> (<object>)\n  slot side :: <integer>;\nend;\n\
              define function take(x :: {parameter}) => {parameter}\n  x\nend;\n\
-             define function call(f :: <callable>, x :: <object>) => {result}\n  apply(f, x)\nend;\n\
+             define function call(f :: <callable>, x :: <object>) => {result}\n  f(x)\nend;\n\
              define function main() => {main}\n  \
              let spare :: <circle> = make(<circle>, radius: 5);\n  \
              let wrong :: <square> = make(<square>, side: 2);\n  \
@@ -24503,7 +24517,7 @@ end;
         let source = "define function twice(g :: callable(<integer>) => <integer>) => <integer>\n  \
              g(g(1))\nend;\n\
              define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>\n  \
-             apply(f, g)\nend;\n\
+             f(g)\nend;\n\
              define function main() => <integer>\n  \
              apply-untyped(twice, method (x :: <integer>) => <double-float> 1.5 end)\nend;";
         let runs = breaks_under_each_policy(source, |seen, condition| {
@@ -24569,9 +24583,9 @@ end;
         // invalid choice.
         let source = "define function inc(x :: <integer>) => <integer>\n  x + 1\nend;\n\
              define function take(f :: <function>) => <integer>\n  \
-             let r :: <integer> = apply(f, 41);\n  r\nend;\n\
+             let r :: <integer> = f(41);\n  r\nend;\n\
              define function call(g :: <callable>, x :: <object>) => <integer>\n  \
-             apply(g, x)\nend;\n\
+             g(x)\nend;\n\
              define function main() => <integer>\n  \
              let spare :: <function> = inc;\n  call(take, 3)\nend;";
         let artifacts =
@@ -25089,7 +25103,7 @@ end;
              define generic pick(s :: <shape>);\n\
              define method pick(c :: <circle>)\n  grow\nend;\n\
              define function main() => <integer>\n  \
-             let f = pick(make(<square>));\n  apply(f, make(<circle>)).radius\nend;",
+             let f = pick(make(<square>));\n  (f)(make(<circle>)).radius\nend;",
             RuntimeMode::CompileOnly,
         );
         assert_eq!(
@@ -25409,18 +25423,18 @@ end;
         // known generic sends, which checks the range at the call, where no
         // typing decision classifies it.
         for (call, (form, owner), value) in [
-            ("apply(byte, x)", ("typing", "byte"), "300"),
+            ("(byte)(x)", ("typing", "byte"), "300"),
             (
-                "let f :: <callable> = byte;\n  apply(f, x) + 0",
+                "let f :: <callable> = byte;\n  f(x) + 0",
                 ("typing", "byte"),
                 "300",
             ),
             (
-                "apply(method (n :: limited(<integer>, max: 9)) n end, x) + 0",
+                "(method (n :: limited(<integer>, max: 9)) n end)(x) + 0",
                 ("typing", "feed"),
                 "300",
             ),
-            ("apply(send, x - 400)", ("check", "feed"), "-100"),
+            ("(send)(x - 400)", ("check", "feed"), "-100"),
         ] {
             let source = format!(
                 "{LIMITED}\ndefine function feed(x :: <integer>) => <integer>\n  {call}\nend;"
@@ -26411,6 +26425,7 @@ end;
         let expected = Contract {
             params: vec![integer.clone().into()],
             results: vec![circles.clone().into()],
+            rest: false,
         };
         assert_eq!(sem.contract(generic.definition), Some(expected.clone()));
         assert_eq!(
@@ -26427,6 +26442,7 @@ end;
             Some(Contract {
                 params: Vec::new(),
                 results: vec![integer.into()],
+                rest: false,
             })
         );
         assert_eq!(
@@ -26470,7 +26486,7 @@ end;
         // its parameter with.
         let source = "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define function again(n :: <integer>)\n  again\nend;\n\
-             define function use-it(f :: callable(<integer>) => <circle>) => <integer>\n  apply(f, 1).radius\nend;";
+             define function use-it(f :: callable(<integer>) => <circle>) => <integer>\n  f(1).radius\nend;";
         let artifacts =
             CompilerSession::compile_source("callables.loko", source, RuntimeMode::CompileOnly);
         assert_eq!(artifacts.diagnostics, Vec::new());
@@ -26992,7 +27008,7 @@ end;
          define function square-of(n :: <integer>) => <square>\n  make(<square>, side: n * 10)\nend;\n\
          define generic maker(n :: <integer>);\n\
          define method maker(n :: <integer>)\n  circle-of\nend;\n\
-         define function main() => <integer>\n  pause() + apply(maker(1), 3).radius\nend;";
+         define function main() => <integer>\n  pause() + maker(1)(3).radius\nend;";
 
     #[test]
     fn a_late_bound_send_must_not_return_a_callable_whose_result_class_changed() {
@@ -27000,7 +27016,7 @@ end;
         // would apply it and read the <square>'s side as a <circle>'s radius.
         let new = MAKER
             .replace("  circle-of\nend", "  square-of\nend")
-            .replace("pause() + apply(maker(1), 3).radius", "pause()");
+            .replace("pause() + maker(1)(3).radius", "pause()");
         let seen = run_across_an_edit(MAKER, &new, resume());
         assert_ne!(
             seen.value,
@@ -27025,10 +27041,10 @@ end;
         // would accept only a <circle>.
         let old = MAKER
             .replace(
-                "define function main() => <integer>\n  pause() + apply(maker(1), 3).radius",
+                "define function main() => <integer>\n  pause() + maker(1)(3).radius",
                 "define function radius-of(s :: <shape>) => <integer>\n  3\nend;\n\
                  define function circle-radius(s :: <circle>) => <integer>\n  s.radius\nend;\n\
-                 define function main() => <integer>\n  pause() + apply(maker(1), make(<circle>, radius: 3))",
+                 define function main() => <integer>\n  pause() + maker(1)(make(<circle>, radius: 3))",
             )
             .replace("  circle-of\nend", "  radius-of\nend");
         let new = old.replace("  radius-of\nend", "  circle-radius\nend");
@@ -27057,7 +27073,7 @@ end;
         // A callable that accepts more and returns less also stands in.
         let old = MAKER
             .replace(
-                "define function main() => <integer>\n  pause() + apply(maker(1), 3).radius",
+                "define function main() => <integer>\n  pause() + maker(1)(3).radius",
                 "define function circle-radius(s :: <circle>) => <shape>\n  s\nend;\n\
                  define function shape-itself(s :: <shape>) => <circle>\n  make(<circle>, radius: 30)\nend;\n\
                  define function main() => <integer>\n  pause() + 0",
@@ -27813,7 +27829,7 @@ end;
              define function maker() => <function>\n  \
                method (s :: <shape>) => <integer> weight(s) end\nend;\n\
              define function use(f :: <function>) => <integer>\n  \
-               let r :: <integer> = apply(f, make(<circle>));\n  r\nend;\n";
+               let r :: <integer> = f(make(<circle>));\n  r\nend;\n";
         let off = lower::CodegenPolicy::Off;
         let first = compile_under(source, off);
         let second = compile_under(
@@ -27876,7 +27892,7 @@ end;
              define method pair(s :: <shape>, t :: <shape>) => <double-float>\n  1.0\nend;\n\
              define method pair(s :: <circle>, t :: <shape>) => <double-float>\n  2.0\nend;\n\
              define function f(s :: <shape>, x :: <object>) => <integer>\n  \
-               let k = as(<function>, x);\n  let r :: <integer> = apply(k, 1);\n  \
+               let k = as(<function>, x);\n  let r :: <integer> = (k)(1);\n  \
                weight(s) + r\nend;\n\
              define function g(s :: <shape>) => <integer>\n  1\nend;";
         let edited = source.replace(
@@ -28061,8 +28077,8 @@ end;
          define function stop() => <integer>\n  signal(make(<stop>))\nend;\n\
          define function probe() => <integer>\n  let c = make(<circle>);\n  weight(c)\nend;\n\
          define function main() => <callable>\n  let x = stop();\n  probe\nend;\n\
-         define function apply-it(f :: <callable>) => <integer>\n  apply(f)\nend;\n\
-         define function use(f :: <callable>) => <integer>\n  let x = stop();\n  apply(f)\nend;";
+         define function apply-it(f :: <callable>) => <integer>\n  f()\nend;\n\
+         define function use(f :: <callable>) => <integer>\n  let x = stop();\n  f()\nend;";
 
     #[test]
     fn linked_sends_of_code_from_earlier_runs_follow_each_run() {
@@ -28156,7 +28172,7 @@ end;
          define function stop() => <integer>\n  signal(make(<stop>))\nend;\n\
          define function probe() => <integer>\n  weight(make(<circle>))\nend;\n\
          define function main() => <callable>\n  let x = stop();\n  probe\nend;\n\
-         define function apply-it(f :: <callable>) => <integer>\n  apply(f)\nend;";
+         define function apply-it(f :: <callable>) => <integer>\n  f()\nend;";
 
     /// [`RANGED`] edited so that `weight`, and `probe` with it, promise a
     /// result from 0 to 100, and `main` no longer stops.
@@ -28796,7 +28812,7 @@ end;
          define function make-exit() => <callable>\n  block (out)\n    out\n  end\nend;\n\
          define function expired() => <integer>\n  \
          let stale :: <callable> = make-exit();\n  \
-         let again :: <callable> = apply(stale, stale);\n  42\nend;";
+         let again :: <callable> = stale(stale);\n  42\nend;";
 
     /// The VM `runtime` parked after its last call.
     fn parked(runtime: &SessionRuntime) -> &ParkedVm {

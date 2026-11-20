@@ -33,7 +33,7 @@ end;
 
 define function applied(s :: <shape>) => <integer>
   handle
-    apply(area, s)
+    apply(area, #[s])
   with restart e :: <no-applicable-method>
     10
   end

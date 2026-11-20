@@ -22,7 +22,7 @@ end;
 
 define function adder(x :: <object>) => <integer>
   if (instance?(x, <integer>))
-    apply(method (y :: <integer>) => <integer> x + y end, 1)
+    (method (y :: <integer>) => <integer> x + y end)(1)
   else
     0
   end

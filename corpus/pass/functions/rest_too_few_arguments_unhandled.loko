@@ -1,0 +1,17 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports <argument-count-error>
+
+// A call through an untyped value cannot know how many arguments the value
+// requires before its `#rest` parameter, so its boxed entry counts them,
+// and too few signal `<argument-count-error>` as a call of the wrong
+// arity does.
+
+define function pair(a, b, #rest more) => <integer>
+  size(more)
+end;
+
+define function main() => <integer>
+  let f :: <function> = pair;
+  let r :: <integer> = f(1);
+  r
+end;

@@ -502,6 +502,7 @@ fn keyword_default(
         name: name.clone(),
         params,
         keywords: Vec::new(),
+        rest: None,
         return_type: Some(ast::ResultAnnotation {
             values: vec![ty.clone()],
             span: ty.span(),

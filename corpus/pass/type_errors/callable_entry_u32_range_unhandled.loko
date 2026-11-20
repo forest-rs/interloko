@@ -9,7 +9,7 @@ define function widen(x :: <u32>) => <integer>
 end;
 
 define function call(f :: <callable>, n :: <integer>) => <integer>
-  apply(f, n)
+  f(n)
 end;
 
 define function main() => <integer>

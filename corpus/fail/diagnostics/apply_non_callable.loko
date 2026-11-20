@@ -2,5 +2,5 @@
 // expect: diagnostic contains apply calls a function, generic or <callable> value, not <integer>
 
 define function main()
-  apply(1, 2)
+  apply(1, #[2])
 end;

@@ -11,7 +11,7 @@ define class <circle> (<object>)
 end;
 
 define function first-radius(f :: <callable>) => <integer>
-  let (c :: <circle>, n :: <integer>) = apply(f, 3);
+  let (c :: <circle>, n :: <integer>) = f(3);
   c.radius + n
 end;
 

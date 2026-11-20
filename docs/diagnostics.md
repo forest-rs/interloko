@@ -298,8 +298,16 @@ function's declared result, or an argument's parameter type. With no such
 context it reports `sem.untyped-callable-result`, which suggests declaring
 one or giving the callable a signature such as `callable(<integer>) =>
 <integer>`. A result the call site relies on but cannot check is
-`sem.unchecked-callable-result`, and a target that is not callable at all
-is `sem.apply-target-type-mismatch`.
+`sem.unchecked-callable-result`, and an `apply` target that is not
+callable at all is `sem.apply-target-type-mismatch`.
+
+`apply` and a call through an untyped value whose callee takes `#rest`
+pass a number of arguments only the run knows. When it is not one the
+callee takes, the call signals `<argument-count-error>` as a call of the
+wrong arity through any untyped value does; statically, a call
+passing too few arguments to a known callee taking `#rest` is
+`sem.function-too-few-arguments`, and an `apply` whose last argument
+cannot be a `<sequence>` is `sem.apply-sequence-type-mismatch`.
 
 ## Corpus
 

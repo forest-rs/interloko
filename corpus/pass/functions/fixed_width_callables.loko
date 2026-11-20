@@ -5,7 +5,7 @@
 // 32-bit types flow through every call form: an `<i32>` widens where an
 // `<integer>` is expected (returns, locals, generic parameters), closures
 // declare 32-bit parameters, and a literal argument adopts the parameter's
-// type for direct, generic, and `apply`ed calls alike.
+// type for direct, generic, and value calls alike.
 define generic total(x :: <integer>) => <integer>;
 
 define method total(x :: <integer>) => <integer>
@@ -26,5 +26,5 @@ define function main() => <integer>
   let twice :: callable(<single-float>) => <single-float> =
     method (y :: <single-float>) => <single-float> y * 2.0 end;
   w + widen(3) + total(4i32) + as(<integer>, pick(#f))
-    + as(<integer>, bump(3)) + as(<integer>, apply(bump, 4)) + as(<integer>, twice(0.0))
+    + as(<integer>, bump(3)) + as(<integer>, bump(4)) + as(<integer>, twice(0.0))
 end;

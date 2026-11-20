@@ -11,7 +11,7 @@ end;
 
 define function call(f :: <function>) => <integer>
   handle
-    if (apply(f, "seven") > 0) 1 else 0 end
+    if (f("seven") > 0) 1 else 0 end
   with restart e :: <type-error>
     if (e.type-error-code = "type-error.entry") 2 else 3 end
   end

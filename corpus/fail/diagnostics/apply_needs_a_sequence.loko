@@ -1,0 +1,12 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.apply-sequence-type-mismatch
+// expect: diagnostic contains apply passes the elements of its last argument, which must be a <sequence>, not <integer>
+
+// Dylan's `apply` spreads its last argument, so it must be a sequence;
+// one that may be is checked as `apply` runs.
+
+define function add(a, b) a + b end;
+
+define function main() => <integer>
+  apply(add, 1, 2)
+end;

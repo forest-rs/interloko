@@ -15,7 +15,7 @@ define class <square> (<object>)
 end;
 
 define function deliver(f :: <callable>, s :: <square>) => <circle>
-  apply(f, s)
+  f(s)
 end;
 
 define function main()

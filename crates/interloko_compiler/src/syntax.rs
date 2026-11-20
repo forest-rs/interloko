@@ -399,6 +399,9 @@ pub enum CstKind {
     KeywordParameter = 69,
     /// Keyword parameter name, which is also its keyword.
     KeywordParameterName = 70,
+    /// Dylan's `#rest name` parameter: the arguments after the required
+    /// ones.
+    RestParameter = 73,
     /// Local binding name.
     LetName = 38,
     /// Restart condition binding name.

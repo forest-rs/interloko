@@ -137,7 +137,7 @@ The current slices include:
 - Dylan's anonymous functions, `method (params) => results body end`,
   which take the parameter and result annotations a `define function` does.
   One written where a typed callable is expected (an argument for a
-  `callable(...)` parameter or keyword, `apply`'s included, a typed
+  `callable(...)` parameter or keyword, a typed
   callable slot's value or default, a `let`, constant or assignment
   declared `callable(...)`, or a result declared one) takes each parameter
   type it does not write, and its results when it writes none, from that
@@ -331,6 +331,36 @@ The current slices include:
   value with exactly those keywords has it. `apply` passes no keywords.
   Statically, a keyword its callee does not take, or one passed twice, is
   an error. Anonymous functions cannot declare keywords yet;
+- Dylan's `#rest` parameters: `define function sum (first, #rest more)` or
+  `method (#rest xs) … end` binds the arguments after the required ones to
+  a `<vector>` the call makes, constant as a literal is, since Dylan's
+  rest sequence is the callee's to read. A direct call, a call through a
+  binding of the function and a typed call through a value make the
+  vector at the call. A call through an untyped value passes a value
+  taking `#rest` its arguments' count and every argument in one vector,
+  which the value's shape says it takes, and the value's boxed entry
+  splits off the required ones, signalling `<argument-count-error>` for
+  too few as a call of the wrong arity does; a call through an untyped value tests the shape only
+  when the program has such a value. A `#rest` parameter takes no type,
+  being always a `<vector>`, generics and methods do not take one yet,
+  nor does a parameter list with `#key` (so a keyword argument through an
+  untyped value taking `#rest` signals `<unknown-keyword-error>` rather
+  than landing in the vector as in Dylan), and whether a definition takes
+  one is part of its contract: a value taking `#rest` never stands in for
+  one taking a `<vector>` parameter, nor the other way round;
+- Dylan's `apply(f, a, …, sequence)` calls `f` with `a, …` and then each
+  element of `sequence`, which may be any `<sequence>`: a vector, a
+  string, or a program's own sequence class through the iteration
+  protocol. `f` is evaluated first, then the arguments in order, which
+  are collected into one vector (the sequence itself when it is a
+  `<vector>` and nothing precedes it), and the call goes through `f`'s
+  value under the boxed callable ABI, its entry checking each element as
+  it checks an untyped call's argument. A value taking `#rest` gets the
+  vector whole; any other gets as many arguments as the vector holds, a
+  number lowering checks against the value's when it knows its signature
+  and otherwise against each number a callable value of the program takes,
+  and a vector of the wrong size signals `<argument-count-error>`. Each element is a positional
+  argument: `apply` passes no keywords;
 - Dylan's class and generic adjectives: `define abstract class` (no direct
   instances, so `make` refuses it), `define sealed class` and `define
   sealed generic`, with `open` and `concrete` as the explicit defaults.

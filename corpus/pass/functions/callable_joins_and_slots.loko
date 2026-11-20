@@ -13,12 +13,12 @@ end;
 
 define function choose(c :: <boolean>, f :: <callable>, g :: <callable>) => <integer>
   let h :: <callable> = if (c) f else g end;
-  let r :: <integer> = apply(h, 1);
+  let r :: <integer> = h(1);
   r
 end;
 
 define function from-slot(s :: <stash>) => <integer>
-  let r :: <integer> = apply(s.fn, 10);
+  let r :: <integer> = s.fn(10);
   r
 end;
 

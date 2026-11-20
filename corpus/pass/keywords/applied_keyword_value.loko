@@ -1,7 +1,8 @@
 // expect: run 7
 // expect: diagnostics 0
 // `apply` passes no keywords, so the value fills every default; `element`
-// is a value that takes its `default` keyword like any other.
+// is a value that takes its `default` keyword like any other. Dylan's
+// `apply` spreads its last argument, a sequence, after any before it.
 
 define function scale(x :: <integer>, #key by :: <integer> = 2) => <integer>
   x * by
@@ -14,5 +15,5 @@ end;
 
 define function main() => <integer>
   let f = element;
-  as(<integer>, apply(f, #[0], 0)) + apply(scale, 3) + lookup(element)
+  as(<integer>, apply(f, #[#[0], 0])) + apply(scale, #[3]) + lookup(element)
 end;

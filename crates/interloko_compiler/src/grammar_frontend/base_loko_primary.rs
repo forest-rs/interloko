@@ -556,34 +556,54 @@ impl BaseLokoCstProjector<'_> {
 
     fn build_parameter_list(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
         let mut roles = Vec::new();
-        let mut keywords = Vec::new();
-        for child in &node.children {
-            if child.is_rule("keyword-parameters") {
-                keywords.extend(
+        let mut nested = Vec::new();
+        self.collect_parameters(&node.children, &mut roles, &mut nested);
+        let excluded = nested.iter().map(|nested| nested.span).collect::<Vec<_>>();
+        let mut children = self.direct_tokens(node.span, &excluded);
+        children.extend(roles.into_iter().map(CstElement::Node));
+        children.extend(nested.into_iter().map(CstElement::Node));
+        self.node(CstKind::ParameterList, self.sorted(children), node.span)
+    }
+
+    /// Collects a parameter list's required parameters as name and type
+    /// roles, and its `#rest` and `#key` parameters as nodes of their own.
+    fn collect_parameters(
+        &self,
+        children: &[InterpretedRuleNode<'_>],
+        roles: &mut Vec<CstNode>,
+        nested: &mut Vec<CstNode>,
+    ) {
+        for child in children {
+            if child.is_rule("parameter-tail") {
+                self.collect_parameters(&child.children, roles, nested);
+            } else if child.is_rule("keyword-parameters") {
+                nested.extend(
                     child
                         .children
                         .iter()
                         .filter(|keyword| keyword.is_rule("keyword-parameter"))
                         .map(|keyword| self.build_keyword_parameter(keyword)),
                 );
-            } else {
+            } else if child.is_rule("rest-parameter") {
+                let mut rest_roles = Vec::new();
                 self.collect_role_nodes(
                     child,
                     "parameter-name",
                     CstKind::ParameterName,
-                    &mut roles,
+                    &mut rest_roles,
                 );
-                self.collect_annotation_type_roles(child, &mut roles);
+                self.collect_annotation_type_roles(child, &mut rest_roles);
+                nested.push(self.node_with_nested_and_roles(
+                    CstKind::RestParameter,
+                    child,
+                    Vec::new(),
+                    rest_roles,
+                ));
+            } else {
+                self.collect_role_nodes(child, "parameter-name", CstKind::ParameterName, roles);
+                self.collect_annotation_type_roles(child, roles);
             }
         }
-        let excluded = keywords
-            .iter()
-            .map(|keyword| keyword.span)
-            .collect::<Vec<_>>();
-        let mut children = self.direct_tokens(node.span, &excluded);
-        children.extend(roles.into_iter().map(CstElement::Node));
-        children.extend(keywords.into_iter().map(CstElement::Node));
-        self.node(CstKind::ParameterList, self.sorted(children), node.span)
     }
 
     /// Builds `name :: <type> = default` after `#key`: the name and type

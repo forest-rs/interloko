@@ -1,0 +1,43 @@
+// expect: run 3106945
+// expect: diagnostics 0
+// expect: dump sem contains callable-call result=integer rest
+// expect: dump lowered contains vector-tail
+// expect: dump lowered contains $arguments
+
+// Dylan's `#rest xs` takes the arguments after the required ones as a
+// `<vector>` the call makes, constant as a literal is. A direct call, a
+// call through a binding of the function and a typed call of a value make
+// it at the call; an untyped call passes every argument in one vector,
+// and the value's boxed entry splits off the required ones.
+
+define function count(#rest xs) => <integer>
+  size(xs)
+end;
+
+define function sum(first :: <integer>, #rest more) => <integer>
+  let total = first;
+  for (x :: <integer> in more) total := total + x end;
+  total
+end;
+
+define function call-it(f :: <function>) => <integer>
+  let r :: <integer> = f(1, 2, 3);
+  r
+end;
+
+define function main() => <integer>
+  let add = method (#rest xs) => <integer>
+    let t = 0;
+    for (x :: <integer> in xs) t := t + x end;
+    t
+  end;
+  let s = sum;
+  count(1, 2, 3) * 1000000          // 3
+    + sum(1) * 100000               // 1
+    + sum(1, 2, 3) * 1000           // 6
+    + s(4, 5) * 100                 // 9
+    + add(1, 2) * 10                // 3
+    + call-it(count)                // 3
+    + call-it(add)                  // 6
+    + call-it(sum)                  // 6
+end;

@@ -11,7 +11,7 @@
 // writes none, from the expected signature, wherever that is: a slot, its
 // default, a constant, a function's parameter, keyword or result, a
 // parameter of a callable parameter, a typed binding, assigned or not, or
-// an argument `apply` passes to any of those.
+// an argument of a call through any of those's value, `(fold)(…)`.
 // Every `+` and `*` below adds integers inline. A result keeps the first
 // value of a body that returns more, so `truncate/` fits `=> <integer>`.
 
@@ -62,5 +62,5 @@ define function main() => <integer>
     + add5(1)                                     // 6
     + apply-to-two(method (h, z) h(z) end)        // 6
     + g(1)                                        // 201
-    + apply(fold, #[4], method (a, b) a + b end)  // 4
+    + (fold)(#[4], method (a, b) a + b end)  // 4
 end;

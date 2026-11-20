@@ -9,7 +9,7 @@ define function byte(n :: limited(<integer>, min: 0, max: 255)) => <integer>
 end;
 
 define function call(f :: <callable>, x :: <integer>) => <integer>
-  apply(f, x) + 0
+  f(x) + 0
 end;
 
 define function main() => <integer>

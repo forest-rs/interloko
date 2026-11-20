@@ -9,7 +9,7 @@ define function flip(b :: <boolean>) => <boolean>
   if (b) #f else #t end
 end;
 define function call(f :: <callable>, x :: <integer>) => <boolean>
-  apply(f, x)
+  f(x)
 end;
 define function main() => <boolean>
   call(flip, 3)

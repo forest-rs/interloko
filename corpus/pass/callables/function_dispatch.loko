@@ -8,7 +8,7 @@
 define generic run-it(f, x :: <integer>) => <integer>;
 
 define method run-it(f :: <function>, x :: <integer>) => <integer>
-  apply(f, x)
+  f(x)
 end;
 
 define method run-it(f :: <object>, x :: <integer>) => <integer>

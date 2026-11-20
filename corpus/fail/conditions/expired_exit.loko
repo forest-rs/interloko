@@ -14,6 +14,6 @@ end;
 
 define function main() => <integer>
   let stale :: <callable> = make-exit();
-  let again :: <callable> = apply(stale, stale);
+  let again :: <callable> = stale(stale);
   42
 end;

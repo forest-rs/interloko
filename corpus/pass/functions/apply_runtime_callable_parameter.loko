@@ -1,21 +1,21 @@
 // expect: run 42
 // expect: diagnostics 0
 // expect: dump sem contains f:callable
-// expect: dump sem contains callable-call result=integer
+// expect: dump sem contains callable-call result=integer spread
 // expect: dump lowered contains f: callable
 // expect: dump lowered contains call.indirect
 // expect: dump tape contains const.func
 // expect: dump tape contains closure.new
 // expect: dump tape contains call.indirect
 
-define function inc(x)
-  x + 1
+define function add(x, y)
+  x + y
 end;
 
 define function callit(f :: <callable>) => <integer>
-  apply(f, 41)
+  apply(f, 41, #[1])
 end;
 
 define function main()
-  callit(inc)
+  callit(add)
 end;
