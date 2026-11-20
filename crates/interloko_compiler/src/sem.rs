@@ -16199,7 +16199,8 @@ impl Lowering {
         }
         let cleanup = cleanup.map(|cleanup| {
             let scope_start = ctx.scope_start();
-            let cleanup = self.lower_block(ctx, cleanup, None);
+            // A cleanup runs for its effects, as a statement does.
+            let cleanup = self.lower_block(ctx, cleanup, effect_expectation(&cleanup.result));
             ctx.hide_locals_from(scope_start);
             Box::new(cleanup)
         });
@@ -17848,7 +17849,9 @@ impl Lowering {
         };
         self.check_test_is_boolean(ctx, keyword, &test);
         let scope = ctx.scope_start();
-        let body = self.lower_block(ctx, body, None);
+        // The loop discards its body's values, so a conditional ending the
+        // body is lowered as a statement is: its arms need not agree.
+        let body = self.lower_block(ctx, body, effect_expectation(&body.result));
         ctx.hide_locals_from(scope);
         Expr::Loop {
             kind: kind.into(),
@@ -17946,7 +17949,8 @@ impl Lowering {
         }
         let mut iteration = body.clone();
         iteration.statements.splice(0..0, bindings);
-        let mut lowered = self.lower_block(ctx, &iteration, None);
+        // As in a `while` body, the iteration's values are discarded.
+        let mut lowered = self.lower_block(ctx, &iteration, effect_expectation(&iteration.result));
         ctx.hide_locals_from(body_scope);
         ctx.loop_variables.truncate(loop_variables);
         lowered.statements.splice(0..0, each);

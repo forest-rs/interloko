@@ -1,0 +1,23 @@
+// expect: run 1013
+// expect: diagnostics 0
+
+// A loop discards its body's values, and a `block` its cleanup's, so a
+// conditional ending one runs its arms for their effects, as a statement
+// does: the arms need not agree.
+
+define function main() => <integer>
+  let digits = 0;
+  let others = #f;
+  for (c in "1a2") if (digit?(c)) digits := digits + 1 else others := #t end end;
+  let n = 0;
+  while (n < 3) if (others) n := n + 1 else others := #t end end;
+  for (i from 0 below 4) if (i < 2) n := n + 1 else others := #f end end;
+  until (n >= 10) if (others) n := 0 else n := n + 2 end end;
+  let cleaned = 0;
+  block ()
+    n := n + 1000
+  cleanup
+    if (n > 0) cleaned := 1 else others := #t end
+  end;
+  n + digits * cleaned
+end;
