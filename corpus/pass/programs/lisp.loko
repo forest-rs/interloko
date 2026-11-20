@@ -1,0 +1,374 @@
+// expect: run 14
+// expect: diagnostics 0
+
+// A small Scheme: a reader from text to s-expressions, an evaluator with
+// lexical environments and closures, and a printer back to text. Lisp data
+// is Dylan data: lists are `<pair>`s ending in `#()`, symbols are
+// `<symbol>`s, numbers are `<integer>`s and the booleans are `#t` and `#f`,
+// so the evaluator's `if` is Dylan's `if` and only `#f` is false.
+//
+//   (define (fact n) (if (< n 2) 1 (* n (fact (- n 1))))) (fact 10)  =>  3628800
+
+// --- conditions ----------------------------------------------------------
+
+define abstract class <lisp-error> (<error>) end;
+
+define class <unbound-variable> (<lisp-error>)
+  constant slot variable-name :: <symbol>, required-init-keyword: name:;
+end;
+
+define class <syntax-error> (<lisp-error>)
+  constant slot form, required-init-keyword: form:;
+  constant slot reason :: <string>, required-init-keyword: reason:;
+end;
+
+define class <read-error> (<lisp-error>)
+  constant slot position :: <string-position>, required-init-keyword: position:;
+  constant slot reason :: <string>, required-init-keyword: reason:;
+end;
+
+// --- environments --------------------------------------------------------
+
+// One frame of bindings, symbol to value, and the frame it is nested in.
+define class <environment> (<object>)
+  constant slot bindings :: <table> = make(<table>);
+  constant slot parent :: false-or(<environment>) = #f, init-keyword: parent:;
+end;
+
+// The innermost frame binding `name`.
+define function binding-frame(env :: <environment>, name :: <symbol>)
+ => (frame :: <environment>)
+  let frame :: false-or(<environment>) = env;
+  until (~frame | key-exists?(frame.bindings, name))
+    frame := frame.parent
+  end;
+  frame | error(make(<unbound-variable>, name: name))
+end;
+
+define function lookup(env :: <environment>, name :: <symbol>) => (value)
+  binding-frame(env, name).bindings[name]
+end;
+
+define function define-variable!(env :: <environment>, name :: <symbol>, value)
+ => (name :: <symbol>)
+  env.bindings[name] := value;
+  name
+end;
+
+define function set-variable!(env :: <environment>, name :: <symbol>, value)
+ => (value)
+  binding-frame(env, name).bindings[name] := value
+end;
+
+// --- procedures ----------------------------------------------------------
+
+define abstract class <procedure> (<object>) end;
+
+define class <primitive> (<procedure>)
+  constant slot name :: <string>, required-init-keyword: name:;
+  constant slot code :: <function>, required-init-keyword: code:;
+end;
+
+define class <closure> (<procedure>)
+  constant slot parameters :: <list>, required-init-keyword: parameters:;
+  constant slot body :: <list>, required-init-keyword: body:;
+  constant slot environment :: <environment>, required-init-keyword: environment:;
+end;
+
+define generic invoke(procedure, arguments :: <list>);
+
+define method invoke(p :: <primitive>, arguments :: <list>)
+  apply(p.code, arguments)
+end;
+
+define method invoke(c :: <closure>, arguments :: <list>)
+  unless (size(c.parameters) = size(arguments))
+    error(make(<syntax-error>, form: pair(c, arguments), reason: "wrong number of arguments"))
+  end;
+  let frame = make(<environment>, parent: c.environment);
+  for (name in c.parameters, value in arguments)
+    define-variable!(frame, name, value)
+  end;
+  evaluate-body(c.body, frame)
+end;
+
+define method invoke(p :: <object>, arguments :: <list>)
+  error(make(<syntax-error>, form: p, reason: "not a procedure"))
+end;
+
+// --- the reader ----------------------------------------------------------
+
+define class <reader> (<object>)
+  constant slot text :: <string>, required-init-keyword: text:;
+  slot position :: <string-position>, required-init-keyword: position:;
+end;
+
+define function peek-char(r :: <reader>) => (c :: false-or(<character>))
+  element(r.text, r.position, default: #f)
+end;
+
+define function advance!(r :: <reader>) => ()
+  r.position := next-position(r.text, r.position)
+end;
+
+define function read-error(r :: <reader>, reason :: <string>)
+  error(make(<read-error>, position: r.position, reason: reason))
+end;
+
+define function delimiter?(c :: <character>) => (yes? :: <boolean>)
+  whitespace?(c) | member?(c, "()'")
+end;
+
+define function skip-whitespace(r :: <reader>) => ()
+  let c = peek-char(r);
+  while (c & whitespace?(c))
+    advance!(r);
+    c := peek-char(r)
+  end
+end;
+
+define function read-datum(r :: <reader>)
+  skip-whitespace(r);
+  select (peek-char(r))
+    #f => read-error(r, "unexpected end of input");
+    '(' => advance!(r); read-list-tail(r);
+    ')' => read-error(r, "unexpected )");
+    '\'' => advance!(r); list(#quote, read-datum(r));
+    otherwise => read-atom(r);
+  end
+end;
+
+// The elements of a list whose `(` has been read, through its `)`.
+define function read-list-tail(r :: <reader>) => (elements :: <list>)
+  skip-whitespace(r);
+  select (peek-char(r))
+    #f => read-error(r, "unclosed list");
+    ')' => advance!(r); #();
+    otherwise =>
+      let first = read-datum(r);
+      pair(first, read-list-tail(r));
+  end
+end;
+
+define function read-atom(r :: <reader>)
+  let start = r.position;
+  let c = peek-char(r);
+  while (c & ~delimiter?(c))
+    advance!(r);
+    c := peek-char(r)
+  end;
+  let token = copy-sequence(r.text, start: start, end: r.position);
+  select (token by \=)
+    "#t" => #t;
+    "#f" => #f;
+    otherwise => string-to-integer(token, default: #f) | as(<symbol>, token);
+  end
+end;
+
+define function read-all(text :: <string>) => (forms :: <list>)
+  let r = make(<reader>, text: text, position: start-position(text));
+  let forms = #();
+  skip-whitespace(r);
+  while (peek-char(r))
+    forms := pair(read-datum(r), forms);
+    skip-whitespace(r)
+  end;
+  reverse!(forms)
+end;
+
+// --- the evaluator -------------------------------------------------------
+
+define function check-syntax(form :: <pair>, ok? :: <boolean>, reason :: <string>) => ()
+  unless (ok?) error(make(<syntax-error>, form: form, reason: reason)) end
+end;
+
+define function evaluate-body(body :: <list>, env :: <environment>)
+  let result = #f;
+  for (form in body) result := evaluate(form, env) end;
+  result
+end;
+
+define generic evaluate(form, env :: <environment>);
+
+// Numbers and booleans evaluate to themselves.
+define method evaluate(form :: <object>, env :: <environment>)
+  form
+end;
+
+define method evaluate(form :: <symbol>, env :: <environment>)
+  lookup(env, form)
+end;
+
+define method evaluate(form :: <empty-list>, env :: <environment>)
+  error(make(<syntax-error>, form: form, reason: "empty combination"))
+end;
+
+define method evaluate(form :: <pair>, env :: <environment>)
+  select (form.head)
+    #quote =>
+      check-syntax(form, size(form) = 2, "quote takes one datum");
+      second(form);
+    #if =>
+      check-syntax(form, size(form) = 3 | size(form) = 4, "if takes 2 or 3 operands");
+      if (evaluate(second(form), env))
+        evaluate(third(form), env)
+      else
+        size(form) = 4 & evaluate(form[3], env)
+      end;
+    #define =>
+      check-syntax(form, size(form) >= 3, "define takes a name and a value");
+      let target = second(form);
+      if (instance?(target, <pair>))       // (define (name . parameters) body ...)
+        define-variable!(env, target.head,
+                         make(<closure>, parameters: target.tail,
+                              body: tail(tail(form)), environment: env))
+      else
+        define-variable!(env, target, evaluate(third(form), env))
+      end;
+    #lambda =>
+      check-syntax(form, size(form) >= 3, "lambda takes parameters and a body");
+      make(<closure>, parameters: second(form), body: tail(tail(form)), environment: env);
+    #let =>
+      check-syntax(form, size(form) >= 3, "let takes bindings and a body");
+      let frame = make(<environment>, parent: env);
+      for (binding in second(form))
+        define-variable!(frame, first(binding), evaluate(second(binding), env))
+      end;
+      evaluate-body(tail(tail(form)), frame);
+    #begin =>
+      evaluate-body(form.tail, env);
+    #set! =>
+      check-syntax(form, size(form) = 3, "set! takes a name and a value");
+      set-variable!(env, second(form), evaluate(third(form), env));
+    otherwise =>
+      invoke(evaluate(form.head, env),
+             map(method (argument) evaluate(argument, env) end, form.tail));
+  end
+end;
+
+// --- the printer ---------------------------------------------------------
+
+define generic print-datum(datum) => (text :: <string>);
+
+define method print-datum(n :: <integer>) => (text :: <string>)
+  integer-to-string(n)
+end;
+
+define method print-datum(b :: <boolean>) => (text :: <string>)
+  if (b) "#t" else "#f" end
+end;
+
+define method print-datum(s :: <symbol>) => (text :: <string>)
+  as(<string>, s)
+end;
+
+define method print-datum(l :: <empty-list>) => (text :: <string>)
+  "()"
+end;
+
+define method print-datum(p :: <pair>) => (text :: <string>)
+  if (p.head == #quote & instance?(p.tail, <pair>) & empty?(tail(p.tail)))
+    concatenate("'", print-datum(second(p)))
+  else
+    let text = concatenate("(", print-datum(p.head));
+    let rest = p.tail;
+    while (instance?(rest, <pair>))
+      text := concatenate(text, " ", print-datum(rest.head));
+      rest := rest.tail
+    end;
+    unless (rest == #()) text := concatenate(text, " . ", print-datum(rest)) end;
+    concatenate(text, ")")
+  end
+end;
+
+define method print-datum(p :: <primitive>) => (text :: <string>)
+  concatenate("#<primitive ", p.name, ">")
+end;
+
+define method print-datum(c :: <closure>) => (text :: <string>)
+  "#<closure>"
+end;
+
+// --- the global environment ----------------------------------------------
+
+define function global-environment() => (env :: <environment>)
+  let env = make(<environment>);
+  local method primitive (name :: <string>, code :: <function>) => ()
+    define-variable!(env, as(<symbol>, name), make(<primitive>, name: name, code: code))
+  end;
+  primitive("+", method (#rest xs) reduce(\+, 0, xs) end);
+  primitive("*", method (#rest xs) reduce(\*, 1, xs) end);
+  primitive("-", method (x, #rest xs) if (empty?(xs)) -x else reduce(\-, x, xs) end end);
+  primitive("<", \<);
+  primitive("=", \=);
+  primitive("car", head);
+  primitive("cdr", tail);
+  primitive("cons", pair);
+  primitive("null?", empty?);
+  primitive("list", list);
+  env
+end;
+
+// The value of the last form in `source`.
+define function run(source :: <string>, env :: <environment>)
+  evaluate-body(read-all(source), env)
+end;
+
+// The printed value of `source` in a fresh global environment.
+define function run-to-string(source :: <string>) => (text :: <string>)
+  print-datum(run(source, global-environment()))
+end;
+
+// Counts the checks that pass: all 14 of them.
+define function main() => (passed :: <integer>)
+  let passed = 0;
+  local method check (actual, expected) => ()
+    if (actual = expected) passed := passed + 1 end
+  end;
+  check(run-to-string("(define (fact n) (if (< n 2) 1 (* n (fact (- n 1))))) (fact 10)"),
+        "3628800");
+  check(run-to-string("(define (make-counter)"
+                      "  (let ((n 0)) (lambda () (set! n (+ n 1)) n)))"
+                      "(define c (make-counter)) (define d (make-counter))"
+                      "(c) (c) (d) (list (c) (d))"),
+        "(3 2)");
+  check(run-to-string("(define (map f xs)"
+                      "  (if (null? xs) '() (cons (f (car xs)) (map f (cdr xs)))))"
+                      "(map (lambda (x) (* x x)) '(1 2 3 4))"),
+        "(1 4 9 16)");
+  check(run-to-string("(let ((x 2) (y 3)) (begin (set! x (* x y)) (list x y)))"), "(6 3)");
+  check(run-to-string("(cons 1 (cons 2 3))"), "(1 2 . 3)");
+  check(run-to-string("'(a 'b (c #t) #f ())"), "(a 'b (c #t) #f ())");
+  check(run-to-string("(- 10 1 2 3)"), "4");
+  check(run-to-string("(- 7)"), "-7");
+  check(run-to-string("(if (< 2 1) 'yes)"), "#f");
+  check(run-to-string("(define (sum-to n) (if (= n 0) 0 (+ n (sum-to (- n 1)))))"
+                      "(sum-to 100)"),
+        "5050");
+  // An adder made by a closure over a closure.
+  check(run-to-string("(define (adder n) (lambda (x) (+ x n)))"
+                      "((adder 40) 2)"),
+        "42");
+  // Errors are Loko conditions: an unbound variable names itself,
+  check(block ()
+          run-to-string("(define x 1) (+ x y)")
+        exception (e :: <unbound-variable>)
+          e.variable-name
+        end,
+        #y);
+  // bad syntax names its reason,
+  check(block ()
+          run-to-string("(if)")
+        exception (e :: <syntax-error>)
+          e.reason
+        end,
+        "if takes 2 or 3 operands");
+  // and unreadable text where it stops.
+  check(block ()
+          run-to-string("(+ 1 (* 2 3)")
+        exception (e :: <read-error>)
+          e.reason
+        end,
+        "unclosed list");
+  passed
+end;
