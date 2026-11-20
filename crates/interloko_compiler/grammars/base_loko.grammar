@@ -143,7 +143,12 @@ rule type-expression = expression-type-name
 rule expression-type-name = type-name
 rule number-literal = number
 rule bool-literal = `#t` | `#f`
-rule string-literal raw = `"` until(`"`) `"`
+// As in Dylan, adjacent string literals are one literal: `"ab" "cd"` is
+// `"abcd"`, so long text may be written across lines.
+rule string-literal = string-piece+
+// A piece is not raw, so trivia may come before each one.
+rule string-piece = string-text
+rule string-text raw = `"` until(`"`) `"`
 rule character-literal raw = `'` (`\` [^\n] [^'\n]* | [^'\\\n] [^'\n]*) `'`
 // `#"set!"` is Dylan's symbol literal for any name, one that is not a
 // word included.
