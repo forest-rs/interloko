@@ -20705,7 +20705,6 @@ mod tests {
         let simple = class(&module, "<simple-error>");
         assert_eq!(simple.superclass, Some(error));
         assert_eq!(simple.id.0, unknown_keyword.id.0 + 1);
-        assert_eq!(simple.id.0 as usize, module.classes.len() - 1);
         assert_eq!(
             simple
                 .effective_slots
@@ -20713,6 +20712,21 @@ mod tests {
                 .map(|slot| slot.name.as_str())
                 .collect::<Vec<_>>(),
             ["condition-format-string", "condition-format-arguments"]
+        );
+        let argument_count = class(&module, "<argument-count-error>");
+        assert_eq!(argument_count.superclass, Some(error));
+        assert_eq!(argument_count.id.0, simple.id.0 + 1);
+        assert_eq!(argument_count.id.0 as usize, module.classes.len() - 1);
+        assert_eq!(
+            argument_count
+                .effective_slots
+                .iter()
+                .map(|slot| (slot.name.as_str(), slot.kind))
+                .collect::<Vec<_>>(),
+            [
+                ("argument-count-error-expected", ValueKind::I64),
+                ("argument-count-error-actual", ValueKind::I64)
+            ]
         );
         assert_eq!(
             unknown_keyword

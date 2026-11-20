@@ -1,0 +1,26 @@
+// expect: run 1001
+// expect: diagnostics 0
+
+// A value adapted to a typed signature, then passed on as untyped, still
+// takes the arguments its own method takes: the adapter shares the
+// method's boxed entry, so the adapted value's shape counts as the method
+// does. A call with the method's count reaches it; a call with the
+// signature's count signals `<argument-count-error>`, and none traps.
+
+define function leak(f :: callable(<integer>) => <integer>) => <callable>
+  f
+end;
+
+define function main() => <integer>
+  let l :: <callable> = leak;
+  let h :: <callable> = l(method (a, b) a end);
+  let both :: <integer> = h(1, 2);
+  let one
+    = block ()
+        let r :: <integer> = h("x");
+        r
+      exception (e :: <argument-count-error>)
+        e.argument-count-error-expected * 500 + e.argument-count-error-actual - 1
+      end;
+  both + one
+end;

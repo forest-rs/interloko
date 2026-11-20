@@ -217,9 +217,16 @@ pub struct LabelId(
 pub enum BoxedEntry {
     /// A closure of this function over the value's captures.
     Function(FunctionId),
-    /// The boxed entry, a [`ValueKind::Entry`], of another callable value,
-    /// which an adapter shares.
-    Shared(Reg),
+    /// The boxed entry of another callable value, which an adapter shares.
+    Shared {
+        /// The entry, a [`ValueKind::Entry`].
+        entry: Reg,
+        /// The other value's shape, a `u64`. The entry takes and returns
+        /// as many values as it says, so the new value's shape takes its
+        /// argument and result counts from it rather than from its own
+        /// signature.
+        shape: Reg,
+    },
 }
 
 /// Durable callable signature identifier within a lowered module.
@@ -2061,6 +2068,20 @@ pub enum Instr {
         array: Reg,
         /// `u64` index register.
         index: Reg,
+        /// Source span.
+        span: Span,
+    },
+    /// The bits of `src` at `shift` under `mask`, as an `<integer>`:
+    /// `(src >> shift) & mask`, where `mask` leaves the sign bit clear.
+    U64Field {
+        /// Destination `i64` register.
+        dst: Reg,
+        /// Source `u64` register.
+        src: Reg,
+        /// How far to shift right first.
+        shift: u32,
+        /// The field's bits, after the shift.
+        mask: u64,
         /// Source span.
         span: Span,
     },
@@ -4106,7 +4127,7 @@ impl<'module> Lowering<'module> {
             .iter()
             .map(|_| body.alloc(BOXED_WIRE))
             .collect::<Vec<_>>();
-        body.call_entry_keeping(boxed, &wired, &results, Some(shape), span);
+        body.call_entry_counted((boxed, shape), &wired, wired.len(), &results, span)?;
         // A class result need only be an object here: typed callers cast
         // the class results they rely on themselves, at sites typing
         // classifies.
@@ -4221,13 +4242,13 @@ impl<'module> Lowering<'module> {
         ]);
         let mut args = wired.clone();
         args.extend([names, values]);
-        body.call_entry_keeping(keyword_entry, &args, &results, Some(shape), span);
+        body.call_entry_counted((keyword_entry, shape), &args, wired.len(), &results, span)?;
         body.instructions.extend([
             Instr::Jump { label: join, span },
             Instr::Label { label: without },
         ]);
         body.parse_keywords(names, values, &[], span)?;
-        body.call_entry_keeping(boxed, &wired, &results, Some(shape), span);
+        body.call_entry_counted((boxed, shape), &wired, wired.len(), &results, span)?;
         body.instructions.extend([
             Instr::Jump { label: join, span },
             Instr::Label { label: join },
@@ -5039,7 +5060,7 @@ impl<'module> BodyLowering<'module> {
     fn call_boxed(
         &mut self,
         [boxed_entry, keyword_entry]: [Value; 2],
-        shape: Option<Value>,
+        shape: Value,
         takes: TakesKeywords,
         wired: &[Value],
         keywords: &[String],
@@ -5070,9 +5091,6 @@ impl<'module> BodyLowering<'module> {
             }
             TakesKeywords::Shape => {}
         }
-        let Some(shape) = shape else {
-            return Err(invalid_semantic("a keyword test needs the callee's shape"));
-        };
         let (bit, flag, zero, none) = (
             self.alloc(ValueKind::U64),
             self.alloc(ValueKind::U64),
@@ -5112,7 +5130,7 @@ impl<'module> BodyLowering<'module> {
             Instr::Label { label: with },
         ]);
         self.call_with_tail(
-            (keyword_entry, Some(shape)),
+            (keyword_entry, shape),
             wired,
             keywords,
             keyword_values,
@@ -5124,7 +5142,7 @@ impl<'module> BodyLowering<'module> {
             Instr::Label { label: without },
         ]);
         self.call_without_tail(
-            (boxed_entry, Some(shape)),
+            (boxed_entry, shape),
             wired,
             keywords,
             keyword_values,
@@ -5142,7 +5160,7 @@ impl<'module> BodyLowering<'module> {
     /// keyword tail.
     fn call_with_tail(
         &mut self,
-        (entry, shape): (Value, Option<Value>),
+        (entry, shape): (Value, Value),
         wired: &[Value],
         keywords: &[String],
         keyword_values: &[Value],
@@ -5152,8 +5170,7 @@ impl<'module> BodyLowering<'module> {
         let (names, values) = self.keyword_tail(keywords, keyword_values, span);
         let mut args = wired.to_vec();
         args.extend([names, values]);
-        self.call_entry_keeping(entry, &args, results, shape, span);
-        Ok(())
+        self.call_entry_counted((entry, shape), &args, wired.len(), results, span)
     }
 
     /// Calls the boxed entry of a value of shape `shape`, which takes no
@@ -5161,7 +5178,7 @@ impl<'module> BodyLowering<'module> {
     /// passes, if any.
     fn call_without_tail(
         &mut self,
-        (entry, shape): (Value, Option<Value>),
+        (entry, shape): (Value, Value),
         wired: &[Value],
         keywords: &[String],
         keyword_values: &[Value],
@@ -5201,7 +5218,7 @@ impl<'module> BodyLowering<'module> {
                 Instr::Label { label: next },
             ]);
         }
-        self.call_entry_keeping(entry, wired, results, shape, span);
+        self.call_entry_counted((entry, shape), wired, wired.len(), results, span)?;
         self.instructions.extend([
             Instr::Jump { label: done, span },
             Instr::Label { label: done },
@@ -5329,6 +5346,109 @@ impl<'module> BodyLowering<'module> {
             Instr::Jump { label: join, span },
             Instr::Label { label: join },
         ]);
+    }
+
+    /// [`Self::call_entry_keeping`] after testing that the value whose
+    /// shape is `shape` takes `required` required arguments, as many as
+    /// the call passes before any keyword tail. When it takes another
+    /// number the call is not made: it signals `<argument-count-error>`
+    /// instead, whose resumption values, which no handler supplies, would
+    /// land in `results`.
+    fn call_entry_counted(
+        &mut self,
+        (entry, shape): (Value, Value),
+        args: &[Value],
+        required: usize,
+        results: &[Value],
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let encoded = u64::try_from(required)
+            .ok()
+            .filter(|count| *count < PARAMS_SHAPE_MAX);
+        let Some(encoded) = encoded else {
+            // A count the shape cannot record exactly is left to the tape.
+            self.call_entry_keeping(entry, args, results, Some(shape), span);
+            return Ok(());
+        };
+        let (mask, taken, expected, same) = (
+            self.alloc(ValueKind::U64),
+            self.alloc(ValueKind::U64),
+            self.alloc(ValueKind::U64),
+            self.alloc(ValueKind::Bool),
+        );
+        let (call, wrong, done) = (self.alloc_label(), self.alloc_label(), self.alloc_label());
+        self.instructions.extend([
+            Instr::ConstU64 {
+                dst: mask.reg,
+                value: PARAMS_SHAPE,
+                span,
+            },
+            Instr::AndU64 {
+                dst: taken.reg,
+                lhs: shape.reg,
+                rhs: mask.reg,
+                span,
+            },
+            Instr::ConstU64 {
+                dst: expected.reg,
+                value: encoded << PARAMS_SHAPE_SHIFT,
+                span,
+            },
+            Instr::EqU64 {
+                dst: same.reg,
+                lhs: taken.reg,
+                rhs: expected.reg,
+                span,
+            },
+            Instr::Branch {
+                cond: same.reg,
+                then_label: call,
+                else_label: wrong,
+                span,
+            },
+            Instr::Label { label: call },
+        ]);
+        self.call_entry_keeping(entry, args, results, Some(shape), span);
+        self.instructions.extend([
+            Instr::Jump { label: done, span },
+            Instr::Label { label: wrong },
+        ]);
+        let class = self
+            .module
+            .condition_class(sem::ConditionClass::ArgumentCountError)
+            .ok_or_else(|| invalid_semantic("the <argument-count-error> class is missing"))?;
+        let (takes, passed) = (self.alloc(ValueKind::I64), self.alloc(ValueKind::I64));
+        let passed_count = i64::try_from(required)
+            .map_err(|_| invalid_semantic("an argument count does not fit an integer"))?;
+        let condition = self.alloc(ValueKind::Object(Some(class)));
+        self.instructions.extend([
+            Instr::U64Field {
+                dst: takes.reg,
+                src: shape.reg,
+                shift: PARAMS_SHAPE_SHIFT,
+                mask: PARAMS_SHAPE_MAX,
+                span,
+            },
+            Instr::ConstI64 {
+                dst: passed.reg,
+                value: passed_count,
+                span,
+            },
+            Instr::MakeObject {
+                dst: condition.reg,
+                class,
+                fields: vec![takes.reg, passed.reg],
+                span,
+            },
+            Instr::Signal {
+                dsts: results.iter().map(|result| result.reg).collect(),
+                condition: condition.reg,
+                span,
+            },
+            Instr::Jump { label: done, span },
+            Instr::Label { label: done },
+        ]);
+        Ok(())
     }
 
     /// Reads a boxed call's keyword tail into one boxed value per keyword
@@ -9066,7 +9186,11 @@ impl<'module> BodyLowering<'module> {
             Some(typed) => vec![boxed.reg, typed.reg, shape.reg],
             None => vec![boxed.reg, shape.reg],
         };
-        self.emit_callable_new(adapter, BoxedEntry::Shared(boxed.reg), sig, &captures, span)
+        let boxed = BoxedEntry::Shared {
+            entry: boxed.reg,
+            shape: shape.reg,
+        };
+        self.emit_callable_new(adapter, boxed, sig, &captures, span)
     }
     /// Applies a callable sem knows to be `generic`, such as
     /// `apply(area, x)`: a send, as a call through the generic's value would
@@ -9422,10 +9546,10 @@ impl<'module> BodyLowering<'module> {
             }
         }
         // A call passing no keywords takes the plain boxed callable ABI,
-        // whatever the value takes.
-        let keeping = !self.larger_result_counts(kinds.len()).is_empty();
-        let [_, Some(boxed_entry), shape] =
-            self.open_callable(callee.reg, [false, true, keeping], span)
+        // whatever the value takes, once its shape says it takes as many
+        // arguments as the call passes.
+        let [_, Some(boxed_entry), Some(shape)] =
+            self.open_callable(callee.reg, [false, true, true], span)
         else {
             return Err(invalid_semantic(
                 "opening a callable dropped its boxed entry",
@@ -9439,7 +9563,8 @@ impl<'module> BodyLowering<'module> {
             .iter()
             .map(|_| self.alloc(BOXED_WIRE))
             .collect::<Vec<_>>();
-        self.call_entry_keeping(boxed_entry, &wired, &boxed_results, shape, span);
+        let count = wired.len();
+        self.call_entry_counted((boxed_entry, shape), &wired, count, &boxed_results, span)?;
         self.move_unboxed_results(&results, boxed_results, span)?;
         self.instructions.extend([
             Instr::Jump { label: join, span },
@@ -9472,17 +9597,14 @@ impl<'module> BodyLowering<'module> {
                 .map(|signature| !signature.keywords.is_empty()),
             _ => None,
         };
-        let keeping = !self.larger_result_counts(kinds.len()).is_empty();
-        let [Some(keyword_entry), Some(boxed_entry), shape] =
-            self.open_callable(callee.reg, [true, true, known.is_none() || keeping], span)
+        // The shape says how many arguments the value takes, which the
+        // call tests whatever lowering knows of the value.
+        let [Some(keyword_entry), Some(boxed_entry), Some(shape)] =
+            self.open_callable(callee.reg, [true, true, true], span)
         else {
             return Err(invalid_semantic("opening a callable dropped a part"));
         };
-        let takes = match (known, shape) {
-            (Some(takes), _) => TakesKeywords::Known(takes),
-            (None, Some(_)) => TakesKeywords::Shape,
-            (None, None) => return Err(invalid_semantic("opening a callable dropped its shape")),
-        };
+        let takes = known.map_or(TakesKeywords::Shape, TakesKeywords::Known);
         let mut wired = Vec::with_capacity(args.len());
         for arg in args {
             wired.push(self.wire_value(arg, span)?);
@@ -13363,7 +13485,13 @@ fn callable_shape(
     });
     let results =
         u64::try_from(rets.len()).map_or(RESULTS_SHAPE_MAX, |count| count.min(RESULTS_SHAPE_MAX));
-    (hash & !(KEYWORD_SHAPE | RESULTS_SHAPE)) | keyword_bit | (results << RESULTS_SHAPE_SHIFT)
+    let required = params.len().saturating_sub(keywords.len());
+    let required =
+        u64::try_from(required).map_or(PARAMS_SHAPE_MAX, |count| count.min(PARAMS_SHAPE_MAX));
+    (hash & !(KEYWORD_SHAPE | RESULTS_SHAPE | PARAMS_SHAPE))
+        | keyword_bit
+        | (results << RESULTS_SHAPE_SHIFT)
+        | (required << PARAMS_SHAPE_SHIFT)
 }
 
 /// The bit of a [`callable_shape`] set exactly when the value takes
@@ -13392,6 +13520,31 @@ const RESULTS_SHAPE_MAX: u64 = 0xFF;
 /// The bits of a [`callable_shape`] holding its result count; see
 /// [`RESULTS_SHAPE_SHIFT`].
 const RESULTS_SHAPE: u64 = RESULTS_SHAPE_MAX << RESULTS_SHAPE_SHIFT;
+
+/// Where a [`callable_shape`] holds how many required arguments the
+/// value's entries take, up to [`PARAMS_SHAPE_MAX`]: in the bits of
+/// [`PARAMS_SHAPE`].
+///
+/// The boxed callable ABI passes as many boxed arguments as the call has,
+/// and the tape traps a call whose count is not the callee's. A call
+/// through a boxed or keyword entry tests these bits first and signals
+/// `<argument-count-error>` when they differ
+/// ([`BodyLowering::call_entry_counted`]).
+const PARAMS_SHAPE_SHIFT: u32 = 47;
+
+/// The largest required-argument count a [`callable_shape`] records
+/// exactly. A call passing this many or more is not tested, and the tape
+/// still checks it.
+const PARAMS_SHAPE_MAX: u64 = 0xFF;
+
+/// The bits of a [`callable_shape`] holding its required-argument count;
+/// see [`PARAMS_SHAPE_SHIFT`].
+const PARAMS_SHAPE: u64 = PARAMS_SHAPE_MAX << PARAMS_SHAPE_SHIFT;
+
+/// The bits of a [`callable_shape`] that count what its boxed and keyword
+/// entries take and return, which a value sharing another's boxed entry
+/// ([`BoxedEntry::Shared`]) takes from that value's shape.
+pub(crate) const ENTRY_COUNTS_SHAPE: u64 = PARAMS_SHAPE | RESULTS_SHAPE;
 
 /// Writes `kind`'s part of a [`callable_shape`]: its register type, and a
 /// typed callable's signature when `full`.
@@ -13604,6 +13757,7 @@ fn keeps_projections(instr: &Instr) -> bool {
             | Instr::StrEq { .. }
             | Instr::AddU64 { .. }
             | Instr::AndU64 { .. }
+            | Instr::U64Field { .. }
             | Instr::EqU64 { .. }
             | Instr::Call { .. }
             | Instr::CallIndirect { .. }
@@ -14008,7 +14162,10 @@ impl Module {
                 write!(f, "  %{dst} = callable.new l{}", typed.0)?;
                 match boxed {
                     BoxedEntry::Function(function) => write!(f, " boxed l{}", function.0)?,
-                    BoxedEntry::Shared(entry) => write!(f, " boxed %{entry}")?,
+                    BoxedEntry::Shared {
+                        entry,
+                        shape: counts,
+                    } => write!(f, " boxed %{entry} counts %{counts}")?,
                 }
                 write!(f, " shape {shape:#018x}")?;
                 self.fmt_arg_list(f, captures)?;
@@ -14531,6 +14688,16 @@ impl Module {
                 span,
             } => {
                 write!(f, "  %{dst} = u64.and %{lhs}, %{rhs}")?;
+                fmt_span(f, *span)
+            }
+            Instr::U64Field {
+                dst,
+                src,
+                shift,
+                mask,
+                span,
+            } => {
+                write!(f, "  %{dst} = u64.field %{src} >> {shift} & {mask:#x}")?;
                 fmt_span(f, *span)
             }
             Instr::ConstStr { dst, value, span } => {
@@ -15103,11 +15270,17 @@ mod tests {
         // lands.
         assert!(dump.contains("%r4, _, %r5 = callable.open %r1"));
         assert!(dump.contains("%r3 = call.indirect %r4(%r2): i64"));
-        // A call passing no keywords keeps the plain boxed callable ABI.
-        assert!(dump.contains("%r9 = box.any %r2: i64"));
-        assert!(dump.contains("%r10 = call.indirect %r8(%r9): any"));
-        assert!(dump.contains("unbox <integer>, %r10: i64 else type-error.cast <integer>"));
-        assert!(!dump.contains("u64.and") && !dump.contains("array.new"));
+        // A call passing no keywords keeps the plain boxed callable ABI,
+        // once the shape says the value takes one argument; one taking
+        // another number signals instead.
+        assert!(dump.contains("%r10 = box.any %r2: i64"));
+        assert!(dump.contains("%r13 = u64.and %r9, %r12"));
+        assert!(dump.contains("%r11 = call.indirect %r8(%r10): any"));
+        assert!(dump.contains("%r16 = u64.field %r9 >> 47 & 0xff"));
+        assert!(dump.contains("%r18 = make <argument-count-error>(%r16, %r17)"));
+        assert!(dump.contains("%r11 = condition.signal %r18"));
+        assert!(dump.contains("unbox <integer>, %r11: i64 else type-error.cast <integer>"));
+        assert!(!dump.contains("array.new"));
         assert!(dump.contains("callable.new l3 boxed l4"));
         assert!(dump.contains("fn l3 inc#closure(%r1 $env: agg, %r2 arg0: i64) -> i64"));
         assert!(dump.contains("fn l4 inc#closure#boxed(%r1 $env: agg, %r2 arg0: any) -> any"));

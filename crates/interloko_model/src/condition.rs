@@ -19,6 +19,7 @@
 //!       <constant-cycle-error>
 //!       <unknown-keyword-error>
 //!       <simple-error>
+//!       <argument-count-error>
 //! ```
 //!
 //! A `<type-error>` reports a runtime type check that failed: the value it
@@ -41,6 +42,9 @@
 //! passed a keyword its callee does not take: the keyword, as a symbol. A
 //! `<simple-error>` is what `error(format-string, argument, …)` signals:
 //! the format string and its arguments, as Dylan's has them.
+//! An `<argument-count-error>` reports a call through a callable value
+//! that passed more or fewer arguments than its callee takes: how many it
+//! takes and how many the call passed.
 //! Their slots are read-only, so they add no setter generics to a program.
 //!
 //! A send never finds several equally specific methods: a module whose
@@ -85,6 +89,9 @@ pub enum ConditionClass {
     /// `<simple-error>`: an error described by a format string and its
     /// arguments, which `error(string, argument, …)` signals.
     SimpleError,
+    /// `<argument-count-error>`: a call through a callable value passed
+    /// more or fewer required arguments than its callee takes.
+    ArgumentCountError,
 }
 
 impl ConditionClass {
@@ -105,6 +112,7 @@ impl ConditionClass {
         Self::DivisionByZeroError,
         Self::UnknownKeywordError,
         Self::SimpleError,
+        Self::ArgumentCountError,
     ];
 
     /// Returns the Loko-visible class name.
@@ -123,6 +131,7 @@ impl ConditionClass {
             Self::DivisionByZeroError => "<division-by-zero-error>",
             Self::UnknownKeywordError => "<unknown-keyword-error>",
             Self::SimpleError => "<simple-error>",
+            Self::ArgumentCountError => "<argument-count-error>",
         }
     }
 
@@ -142,6 +151,7 @@ impl ConditionClass {
             b"<division-by-zero-error>" => Some(Self::DivisionByZeroError),
             b"<unknown-keyword-error>" => Some(Self::UnknownKeywordError),
             b"<simple-error>" => Some(Self::SimpleError),
+            b"<argument-count-error>" => Some(Self::ArgumentCountError),
             _ => None,
         }
     }
@@ -162,7 +172,8 @@ impl ConditionClass {
             | Self::ConstantCycleError
             | Self::DivisionByZeroError
             | Self::UnknownKeywordError
-            | Self::SimpleError => Some(Self::Error),
+            | Self::SimpleError
+            | Self::ArgumentCountError => Some(Self::Error),
         }
     }
 
@@ -181,6 +192,7 @@ impl ConditionClass {
             Self::DivisionByZeroError => &DIVISION_BY_ZERO_ERROR_SLOTS,
             Self::UnknownKeywordError => &UNKNOWN_KEYWORD_ERROR_SLOTS,
             Self::SimpleError => &SIMPLE_ERROR_SLOTS,
+            Self::ArgumentCountError => &ARGUMENT_COUNT_ERROR_SLOTS,
         }
     }
 }
@@ -292,6 +304,21 @@ pub const SIMPLE_ERROR_SLOTS: [ConditionSlot; 2] = [
         name: "condition-format-arguments",
         type_name: "<sequence>",
         init_keyword: "format-arguments",
+    },
+];
+
+/// The slots of `<argument-count-error>`, in layout order: how many
+/// required arguments the callee takes, then how many the call passed.
+pub const ARGUMENT_COUNT_ERROR_SLOTS: [ConditionSlot; 2] = [
+    ConditionSlot {
+        name: "argument-count-error-expected",
+        type_name: "<integer>",
+        init_keyword: "expected",
+    },
+    ConditionSlot {
+        name: "argument-count-error-actual",
+        type_name: "<integer>",
+        init_keyword: "actual",
     },
 ];
 

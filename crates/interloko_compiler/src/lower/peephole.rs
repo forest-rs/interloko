@@ -102,6 +102,7 @@ fn for_each_read(instr: &Instr, mut f: impl FnMut(Reg)) {
         | Instr::AddU64 { lhs, rhs, .. }
         | Instr::AndU64 { lhs, rhs, .. }
         | Instr::StrEq { lhs, rhs, .. } => all(&[*lhs, *rhs]),
+        Instr::U64Field { src, .. } => all(&[*src]),
         Instr::ConstStr { .. } => {}
         Instr::ArrayNew { values, .. } => all(values),
         Instr::ArrayLen { array, .. } => all(&[*array]),
@@ -110,8 +111,8 @@ fn for_each_read(instr: &Instr, mut f: impl FnMut(Reg)) {
         Instr::CallableNew {
             boxed, captures, ..
         } => {
-            if let BoxedEntry::Shared(entry) = boxed {
-                all(&[*entry]);
+            if let BoxedEntry::Shared { entry, shape } = boxed {
+                all(&[*entry, *shape]);
             }
             all(captures);
         }
@@ -233,6 +234,7 @@ fn for_each_write(instr: &Instr, mut f: impl FnMut(Reg)) {
         | Instr::EqU64 { dst, .. }
         | Instr::AddU64 { dst, .. }
         | Instr::AndU64 { dst, .. }
+        | Instr::U64Field { dst, .. }
         | Instr::StrEq { dst, .. }
         | Instr::ConstStr { dst, .. }
         | Instr::ArrayNew { dst, .. }
@@ -366,6 +368,7 @@ fn for_each_label_ref(instr: &Instr, mut f: impl FnMut(LabelId)) {
         | Instr::EqU64 { .. }
         | Instr::AddU64 { .. }
         | Instr::AndU64 { .. }
+        | Instr::U64Field { .. }
         | Instr::StrEq { .. }
         | Instr::ConstStr { .. }
         | Instr::ArrayNew { .. }
@@ -502,6 +505,7 @@ fn result_mut(instr: &mut Instr) -> Option<&mut Reg> {
         | Instr::EqU64 { dst, .. }
         | Instr::AddU64 { dst, .. }
         | Instr::AndU64 { dst, .. }
+        | Instr::U64Field { dst, .. }
         | Instr::StrEq { dst, .. }
         | Instr::ConstStr { dst, .. }
         | Instr::ArrayNew { dst, .. }
