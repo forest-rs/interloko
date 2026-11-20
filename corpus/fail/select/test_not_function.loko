@@ -1,6 +1,6 @@
 // expect: diagnostics 1
 // expect: diagnostic code sem.select-test-type-mismatch
-// expect: diagnostic contains a select `by` test must be a function of the target and a key that returns a <boolean>, not <integer>
+// expect: diagnostic contains a select `by` test must be a function of the target and a key that returns a value, not <integer>
 
 define function main(n :: <integer>) => <integer>
   select (n by 5)

@@ -607,7 +607,8 @@ fn collect_expr(expr: &ast::Expr, binders: &mut Vec<Binder>) {
         }
         Expr::Binary { lhs, rhs, .. }
         | Expr::Compare { lhs, rhs, .. }
-        | Expr::Identical { lhs, rhs, .. } => {
+        | Expr::Identical { lhs, rhs, .. }
+        | Expr::Or { lhs, rhs, .. } => {
             collect_expr(lhs, binders);
             collect_expr(rhs, binders);
         }

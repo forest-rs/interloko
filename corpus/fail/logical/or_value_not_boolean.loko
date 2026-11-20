@@ -1,0 +1,10 @@
+// expect: diagnostics 1
+// expect: diagnostic code typing.cast-always-fails
+// expect: diagnostic contains cast of singleton(1) to <boolean> always fails
+
+// `|` answers its left operand's value when it is true, and every value
+// but `#f` is, so `1 | #t` is 1, which is no `<boolean>`.
+
+define function main() => <boolean>
+  1 | #t
+end;

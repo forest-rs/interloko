@@ -48,7 +48,7 @@ fn check_validates_all_corpus_cases() {
     assert!(out.contains("pass/control_flow/generic_guarded.loko"));
     assert!(out.contains("pass/generics/two_class_dispatch.loko"));
     assert!(out.contains("pass/restarts/recover_invalid_radius.loko"));
-    assert!(out.contains("fail/control_flow/invalid_if_condition.loko"));
+    assert!(out.contains("fail/logical/or_value_not_boolean.loko"));
     assert!(out.contains("fail/diagnostics/slot_initializer_type.loko"));
     assert!(out.contains("fail/diagnostics/constant_slot_assignment.loko"));
     assert!(out.contains("fail/diagnostics/constant_type_annotation.loko"));

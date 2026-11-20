@@ -175,8 +175,6 @@ pub enum DiagnosticCode {
     /// A generic call passes a number to a generic that has no methods, so
     /// none can accept it.
     GenericWithoutMethods,
-    /// An `if`, `elseif`, `unless`, or `case` test is not boolean.
-    IfConditionTypeMismatch,
     /// The arms of an `if` or `case` produce results that do not join.
     IfBranchTypeMismatch,
     /// An arithmetic operand is not a number.
@@ -467,7 +465,6 @@ impl DiagnosticCode {
         Self::GenericArgumentTypeMismatch,
         Self::NoApplicableMethod,
         Self::GenericWithoutMethods,
-        Self::IfConditionTypeMismatch,
         Self::IfBranchTypeMismatch,
         Self::ArithmeticOperandTypeMismatch,
         Self::IntegerDivisionUnsupported,
@@ -633,7 +630,6 @@ impl DiagnosticCode {
             Self::GenericArgumentTypeMismatch => "sem.generic-argument-type-mismatch",
             Self::NoApplicableMethod => "sem.no-applicable-method",
             Self::GenericWithoutMethods => "sem.generic-without-methods",
-            Self::IfConditionTypeMismatch => "sem.if-condition-type-mismatch",
             Self::IfBranchTypeMismatch => "sem.if-branch-type-mismatch",
             Self::ArithmeticOperandTypeMismatch => "sem.arithmetic-operand-type-mismatch",
             Self::IntegerDivisionUnsupported => "sem.integer-division-unsupported",
@@ -800,7 +796,6 @@ impl DiagnosticCode {
             "sem.generic-argument-type-mismatch" => Self::GenericArgumentTypeMismatch,
             "sem.no-applicable-method" => Self::NoApplicableMethod,
             "sem.generic-without-methods" => Self::GenericWithoutMethods,
-            "sem.if-condition-type-mismatch" => Self::IfConditionTypeMismatch,
             "sem.if-branch-type-mismatch" => Self::IfBranchTypeMismatch,
             "sem.arithmetic-operand-type-mismatch" => Self::ArithmeticOperandTypeMismatch,
             "sem.integer-division-unsupported" => Self::IntegerDivisionUnsupported,

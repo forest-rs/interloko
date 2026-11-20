@@ -1,0 +1,53 @@
+// expect: run 1111111
+// expect: diagnostics 0
+
+// As in Dylan, any value is a test and only `#f` is false: `if`, `unless`,
+// `case`, `while`, `until`, `~` and a `select`'s `by` test take any
+// object. `a & b` answers `#f` or `b`'s value, and `a | b` answers `a`'s
+// value when it is true, else `b`'s.
+
+define class <node> (<object>)
+  constant slot parent, init-value: #f, init-keyword: parent:;
+end;
+
+define function depth(n :: <node>) => <integer>
+  let count = 0;
+  let current :: <object> = n;
+  while (current)
+    count := count + 1;
+    current := as(<node>, current).parent
+  end;
+  count
+end;
+
+// `by` answers the matching key's name, or `#f`.
+define function named(target, key)
+  if (target = key) #match else #f end
+end;
+
+define function main() => <integer>
+  let total = 0;
+  let zero :: <object> = 0;
+  let nothing :: <object> = #f;
+  let text :: <object> = "";
+  // 0 and "" are true; only #f is false.
+  if (zero & text) total := total + 1 end;
+  unless (nothing) total := total + 10 end;
+  case
+    nothing => total := 0;
+    zero => total := total + 100;
+  end;
+  // `|` answers its left operand's value; `&` its right one's.
+  if (as(<integer>, nothing | 1000) = 1000) total := total + as(<integer>, zero | 1) end;
+  let found = nothing | zero & text;
+  if (found == text) total := total + 1000 end;
+  if (~nothing & ~~zero) total := total + 10000 end;
+  if (depth(make(<node>, parent: make(<node>))) = 2) total := total + 100000 end;
+  select (3 by named)
+    4 => total := 0;
+    3 => total := total + 1000000;
+    otherwise => total := 0;
+  end;
+  until (nothing) nothing := zero end;
+  total
+end;

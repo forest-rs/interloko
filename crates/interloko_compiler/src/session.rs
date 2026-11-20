@@ -8531,6 +8531,11 @@ fn dump_ast_expr(out: &mut String, expr: &ast::Expr, indent: usize) {
             dump_ast_expr(out, lhs, indent + 2);
             dump_ast_expr(out, rhs, indent + 2);
         }
+        ast::Expr::Or { id, lhs, rhs, .. } => {
+            let _ = writeln!(out, "{id} or");
+            dump_ast_expr(out, lhs, indent + 2);
+            dump_ast_expr(out, rhs, indent + 2);
+        }
         ast::Expr::If {
             id,
             arms,

@@ -5385,16 +5385,6 @@ impl Conditional {
         }
     }
 
-    /// The keyword the arm's test follows.
-    const fn test_keyword(self) -> &'static str {
-        match self {
-            Self::If => "if",
-            Self::Elseif => "elseif",
-            Self::Case => "case",
-            Self::Select => "select",
-        }
-    }
-
     /// The keyword that opens the whole conditional.
     const fn construct(self) -> &'static str {
         match self {
@@ -5416,8 +5406,10 @@ struct ArmRef<'a> {
 /// How an arm of a conditional tests whether it runs.
 #[derive(Clone, Copy)]
 enum ArmTest<'a> {
-    /// A written `<boolean>` test.
+    /// A written test: any value, true unless it is `#f`.
     Expr(&'a ast::Expr),
+    /// A test already lowered, such as the left operand of `|`.
+    Lowered(&'a Expr),
     /// A `select` arm's keys, matched against the target in turn.
     Keys(&'a [ast::Expr]),
 }
@@ -5672,6 +5664,11 @@ enum AsTarget {
 /// space, so source cannot name it.
 const SELECT_TARGET_LOCAL: &str = "select target";
 
+/// The hidden local `a | b` binds `a`'s value to, when it is not a
+/// `<boolean>` or a name, suffixed with where the expression starts; the
+/// value is answered when it is true.
+const OR_VALUE_LOCAL: &str = "or value";
+
 /// The hidden locals a division such as `floor/` binds its operands to,
 /// suffixed with where the call starts. Their names have a space, so source
 /// cannot name them.
@@ -5741,7 +5738,7 @@ fn no_values(span: Span) -> Expr {
 }
 
 /// The results to lower `expr` to where its values are discarded, as in a
-/// statement: none for a conditional or a handle, which then discards
+/// statement: none for a conditional, `|` or a handle, which then discards
 /// each arm's values, so the arms need not agree, and lowers each arm the
 /// same way; none for a call, so a call through an untyped `<function>`
 /// takes none of whatever its callee returns, none included; no
@@ -5753,6 +5750,7 @@ fn effect_expectation(expr: &ast::Expr) -> Option<&'static [ValueKind]> {
     matches!(
         expr,
         ast::Expr::If { .. }
+            | ast::Expr::Or { .. }
             | ast::Expr::Call { .. }
             | ast::Expr::ValueCall { .. }
             | ast::Expr::Case { .. }
@@ -10160,6 +10158,9 @@ impl Lowering {
                 let rhs = self.lower_expr(ctx, rhs);
                 self.lower_identical(ctx, lhs, rhs, *span)
             }
+            ast::Expr::Or {
+                id, lhs, rhs, span, ..
+            } => self.lower_or(ctx, *id, lhs, rhs, *span, expected_results),
             ast::Expr::If {
                 arms,
                 else_body,
@@ -10212,7 +10213,7 @@ impl Lowering {
                 ..
             } => {
                 let condition = self.lower_expr(ctx, condition);
-                self.check_test_is_boolean(ctx, "unless", &condition);
+                let condition = self.lower_test(condition);
                 let body = self.lower_body_expr(ctx, body, None);
                 Expr::If {
                     condition: Box::new(condition),
@@ -15573,9 +15574,9 @@ impl Lowering {
             }
             (ArmTest::Expr(test), _) => {
                 let condition = self.lower_expr(ctx, test);
-                self.check_test_is_boolean(ctx, form.test_keyword(), &condition);
-                condition
+                self.lower_test(condition)
             }
+            (ArmTest::Lowered(test), _) => self.lower_test(test.clone()),
             (ArmTest::Keys(_), None) => Expr::Error { span: arm.span },
         };
         // A body that assigns the local may store any value of its declared
@@ -15832,10 +15833,7 @@ impl Lowering {
         let actual = match kinds.as_slice() {
             [ValueKind::GenericFunctionObject(_)] => return true,
             [kind] if self.is_callable_kind(*kind) => match self.expr_callable_signature(test) {
-                Some(signature)
-                    if signature.params.len() != 2
-                        || !matches!(signature.results.as_slice(), [ValueKind::Bool]) =>
-                {
+                Some(signature) if signature.params.len() != 2 || signature.results.is_empty() => {
                     self.callable_signature_name(&signature)
                 }
                 _ => return true,
@@ -15907,8 +15905,7 @@ impl Lowering {
                 },
             };
             let test = self.lower_expr(ctx, &test);
-            self.check_test_is_boolean(ctx, Conditional::Select.test_keyword(), &test);
-            tests.push(test);
+            tests.push(self.lower_test(test));
         }
         // `k1, k2 => body` runs its body when either key matches.
         let mut tests = tests.into_iter().rev();
@@ -15927,17 +15924,128 @@ impl Lowering {
         })
     }
 
-    /// Reports a conditional test, written after `keyword`, whose value is
-    /// not a `<boolean>`.
-    fn check_test_is_boolean(&self, ctx: &mut FunctionContext, keyword: &str, test: &Expr) {
-        let kind = self.expr_kind(test);
-        if !matches!(kind, ValueKind::Bool | ValueKind::Error) {
-            ctx.diagnostics.push(
-                Diagnostic::error(test.span(), DiagnosticCode::IfConditionTypeMismatch)
-                    .with_arg(DiagnosticArg::text("form", keyword))
-                    .with_arg(DiagnosticArg::text("expected", "<boolean>"))
-                    .with_arg(DiagnosticArg::text("actual", self.kind_name(kind))),
+    /// Lowers `test`, a scalar expression ([`Self::lower_expr`]), to the
+    /// `<boolean>` a branch takes. As in Dylan, any value is a test, true
+    /// unless it is `#f`: a `<boolean>` test is itself, an `<object>` one
+    /// is `test ~== #f`, and one of a type that excludes `#f` (an
+    /// `<integer>`, a class other than `<object>`) runs for its effects and
+    /// is true. One producing no value was reported when it was lowered.
+    fn lower_test(&self, test: Expr) -> Expr {
+        let span = test.span();
+        match self.expr_kinds(&test).as_slice() {
+            [ValueKind::Bool] => test,
+            kinds if result_kinds_contain_error(kinds) => test,
+            [ValueKind::Any] => Expr::If {
+                condition: Box::new(Expr::Identical {
+                    lhs: Box::new(test),
+                    rhs: Box::new(Expr::ConstBool { value: false, span }),
+                    span,
+                }),
+                refinement: None,
+                then_branch: Box::new(Expr::ConstBool { value: false, span }),
+                else_branch: Box::new(Expr::ConstBool { value: true, span }),
+                span,
+            },
+            [_] => Expr::Block {
+                exit: None,
+                body: Box::new(Block {
+                    statements: vec![Statement::Expr(test)],
+                    result: Expr::ConstBool { value: true, span },
+                    span,
+                }),
+                cleanup: None,
+                span,
+            },
+            _ => Expr::Error { span },
+        }
+    }
+
+    /// Lowers `lhs | rhs`: `lhs`'s value when it is true, otherwise
+    /// `rhs`'s, evaluated only then.
+    ///
+    /// A `<boolean>` `lhs` is `if (lhs) #t else rhs end`, so `rhs` sees
+    /// what `lhs` being false established, as `|` always has. Any other
+    /// value is answered when true: a name is read again, which is pure,
+    /// so a local's narrowing reaches both arms; anything else is bound to
+    /// a hidden local first, so it is evaluated once.
+    fn lower_or(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        lhs: &ast::Expr,
+        rhs: &ast::Expr,
+        span: Span,
+        expected_results: Option<&[ValueKind]>,
+    ) -> Expr {
+        let block = |result: ast::Expr| ast::Block {
+            id,
+            statements: Vec::new(),
+            span: result.span(),
+            result,
+        };
+        let otherwise = block(rhs.clone());
+        let arm = |test, body| ArmRef {
+            test,
+            body,
+            span: lhs.span(),
+        };
+        let test = self.lower_expr(ctx, lhs);
+        if matches!(self.expr_kinds(&test).as_slice(), [ValueKind::Bool]) {
+            let body = block(ast::Expr::Bool {
+                id,
+                value: true,
+                span: lhs.span(),
+            });
+            return self.lower_conditional(
+                ctx,
+                Conditional::If,
+                &[arm(ArmTest::Lowered(&test), &body)],
+                Some(&otherwise),
+                span,
+                expected_results,
+                None,
             );
+        }
+        if matches!(lhs, ast::Expr::Name { .. }) {
+            let body = block(lhs.clone());
+            return self.lower_conditional(
+                ctx,
+                Conditional::If,
+                &[arm(ArmTest::Lowered(&test), &body)],
+                Some(&otherwise),
+                span,
+                expected_results,
+                None,
+            );
+        }
+        let scope_start = ctx.scope_start();
+        let name = format!("{OR_VALUE_LOCAL}@{}", span.start);
+        let binding = self.bind_hidden_local(ctx, id, &name, test, lhs.span());
+        let read = ast::Expr::Name {
+            id,
+            name,
+            span: lhs.span(),
+        };
+        let body = block(read.clone());
+        let chain = self.lower_conditional(
+            ctx,
+            Conditional::If,
+            &[arm(ArmTest::Expr(&read), &body)],
+            Some(&otherwise),
+            span,
+            expected_results,
+            None,
+        );
+        ctx.hide_locals_from(scope_start);
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements: vec![Statement::Let(binding)],
+                result: chain,
+                span,
+            }),
+            cleanup: None,
+            span,
         }
     }
 
@@ -17852,11 +17960,7 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let test = self.lower_expr(ctx, test);
-        let keyword = match kind {
-            ast::LoopKind::While => "while",
-            ast::LoopKind::Until => "until",
-        };
-        self.check_test_is_boolean(ctx, keyword, &test);
+        let test = self.lower_test(test);
         let scope = ctx.scope_start();
         // The loop discards its body's values, so a conditional ending the
         // body is lowered as a statement is: its arms need not agree.
@@ -21995,7 +22099,6 @@ mod tests {
             [
                 DiagnosticCode::AssignmentTargetNotAssignable,
                 DiagnosticCode::LocalAssignmentTypeMismatch,
-                DiagnosticCode::IfConditionTypeMismatch,
                 DiagnosticCode::AssignmentTargetNotAssignable,
             ]
         );
@@ -22411,13 +22514,42 @@ mod tests {
     }
 
     #[test]
-    fn reports_invalid_if_condition() {
-        let invalid_condition = lower_source("define function main()\n  if (1) 2 else 3 end\nend;");
-        assert!(has_diagnostic(
-            &invalid_condition,
-            DiagnosticCode::IfConditionTypeMismatch,
-            &[("expected", "<boolean>"), ("actual", "<integer>")]
+    fn any_value_is_a_test() {
+        let module = lower_source(
+            "define function main(x, n :: <integer>, b :: <boolean>)\n  \
+             if (x) 1 elseif (n) 2 elseif (b) 3 else 4 end\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        // An `<object>` tests `~== #f`, an `<integer>` is always true, and a
+        // `<boolean>` is its own test.
+        let Expr::If {
+            condition,
+            else_branch,
+            ..
+        } = &module.functions[0].body.result
+        else {
+            panic!("expected if expression");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            Expr::If { condition, .. } if matches!(condition.as_ref(), Expr::Identical { .. })
         ));
+        let Expr::If {
+            condition,
+            else_branch,
+            ..
+        } = else_branch.as_ref()
+        else {
+            panic!("expected elseif");
+        };
+        assert!(matches!(
+            condition.as_ref(),
+            Expr::Block { body, .. } if matches!(body.result, Expr::ConstBool { value: true, .. })
+        ));
+        let Expr::If { condition, .. } = else_branch.as_ref() else {
+            panic!("expected elseif");
+        };
+        assert!(matches!(condition.as_ref(), Expr::Local { .. }));
     }
 
     #[test]

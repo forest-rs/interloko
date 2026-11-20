@@ -1,8 +1,0 @@
-// expect: diagnostics 1
-// expect: diagnostic contains <boolean>
-
-// Each operand is a test, so it must be a `<boolean>`.
-
-define function main() => <boolean>
-  1 | #t
-end;

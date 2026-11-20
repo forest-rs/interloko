@@ -113,7 +113,12 @@ The current slices include:
   expression runs for its effects with its values discarded;
 - Dylan's conditionals: `if (test) … elseif (test) … else … end`,
   `unless (test) … end`, and `case test => …; otherwise => … end`. Each arm
-  is a body, with its own `let`s, whose last expression is its value. A
+  is a body, with its own `let`s, whose last expression is its value. As
+  in Dylan, any value is a test and only `#f` is false, so `if (0)` and
+  `if ("")` take their arms: a `<boolean>` test branches on it directly, an
+  `<object>` one compares it with `#f` (narrowing it to everything but
+  `#f` in the arm it takes), and one of a type that excludes `#f`, such as
+  an `<integer>`, is always true. A
   conditional without `else` or `otherwise` produces no values: its arms
   run for their effects, and using it where a value is expected is a type
   error. An `instance?` test narrows its arm, and each later `elseif`,
@@ -179,15 +184,16 @@ The current slices include:
   or write); every other local stays in a register and every other capture
   is a copy. Since any call may run a closure that stores in the cell,
   typing reads a shared local at its declared type;
-- `while (test) body end` and `until (test) body end` loops on a
-  `<boolean>` test, which produce no values and run in one frame as tape
+- `while (test) body end` and `until (test) body end` loops on any test,
+  as `if` takes one, which produce no values and run in one frame as tape
   jumps, so a loop of a million iterations needs no call depth. Soft typing
   analyzes a loop from a head whose facts are the fixpoint over every
   iteration, so its decisions (and a strict definition's proofs) hold on
   each one, and an assignment ends any narrowing of the local it assigns.
   A session call may run 100 million tape instructions;
 - `select (target) key, key => …; otherwise => … end`, and `select (target
-  by test) …` to match with `test(target, key)` instead of `==`. The target
+  by test) …` to match with `test(target, key)` instead of `==`, a test
+  whose value, like any other, matches unless it is `#f`. The target
   is evaluated once, and a `by` test once after it. Integer keys against an
   integer target compare inline, as do character keys against a
   `<character>`, and boolean keys against a `<boolean>` without boxing;
@@ -450,9 +456,13 @@ The current slices include:
 - `a & b` and `a | b`, Dylan's short-circuit operators: they share one
   precedence below the comparisons and associate left, the right operand
   runs only when it decides the answer, and it sees what the left one
-  established, as an `if` arm does (`instance?(x, <box>) & x.n > 3`);
-- Dylan's negations: `~test` is `if (test) #f else #t end` on a
-  `<boolean>`, binding tighter than any binary operator as unary `-`
+  established, as an `if` arm does (`instance?(x, <box>) & x.n > 3`). As
+  in Dylan they answer values, not just booleans: `a & b` is `#f` when `a`
+  is, else `b`'s value, and `a | b` is `a`'s value when it is true, else
+  `b`'s, so `frame | error(…)` answers the frame. On `<boolean>` operands
+  both compile as they always have;
+- Dylan's negations: `~test` is `if (test) #f else #t end` on any test,
+  binding tighter than any binary operator as unary `-`
   does, and `a ~= b` and `a ~== b` are `~(a = b)` and `~(a == b)`, at the
   comparisons' precedence;
 - `base ^ exponent`, Dylan's exponentiation, right-associative and binding
