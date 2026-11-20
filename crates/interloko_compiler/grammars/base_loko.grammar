@@ -36,7 +36,14 @@ rule parameter = parameter-name type-annotation?
 rule parameter-name = name
 rule result-annotation = `=>` result-annotation-value
 rule result-annotation-value = type-annotation-value | result-annotation-values
-rule result-annotation-values = `(` trailing-list-of<type-annotation-value, `,`>? `)`
+// As in Dylan, a parenthesized result may be named, `(sum :: <integer>)`,
+// and a bare name is an `<object>`; the names only document. `#rest`
+// results parse so that they can be refused clearly.
+rule result-annotation-values = `(` trailing-list-of<result-value, `,`>? `)`
+rule result-value = rest-result | type-annotation-value | named-result
+rule rest-result = `#rest` (type-annotation-value | named-result)
+rule named-result = result-name type-annotation?
+rule result-name = name
 rule type-annotation = `::` type-annotation-value
 rule type-annotation-value = callable-type | limited-type | nominal-type
 rule callable-type = `callable` `(` callable-parameter-types? `)` result-annotation

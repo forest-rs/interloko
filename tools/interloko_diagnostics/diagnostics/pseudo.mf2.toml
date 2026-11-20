@@ -11,6 +11,7 @@
 "ast.slot-option-requires-keyword" = "[ps] keyword value required by slot option { $option }"
 "ast.slot-init-value-requires-expression" = "[ps] expression required by slot option { $option }"
 "ast.unsupported-slot-option" = "[ps] slot option not supported: { $option }"
+"ast.rest-results-unsupported" = "[ps] `#rest` results not supported; results are a fixed count"
 "ast.invalid-method-specializer" = "[ps] method parameters need specializers"
 "ast.annotation-not-class" = "[ps] { $position } { $name } needs a class, not { $type }"
 "ast.invalid-cast" = "[ps] as form is invalid"

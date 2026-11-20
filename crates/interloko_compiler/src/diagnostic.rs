@@ -66,6 +66,9 @@ pub enum DiagnosticCode {
     AstSlotInitValueRequiresExpression,
     /// A slot option is not supported.
     AstUnsupportedSlotOption,
+    /// A result annotation declares `#rest` results, which Loko does not
+    /// support: a callee returns a fixed number of values.
+    AstRestResultsUnsupported,
     /// A method declaration has the wrong first-slice specializer shape.
     AstInvalidMethodSpecializer,
     /// A method, generic or restart parameter, which must name a class, is
@@ -419,6 +422,7 @@ impl DiagnosticCode {
         Self::AstSlotOptionRequiresKeyword,
         Self::AstSlotInitValueRequiresExpression,
         Self::AstUnsupportedSlotOption,
+        Self::AstRestResultsUnsupported,
         Self::AstInvalidMethodSpecializer,
         Self::AstAnnotationNotClass,
         Self::AstInvalidCast,
@@ -583,6 +587,7 @@ impl DiagnosticCode {
             Self::AstSlotOptionRequiresKeyword => "ast.slot-option-requires-keyword",
             Self::AstSlotInitValueRequiresExpression => "ast.slot-init-value-requires-expression",
             Self::AstUnsupportedSlotOption => "ast.unsupported-slot-option",
+            Self::AstRestResultsUnsupported => "ast.rest-results-unsupported",
             Self::AstInvalidMethodSpecializer => "ast.invalid-method-specializer",
             Self::AstAnnotationNotClass => "ast.annotation-not-class",
             Self::AstInvalidCast => "ast.invalid-cast",
@@ -750,6 +755,7 @@ impl DiagnosticCode {
             "ast.slot-option-requires-keyword" => Self::AstSlotOptionRequiresKeyword,
             "ast.slot-init-value-requires-expression" => Self::AstSlotInitValueRequiresExpression,
             "ast.unsupported-slot-option" => Self::AstUnsupportedSlotOption,
+            "ast.rest-results-unsupported" => Self::AstRestResultsUnsupported,
             "ast.invalid-method-specializer" => Self::AstInvalidMethodSpecializer,
             "ast.annotation-not-class" => Self::AstAnnotationNotClass,
             "ast.invalid-cast" => Self::AstInvalidCast,

@@ -105,9 +105,12 @@ The current slices include:
 - function definitions, locals, arithmetic, booleans, conditionals, and
   calls; as in Dylan, a parameter without a type is an `<object>`, so
   `define function add(a, b) a + b end` adds whatever numbers it is passed
-  through the numeric generics; a function, method or closure declared
-  `=> ()` returns no values, and as in Dylan its body's last expression
-  runs for its effects with its values discarded;
+  through the numeric generics; as in Dylan, results may be named,
+  `=> (sum :: <integer>)`, a bare name, `=> (value)`, is an `<object>`,
+  and the names only document (`#rest` results are refused: a callee
+  returns a fixed number of values); a function, method or closure
+  declared `=> ()` returns no values, and as in Dylan its body's last
+  expression runs for its effects with its values discarded;
 - Dylan's conditionals: `if (test) … elseif (test) … else … end`,
   `unless (test) … end`, and `case test => …; otherwise => … end`. Each arm
   is a body, with its own `let`s, whose last expression is its value. A
