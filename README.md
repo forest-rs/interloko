@@ -465,7 +465,13 @@ The current slices include:
   it for a class of its own, never for a kernel class
   (`sem.built-in-method-on-kernel-class`), and a call no overload takes as typing sees
   it, an `<object>` or such a class among its arguments, sends to it.
-  `shift-left` and `shift-right` as values shift a `<u32>`. A typed call
+  `shift-left` and `shift-right` as values shift a `<u32>`. As in Dylan,
+  `\+` names the function an operator calls: `\+`, `\-` (subtraction;
+  unary minus is `negative`), `\*`, `\/`, `\^`, `\=`, `\<`, `\<=`, `\>`
+  and `\>=` are the built-in generics those operators send to when their
+  operands are not numbers typing knows, and `\==`, `\~==` and `\~=` are
+  kernel functions of two objects, so `select (x by \<)` and `fold(\+,
+  0, v)` work. A typed call
   of a built-in's name, or of a binding that holds one, still runs it
   inline. `apply`, `values`, `make`, `as`, `limited`, `signal`,
   `copy-sequence` and `starts-with?` are forms whose arguments or results

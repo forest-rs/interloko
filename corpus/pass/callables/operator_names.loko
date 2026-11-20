@@ -1,0 +1,26 @@
+// expect: run 1035
+// expect: diagnostics 0
+
+// As in Dylan, `\+` names the function `+` calls, as a value: the built-in
+// generic an operator sends to when its operands are not numbers typing
+// knows, so `\+` and `\<` dispatch on what they are passed. `\-` is
+// subtraction (unary minus is `negative`), and `\==`, `\~==` and `\~=` are
+// kernel functions of two objects, each one value however often it is
+// named. A `select` may test with any of them.
+
+define function fold (f :: <function>, init, v :: <vector>)
+  let acc = init;
+  for (x in v) acc := f(acc, x) end;
+  acc
+end;
+
+define function main() => <integer>
+  let f = \+;
+  let g :: <function> = \*;
+  let r :: <integer> = f(1, 2) + g(3, 4) + \-(10, 3);
+  let s :: <integer> = fold(\+, 0, #[1, 2, 3]);
+  let same = \== == \== & \+ == \+;
+  let t = if (\==(#a, #a) & \~==(#a, #b) & \<(1, 2) & ~\~=(2, 2) & same) 1000 else 0 end;
+  let u = select (3 by \<) 1, 2 => 0; 4 => 7; otherwise => 9 end;
+  r + s + t + u
+end;

@@ -150,6 +150,8 @@ pub enum TokenKind {
     Caret = 67,
     /// `~`, logical negation.
     Tilde = 68,
+    /// `\\`, which escapes an operator to name its function, as in `\\+`.
+    Backslash = 73,
     /// `~=`, numeric or `=` inequality.
     TildeEqual = 69,
     /// `~==`, non-identity.
@@ -275,6 +277,7 @@ impl TokenKind {
             | Self::RBracket
             | Self::Comma
             | Self::Tilde
+            | Self::Backslash
             | Self::Arrow
             | Self::Colon
             | Self::Assign
@@ -1031,6 +1034,10 @@ pub fn lex(source: &str) -> Vec<Token> {
                     "end" => TokenKind::End,
                     _ => TokenKind::Ident,
                 }
+            }
+            b'\\' => {
+                pos += 1;
+                TokenKind::Backslash
             }
             _ => {
                 pos += 1;
