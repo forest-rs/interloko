@@ -1,0 +1,10 @@
+// expect: diagnostic contains `#rest` results are not supported
+
+// Dylan's `#rest` results declare any number of further values, but a
+// Loko callee returns a fixed number of values, so they are refused.
+
+define function many(x :: <integer>) => (first :: <integer>, #rest others)
+  x
+end;
+
+define function main() => <integer> many(1) end;

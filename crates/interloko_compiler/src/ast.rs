@@ -1838,6 +1838,7 @@ impl<'tree> Lowering<'tree> {
                     // later one belongs to a callable type within it.
                     saw_result_arrow = true;
                     return_type = self.result_annotation_after(node, *index);
+                    self.report_rest_results(node, *index);
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_generic_params(child_node);
@@ -1882,6 +1883,7 @@ impl<'tree> Lowering<'tree> {
                 // The first arrow introduces the result annotation; any
                 // later one belongs to a callable type within it.
                 return_type = self.result_annotation_after(node, *index);
+                self.report_rest_results(node, *index);
                 break;
             }
         }
@@ -1955,6 +1957,7 @@ impl<'tree> Lowering<'tree> {
                     // later one belongs to a callable type within it.
                     saw_result_arrow = true;
                     return_type = self.result_annotation_after(node, *index);
+                    self.report_rest_results(node, *index);
                 }
                 CstElement::Token(_) => {}
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
@@ -2480,6 +2483,7 @@ impl<'tree> Lowering<'tree> {
                     // later one belongs to a callable type within it.
                     saw_result_arrow = true;
                     return_type = self.result_annotation_after(node, *index);
+                    self.report_rest_results(node, *index);
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_function_params(child_node);
@@ -4020,8 +4024,22 @@ impl<'tree> Lowering<'tree> {
                     TokenKind::Comma => {
                         index += 1;
                     }
+                    // `#rest` results are refused by `report_rest_results`;
+                    // the value after it is left out, so nothing else
+                    // reports on it.
+                    TokenKind::Symbol
+                        if self.tree.tokens[tokens[index]].text(&self.tree.source) == "#rest" =>
+                    {
+                        index = self
+                            .named_result(tokens, index + 1)
+                            .or_else(|| self.type_annotation_from_tokens(tokens, index + 1))
+                            .map_or(index + 1, |(_, next)| next);
+                    }
                     _ => {
-                        if let Some((annotation, next)) =
+                        if let Some((annotation, next)) = self.named_result(tokens, index) {
+                            values.push(annotation);
+                            index = next;
+                        } else if let Some((annotation, next)) =
                             self.type_annotation_from_tokens(tokens, index)
                         {
                             values.push(annotation);
@@ -4056,6 +4074,45 @@ impl<'tree> Lowering<'tree> {
                     next,
                 )
             })
+    }
+
+    /// Parses a named result at `index`, Dylan's `name :: <type>` or a bare
+    /// `name`, which is an `<object>`. The name only documents the result,
+    /// so the annotation is its type. `None` when `index` starts a type
+    /// instead, such as `limited(...)`.
+    fn named_result(&self, tokens: &[usize], index: usize) -> Option<(TypeExpr, usize)> {
+        let token = |index: usize| tokens.get(index).map(|token| self.tree.tokens[*token]);
+        let name = token(index).filter(|token| token.kind == TokenKind::Ident)?;
+        match token(index + 1)?.kind {
+            TokenKind::DoubleColon => self.type_annotation_from_tokens(tokens, index + 2),
+            TokenKind::Comma | TokenKind::RParen => Some((
+                TypeExpr::Named {
+                    name: "<object>".into(),
+                    span: name.span,
+                },
+                index + 1,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Reports each `#rest` result in the result annotation following the
+    /// arrow token `arrow` of `node`. Dylan allows any number of further
+    /// values there, but a Loko call returns a count its callee fixes.
+    fn report_rest_results(&mut self, node: &CstNode, arrow: usize) {
+        let tokens = self.node_token_indices(node);
+        let Some(start) = tokens.iter().position(|index| *index == arrow) else {
+            return;
+        };
+        for index in &tokens[start..] {
+            let token = self.tree.tokens[*index];
+            if token.kind == TokenKind::Symbol && token.text(&self.tree.source) == "#rest" {
+                self.diagnostics.push(Diagnostic::error(
+                    token.span,
+                    DiagnosticCode::AstRestResultsUnsupported,
+                ));
+            }
+        }
     }
 
     fn type_annotation_from_tokens(
@@ -5144,6 +5201,49 @@ mod tests {
         assert_eq!(
             shown(return_type.as_ref()),
             Some("callable(<integer>) => <integer>".into())
+        );
+    }
+
+    #[test]
+    fn named_results_keep_their_types_and_a_bare_name_is_an_object() {
+        let tree = parse(
+            "define generic g(x) => (n :: <integer>);\n\
+             define function f(x) => (sum :: <integer>, value, limited(<integer>, min: 0))\n  \
+             let h = method () => (r :: callable(<integer>) => (c :: <integer>)) 1 end;\n  1\nend;\n\
+             define function r() => (first :: <integer>, #rest others)\n  1\nend;",
+        );
+        let module = lower(&tree);
+        let shown = |annotation: Option<&ResultAnnotation>| annotation.map(ToString::to_string);
+        assert_eq!(
+            shown(module.generics[0].return_type.as_ref()),
+            Some("<integer>".into())
+        );
+        let f = &module.functions[0];
+        assert_eq!(
+            shown(f.return_type.as_ref()),
+            Some("(<integer>, <object>, limited(<integer>, min: 0))".into())
+        );
+        let Some(Expr::Function { return_type, .. }) =
+            f.body.lets().next().map(|binding| &binding.value)
+        else {
+            panic!("function expression");
+        };
+        assert_eq!(
+            shown(return_type.as_ref()),
+            Some("callable(<integer>) => <integer>".into())
+        );
+        // A `#rest` result is refused, and left out of the annotation.
+        assert_eq!(
+            shown(module.functions[1].return_type.as_ref()),
+            Some("<integer>".into())
+        );
+        assert_eq!(
+            module
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code)
+                .collect::<Vec<_>>(),
+            vec![DiagnosticCode::AstRestResultsUnsupported]
         );
     }
 

@@ -1,0 +1,38 @@
+// expect: run 42
+// expect: diagnostics 0
+
+// As in Dylan, a parenthesized result may be named: `=> (sum :: <integer>)`
+// declares one `<integer>` result, and a bare name, `=> (value)`, an
+// `<object>`. The names only document; named and unnamed results mix,
+// in definitions, generics, anonymous methods and callable types alike.
+
+define class <box> (<object>)
+  constant slot content :: <integer>, required-init-keyword: content:;
+end;
+
+define function inc(x :: <integer>) => (y :: <integer>)
+  x + 1
+end;
+
+define function identity(x) => (value)
+  x
+end;
+
+define function split(n :: <integer>) => (quotient :: <integer>, <integer>)
+  truncate/(n, 10)
+end;
+
+define generic unwrap(b :: <box>) => (content :: <integer>);
+define method unwrap(b :: <box>) => (n :: <integer>) b.content end;
+
+define function twice(f :: callable(<integer>) => (r :: <integer>), x :: <integer>)
+  => (twice :: <integer>)
+  f(f(x))
+end;
+
+define function main() => (answer :: <integer>)
+  let (tens, ones) = split(inc(41));
+  let object = identity(make(<box>, content: tens));
+  let plus = method (a :: <integer>) => (b :: <integer>) a + ones end;
+  unwrap(as(<box>, object)) + twice(plus, 0) + 34
+end;

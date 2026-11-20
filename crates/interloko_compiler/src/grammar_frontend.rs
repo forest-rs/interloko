@@ -3421,8 +3421,28 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "result-annotation-values",
-            "`(` trailing-list-of<type-annotation-value, `,`>? `)`",
-            "syntax.rs:Parser::parse_result_annotation",
+            "`(` trailing-list-of<result-value, `,`>? `)`",
+            "ast.rs:Lowering::result_annotation_from_tokens",
+        ),
+        (
+            "result-value",
+            "rest-result | type-annotation-value | named-result",
+            "ast.rs:Lowering::result_annotation_from_tokens",
+        ),
+        (
+            "rest-result",
+            "`#rest` (type-annotation-value | named-result)",
+            "ast.rs:Lowering::report_rest_results",
+        ),
+        (
+            "named-result",
+            "result-name type-annotation?",
+            "ast.rs:Lowering::result_annotation_from_tokens",
+        ),
+        (
+            "result-name",
+            "name",
+            "ast.rs:Lowering::result_annotation_from_tokens",
         ),
         (
             "callable-parameter-types",
@@ -4533,7 +4553,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 97);
+        assert_eq!(grammar.effective_rules.len(), 101);
 
         assert!(
             !records
@@ -4590,7 +4610,7 @@ mod tests {
         assert!(argument_list.contains("separator: literal(value: \",\")"));
 
         let result_values = rule_data("result-annotation-values");
-        assert!(result_values.contains("element-text: \"type-annotation-value\""));
+        assert!(result_values.contains("element-text: \"result-value\""));
         assert!(result_values.contains("allows-empty: #t"));
 
         let let_values = rule_data("let-values-binding");
