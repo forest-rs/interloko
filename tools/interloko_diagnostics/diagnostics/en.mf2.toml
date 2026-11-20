@@ -76,7 +76,6 @@
 "sem.apply-target-type-mismatch" = "apply calls a function, generic or <callable> value, not { $actual }"
 "sem.apply-sequence-type-mismatch" = "apply passes the elements of its last argument, which must be a <sequence>, not { $actual }"
 "sem.unchecked-callable-result" = "a call through a <callable> value cannot be checked to return { $expected }; call the function by name instead"
-"sem.untyped-callable-result" = "the result of a call through a <callable> value needs a declared type here: declare the type it is used at, as in `let r :: <integer> = f(x)`, or declare the callable's signature, such as callable(<integer>) => <integer>"
 "sem.callable-parameter-variance" = "{ $actual } cannot be called as { $expected }: its parameter { $index } accepts only { $accepted }, but callers may pass any { $passed }"
 "sem.callable-result-variance" = "{ $actual } cannot be called as { $expected }: its result { $index } may be any { $returned }, but callers rely on { $relied }"
 "sem.signal-condition-type-mismatch" = "signal needs an instance of a known class, such as a <condition> subclass, not { $actual }; convert an <object> with as(…) first"

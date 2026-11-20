@@ -1,0 +1,15 @@
+// expect: run 2
+// expect: diagnostics 0
+
+// A call through an untyped `<function>` as a statement takes none of its
+// callee's values, so a callee returning none, as a visitor does, is fine.
+
+define function each(visit :: <function>, items :: <vector>) => <integer>
+  for (item in items) visit(item) end;
+  visit(#f);
+  size(items)
+end;
+
+define function main() => <integer>
+  each(method (item) => () end, #[1, 2])
+end;

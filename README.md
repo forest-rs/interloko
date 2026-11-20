@@ -265,7 +265,10 @@ The current slices include:
   argument, a `let` without a values pattern, a `select` arm); one
   returning none is an error. A call through an untyped `<callable>` keeps
   the values it wants of those the value returns in the same way, none at
-  the end of a `=> ()` body: the value's shape records how many it returns,
+  the end of a `=> ()` body or as a statement, whatever the callee returns,
+  and one `<object>` where nothing narrower is
+  expected, as in Dylan (an untyped `let`, an argument of an `<object>`
+  parameter, an unannotated function's result): the value's shape records how many it returns,
   and the call tests that count against each larger one a callable of the
   program returns (a value from code installed later that returns a count
   the program never saw is called as the call site expects, which the tape

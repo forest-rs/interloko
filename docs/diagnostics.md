@@ -295,11 +295,10 @@ An untyped `<callable>` value says nothing about what it returns, so a
 call through it (`f(...)`) takes its result types from context: a
 declared binding (`let r :: <integer> = f(4)`), the enclosing
 function's declared result, or an argument's parameter type. With no such
-context it reports `sem.untyped-callable-result`, which suggests declaring
-one or giving the callable a signature such as `callable(<integer>) =>
-<integer>`. A result the call site relies on but cannot check is
-`sem.unchecked-callable-result`, and an `apply` target that is not
-callable at all is `sem.apply-target-type-mismatch`.
+context it keeps one `<object>`, as Dylan's untyped call does, and as a
+statement it takes none. A result the call site relies on but cannot
+check is `sem.unchecked-callable-result`, and an `apply` target that is
+not callable at all is `sem.apply-target-type-mismatch`.
 
 `apply` and a call through an untyped value whose callee takes `#rest`
 pass a number of arguments only the run knows. When it is not one the

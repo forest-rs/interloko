@@ -215,9 +215,6 @@ pub enum DiagnosticCode {
     /// A call through a `<callable>` value cannot check at runtime that its
     /// results are the kinds the call site relies on.
     UncheckedCallableResult,
-    /// A call through an untyped `<callable>` value has no context, such
-    /// as a declared binding or result type, that says what it returns.
-    UntypedCallableResult,
     /// A callable's parameter is narrower than the expected signature's, so
     /// it does not accept everything its callers may pass.
     CallableParameterVariance,
@@ -489,7 +486,6 @@ impl DiagnosticCode {
         Self::ApplyTargetTypeMismatch,
         Self::ApplySequenceTypeMismatch,
         Self::UncheckedCallableResult,
-        Self::UntypedCallableResult,
         Self::CallableParameterVariance,
         Self::CallableResultVariance,
         Self::SignalConditionTypeMismatch,
@@ -656,7 +652,6 @@ impl DiagnosticCode {
             Self::ApplyTargetTypeMismatch => "sem.apply-target-type-mismatch",
             Self::ApplySequenceTypeMismatch => "sem.apply-sequence-type-mismatch",
             Self::UncheckedCallableResult => "sem.unchecked-callable-result",
-            Self::UntypedCallableResult => "sem.untyped-callable-result",
             Self::CallableParameterVariance => "sem.callable-parameter-variance",
             Self::CallableResultVariance => "sem.callable-result-variance",
             Self::SignalConditionTypeMismatch => "sem.signal-condition-type-mismatch",
@@ -824,7 +819,6 @@ impl DiagnosticCode {
             "sem.apply-target-type-mismatch" => Self::ApplyTargetTypeMismatch,
             "sem.apply-sequence-type-mismatch" => Self::ApplySequenceTypeMismatch,
             "sem.unchecked-callable-result" => Self::UncheckedCallableResult,
-            "sem.untyped-callable-result" => Self::UntypedCallableResult,
             "sem.callable-parameter-variance" => Self::CallableParameterVariance,
             "sem.callable-result-variance" => Self::CallableResultVariance,
             "sem.signal-condition-type-mismatch" => Self::SignalConditionTypeMismatch,
