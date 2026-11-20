@@ -563,7 +563,9 @@ The current slices include:
   `end-position(s)`, `next-position(s, p)`, `previous-position(s, p)`,
   `position-at(s, n)` (O(1) for ASCII text, O(n) otherwise, as its name
   warns) and `position-after(s, prefix, p)`. `s[p]` and `element(s, p,
-  default: c)` read the character at `p`, `copy-sequence(s, start: p,
+  default: c)` read the character at `p`, and as in Dylan the default
+  may be any object, `element(s, p, default: #f)` answering `#f` at or
+  past the end and otherwise the character as an `<object>`, `copy-sequence(s, start: p,
   end: q)` copies, `starts-with?(s, prefix, at: p)` tests without
   allocating, positions compare with `=` and `<`, and `byte-offset(p)`
   and `as(<string-position>, s, n)` cross to byte offsets. A position is

@@ -1,0 +1,28 @@
+// expect: run 31
+// expect: diagnostics 0
+
+// As in Dylan, `element`'s `default:` may be any object: "peek or #f at
+// the end" is the idiomatic way to read ahead in a string. A character
+// default keeps the call's result a `<character>`; any other makes it an
+// `<object>`. A string typing does not know takes the same default through
+// the kernel method.
+
+define function peek(text :: <string>, at :: <string-position>) => <object>
+  element(text, at, default: #f)
+end;
+
+define function peek-any(text, at) => <object>
+  element(text, at, default: #f)
+end;
+
+define function main() => <integer>
+  let text = "ab";
+  let checks = 0;
+  if (peek(text, end-position(text)) == #f) checks := checks + 1 end;
+  if (peek(text, start-position(text)) == 'a') checks := checks + 2 end;
+  if (peek-any(text, end-position(text)) == #f) checks := checks + 4 end;
+  if (peek-any(text, next-position(text, start-position(text))) == 'b') checks := checks + 8 end;
+  let c :: <character> = element(text, end-position(text), default: 'z');
+  if (c == 'z') checks := checks + 16 end;
+  checks
+end;
