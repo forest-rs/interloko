@@ -16,6 +16,7 @@ mod built_in;
 mod collection;
 mod iteration;
 mod keywords;
+mod library;
 pub use collection::{BUILTIN_METHODS, BuiltinMethod, CollectionFunction, MethodKey};
 mod text;
 use keywords::{KeywordDefault, KeywordSignature};
@@ -949,16 +950,27 @@ impl GenericFunctionOrigin {
             }
             Self::Collection { function } => {
                 // A method on a kernel class the generic has a method for,
-                // or on a subclass, would override the kernel's.
+                // or on a subclass, would override the kernel's: one of
+                // the rows, or one the kernel library writes.
                 let collection = specializers
                     .get(function.collection_index())
                     .copied()
                     .flatten();
+                let overrides = |kernel: ClassId| {
+                    collection.is_some_and(|class| module.is_same_or_subclass(class, kernel))
+                };
                 !collection::builtin_methods(function).any(|method| {
                     module
                         .builtin_value_class(method.collection)
-                        .zip(collection)
-                        .is_some_and(|(kernel, class)| module.is_same_or_subclass(class, kernel))
+                        .is_some_and(overrides)
+                }) && !module.methods.iter().any(|method| {
+                    method.origin == (MethodOrigin::Collection { function })
+                        && method
+                            .specializers
+                            .get(function.collection_index())
+                            .copied()
+                            .flatten()
+                            .is_some_and(|kernel| kernel != OBJECT_CLASS_ID && overrides(kernel))
                 })
             }
         }
@@ -6094,6 +6106,20 @@ struct Lowering {
     /// The generics slots' getters are methods of, by getter name: each
     /// created for its name, or the program's own generic of the name.
     slot_getters: Vec<(String, GenericFunctionId)>,
+    /// The kernel library, parsed the first time a definition of it is
+    /// needed; see the `library` module.
+    library: Option<library::Library>,
+    /// The kernel library's functions in the module, by name, created the
+    /// first time a call or value names one. Each persists across
+    /// lowering passes, and its body is lowered again with every pass
+    /// ([`Self::lower_library_functions`]), since it may make closures.
+    library_functions: Vec<(String, FunctionId)>,
+    /// The library functions' bodies from the latest pass, parallel to
+    /// [`Self::library_functions`].
+    library_bodies: Vec<Function>,
+    /// Whether the code being lowered is the kernel library's, which sees
+    /// no definition of the program, only the kernel's.
+    kernel_scope: bool,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -6125,6 +6151,10 @@ impl Lowering {
             built_in_functions: Vec::new(),
             built_in_generics: Vec::new(),
             slot_getters: Vec::new(),
+            library: None,
+            library_functions: Vec::new(),
+            library_bodies: Vec::new(),
+            kernel_scope: false,
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
@@ -7178,6 +7208,9 @@ impl Lowering {
     /// `size` joins the kernel's `size` ([`Self::collect_slot_getter_generics`]).
     /// `None` when no slot has the getter.
     fn slot_getter_named(&mut self, name: &str) -> Option<GenericFunctionId> {
+        if self.kernel_scope {
+            return None;
+        }
         if let Some(generic) = self.slot_getter(name) {
             return Some(generic);
         }
@@ -8087,45 +8120,52 @@ impl Lowering {
                         )),
                 );
             }
-            let params = function
-                .params
-                .iter()
-                .map(|param| {
-                    self.resolve_function_type_detail(
-                        param.type_annotation.as_ref(),
-                        ValueKind::Any,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let param_callable_sigs = params
-                .iter()
-                .map(|param| param.callable_signature.clone())
-                .collect::<Vec<_>>();
-            let param_ranges = params.iter().map(|param| param.range).collect();
-            let param_kinds = params
-                .into_iter()
-                .map(|param| param.kind)
-                .collect::<Vec<_>>();
-            let DeclaredResults {
-                kinds: return_annotation,
-                callable_sigs: return_callable_sigs,
-                ranges: return_ranges,
-            } = self.resolve_declared_results(function.return_type.as_ref());
-            let return_kinds = return_annotation
-                .clone()
-                .unwrap_or_else(provisional_open_result_kinds);
-            self.functions.push(FunctionSymbol {
-                name: function.name.clone(),
-                id: FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
-                param_kinds,
-                param_callable_sigs,
-                param_ranges,
-                return_kinds,
-                return_callable_sigs,
-                return_ranges,
-                return_annotation,
-                span: function.span,
-            });
+            let symbol = self.function_symbol(
+                FunctionId(u32::try_from(index).unwrap_or(u32::MAX)),
+                function,
+            );
+            self.functions.push(symbol);
+        }
+    }
+
+    /// The symbol of `function`, whose id is `id`: its parameters' and
+    /// declared results' types.
+    fn function_symbol(&mut self, id: FunctionId, function: &ast::Function) -> FunctionSymbol {
+        let params = function
+            .params
+            .iter()
+            .map(|param| {
+                self.resolve_function_type_detail(param.type_annotation.as_ref(), ValueKind::Any)
+            })
+            .collect::<Vec<_>>();
+        let param_callable_sigs = params
+            .iter()
+            .map(|param| param.callable_signature.clone())
+            .collect::<Vec<_>>();
+        let param_ranges = params.iter().map(|param| param.range).collect();
+        let param_kinds = params
+            .into_iter()
+            .map(|param| param.kind)
+            .collect::<Vec<_>>();
+        let DeclaredResults {
+            kinds: return_annotation,
+            callable_sigs: return_callable_sigs,
+            ranges: return_ranges,
+        } = self.resolve_declared_results(function.return_type.as_ref());
+        let return_kinds = return_annotation
+            .clone()
+            .unwrap_or_else(provisional_open_result_kinds);
+        FunctionSymbol {
+            name: function.name.clone(),
+            id,
+            param_kinds,
+            param_callable_sigs,
+            param_ranges,
+            return_kinds,
+            return_callable_sigs,
+            return_ranges,
+            return_annotation,
+            span: function.span,
         }
     }
 
@@ -8460,13 +8500,18 @@ impl Lowering {
                 )
             })
             .collect::<Vec<_>>();
-        // The hidden kernel functions built-ins named as values are follow,
-        // in the order their ids were given.
-        functions.extend(
-            self.built_in_functions
-                .iter()
-                .map(|(_, function)| function.clone()),
-        );
+        self.lower_library_functions();
+        // The hidden kernel functions, the values built-ins named as values
+        // are and the kernel library's, follow, in the order their ids were
+        // given.
+        let mut kernel = self
+            .built_in_functions
+            .iter()
+            .map(|(_, function)| function.clone())
+            .chain(self.library_bodies.iter().cloned())
+            .collect::<Vec<_>>();
+        kernel.sort_by_key(|function| function.id.0);
+        functions.extend(kernel);
 
         let mut lowered = Module {
             source_file: module.source_file,
@@ -8538,6 +8583,7 @@ impl Lowering {
                     function,
                 );
             }
+            self.lower_library_functions();
 
             if self.result_signature_snapshot() == before {
                 break;
@@ -10157,6 +10203,9 @@ impl Lowering {
     /// joins it rather than replacing it, and so does a slot getter of the
     /// same name, which serves its own class.
     fn program_defines(&self, name: &str) -> bool {
+        if self.kernel_scope {
+            return false;
+        }
         self.shadows_collection_generic(name)
             || self.resolve_constant(name).is_some()
             || (CollectionFunction::from_name(name).is_none()
@@ -10443,6 +10492,9 @@ impl Lowering {
             _ => {}
         }
         let lowered_args: Vec<_> = args.iter().map(|arg| self.lower_expr(ctx, arg)).collect();
+        if let Some(symbol) = self.library_function(callee) {
+            return self.lower_function_call(ctx, &symbol, lowered_args, callee, span);
+        }
         // A built-in with several overloads sends to its generic when no
         // overload takes the arguments' types: an `<object>` among them, or
         // a class a program's method joined the generic for.
@@ -11632,6 +11684,9 @@ impl Lowering {
         if self.program_defines(name) {
             return None;
         }
+        if let Some(symbol) = self.library_function(name) {
+            return Some(KnownCallable::DirectFunction(symbol.id));
+        }
         let overloads = built_in::overloads(name)?;
         Some(match overloads.as_slice() {
             [params] => KnownCallable::DirectFunction(self.built_in_function(name, params)),
@@ -11919,6 +11974,155 @@ impl Lowering {
         (ctx, locals, kinds, body)
     }
 
+    /// The kernel library, parsed on first use.
+    fn library(&mut self) -> &library::Library {
+        self.library.get_or_insert_with(library::Library::parse)
+    }
+
+    /// The symbol of the kernel library's function `name`, creating it on
+    /// first use: one the library exports, or in the library's own code
+    /// any of its functions. Its body is lowered with the pass's others
+    /// ([`Self::lower_library_functions`]).
+    fn library_function(&mut self, name: &str) -> Option<FunctionSymbol> {
+        if !self.kernel_scope && !library::exports(name) {
+            return None;
+        }
+        if let Some((_, id)) = self
+            .library_functions
+            .iter()
+            .find(|(existing, _)| existing == name)
+        {
+            return self.functions.get(id.0 as usize).cloned();
+        }
+        let function = self.library().function(name)?.clone();
+        let id = FunctionId(u32::try_from(self.functions.len()).unwrap_or(u32::MAX));
+        let scope = core::mem::replace(&mut self.kernel_scope, true);
+        let symbol = self.function_symbol(id, &function);
+        self.kernel_scope = scope;
+        self.functions.push(symbol.clone());
+        self.library_functions.push((name.into(), id));
+        Some(symbol)
+    }
+
+    /// Lowers the body of every kernel library function created so far,
+    /// and of any those bodies name in turn, in the kernel's scope.
+    fn lower_library_functions(&mut self) {
+        let scope = core::mem::replace(&mut self.kernel_scope, true);
+        let mut index = 0;
+        while let Some((name, id)) = self.library_functions.get(index).cloned() {
+            let Some(function) = self.library().function(&name).cloned() else {
+                index += 1;
+                continue;
+            };
+            let mut lowered = self.lower_function(id, &function);
+            lowered.kernel = true;
+            lowered.keywords = Vec::new();
+            if let Some(body) = self.library_bodies.get_mut(index) {
+                *body = lowered;
+            } else {
+                self.library_bodies.push(lowered);
+            }
+            index += 1;
+        }
+        self.kernel_scope = scope;
+    }
+
+    /// Generates the kernel library's methods of the collection generic
+    /// `function`, `generic`, each lowered in the kernel's scope as a kernel
+    /// method of the generic.
+    fn collect_library_methods(
+        &mut self,
+        function: CollectionFunction,
+        generic: GenericFunctionId,
+    ) {
+        let methods = self
+            .library()
+            .methods(function.name())
+            .cloned()
+            .collect::<Vec<_>>();
+        let scope = core::mem::replace(&mut self.kernel_scope, true);
+        for method in methods {
+            let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+            let mut ctx = FunctionContext::new();
+            ctx.shared_names = ast::shared_local_names(&method.body);
+            let mut params = Vec::new();
+            let mut specializers = Vec::new();
+            for param in &method.params {
+                let class = match &param.specializer {
+                    Some(ast::TypeExpr::Named { name, .. }) => self
+                        .resolve_class(name)
+                        .map_or(OBJECT_CLASS_ID, |class| class.id),
+                    _ => OBJECT_CLASS_ID,
+                };
+                let kind = if class == OBJECT_CLASS_ID {
+                    ValueKind::Any
+                } else {
+                    self.kind_for_builtin_class(class)
+                        .unwrap_or(ValueKind::Object(class))
+                };
+                let local = ctx.add_local(
+                    self.local_definition(method.definition, &param.name),
+                    param.name.clone(),
+                    kind,
+                    None,
+                    Span::default(),
+                );
+                ctx.allow_assignment(local);
+                params.push(local);
+                specializers.push(Some(class));
+            }
+            // The generic's keywords follow its required parameters.
+            for keyword in function.keywords() {
+                let local = ctx.add_local(
+                    self.local_definition(method.definition, keyword),
+                    (*keyword).into(),
+                    ValueKind::Any,
+                    None,
+                    Span::default(),
+                );
+                params.push(local);
+                specializers.push(Some(OBJECT_CLASS_ID));
+            }
+            let (result_kinds, result_sigs) = self.collection_results(function);
+            let mut body =
+                self.lower_result_block(&mut ctx, &method.body, Some(&result_kinds), &result_sigs);
+            let result = core::mem::replace(&mut body.result, Expr::Error { span: body.span });
+            body.result = self.narrow_results(
+                &mut ctx,
+                result,
+                &result_kinds,
+                &result_sigs,
+                "function-result",
+            );
+            self.diagnostics.append(&mut ctx.diagnostics);
+            self.methods.push(Method {
+                id,
+                definition: method.definition,
+                generic,
+                specializer: specializers
+                    .get(function.collection_index())
+                    .copied()
+                    .flatten()
+                    .unwrap_or(OBJECT_CLASS_ID),
+                specializers,
+                param: params
+                    .get(function.collection_index())
+                    .copied()
+                    .unwrap_or(LocalId(u32::MAX)),
+                params,
+                locals: ctx.locals,
+                body,
+                result_ranges: vec![None; result_kinds.len()],
+                result_kinds: result_kinds.clone(),
+                return_annotation: Some(result_kinds),
+                span: Span::default(),
+                origin: MethodOrigin::Collection { function },
+                strict: false,
+            });
+        }
+        self.kernel_scope = scope;
+    }
+
     /// Returns the built-in collection generic named `name`, creating it on
     /// first use, unless the module defines `name` itself.
     fn collection_generic_named(&mut self, name: &str) -> Option<GenericFunctionId> {
@@ -12108,6 +12312,7 @@ impl Lowering {
     /// parameters.
     fn collect_collection_methods(&mut self) {
         for (function, generic) in self.collection_generics.clone() {
+            self.collect_library_methods(function, generic);
             if function == CollectionFunction::ForwardIterationProtocol {
                 self.collect_iteration_methods(generic);
                 continue;
@@ -18035,6 +18240,9 @@ impl Lowering {
     }
 
     fn has_accessor(&self, name: &str) -> bool {
+        if self.kernel_scope {
+            return false;
+        }
         self.classes.iter().any(|class| {
             class
                 .direct_slots
@@ -18987,18 +19195,27 @@ impl Lowering {
     /// The program's function named `name`. A built-in's hidden kernel
     /// function has its name too, but no call of the name finds it.
     fn resolve_function(&self, name: &str) -> Option<&FunctionSymbol> {
+        if self.kernel_scope {
+            return None;
+        }
         self.functions[..self.program_functions.min(self.functions.len())]
             .iter()
             .find(|symbol| symbol.name == name)
     }
 
     fn resolve_host_function(&self, name: &str) -> Option<&ResolvedHostFunction> {
+        if self.kernel_scope {
+            return None;
+        }
         self.host_functions
             .iter()
             .find(|function| function.name == name)
     }
 
     fn resolve_constant(&self, name: &str) -> Option<&ConstantSymbol> {
+        if self.kernel_scope {
+            return None;
+        }
         self.constant_symbols
             .iter()
             .find(|symbol| symbol.name == name)
@@ -19132,7 +19349,9 @@ impl Lowering {
     /// are reached only through operators, never by name.
     fn resolve_generic(&self, name: &str) -> Option<&GenericSymbol> {
         self.generic_symbols.iter().find(|symbol| {
-            symbol.name == name && !self.numeric_generics.iter().any(|(_, id)| *id == symbol.id)
+            symbol.name == name
+                && !self.numeric_generics.iter().any(|(_, id)| *id == symbol.id)
+                && (!self.kernel_scope || self.is_kernel_generic(symbol.id))
         })
     }
 

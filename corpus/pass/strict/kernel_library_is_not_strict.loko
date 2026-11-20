@@ -1,0 +1,11 @@
+// typing: strict
+// expect: run 3
+// expect: diagnostics 0
+
+// The kernel's list methods are written in Loko, but they are the
+// kernel's code, not the program's: holding every definition to strict
+// typing holds only the program's.
+
+define function main() => <integer>
+  size(#(1, 2, 3))
+end;

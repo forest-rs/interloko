@@ -1,0 +1,14 @@
+// expect: run 6
+// expect: diagnostics 0
+
+// The kernel's list methods use the kernel's `head` and `tail`, whatever a
+// program defines under those names.
+
+define function tail (x) => <integer> 0 end;
+define function head (x) => <integer> 0 end;
+
+define function main() => <integer>
+  let total = size(#(1, 2, 3));      // 3
+  for (x :: <integer> in #(1, 2)) total := total + x end;
+  total
+end;

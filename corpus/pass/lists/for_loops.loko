@@ -1,0 +1,20 @@
+// expect: run 1573
+// expect: diagnostics 0
+
+// `for` walks a list from its first pair to its last, through the
+// kernel's `forward-iteration-protocol` method for `<list>`, whether
+// typing knows the list or not; clauses step together as for any
+// collection.
+
+define function main() => <integer>
+  let total = 0;
+  for (x :: <integer> in #(1, 2, 3)) total := total + x end;   // 6
+  let boxed :: <object> = #(10, 20);
+  for (x :: <integer> in boxed, i from 0) total := total + x * (i + 1) end;   // 50
+  for (x in #()) total := total + 1000 end;
+  for (a :: <integer> in #(1, 2), b :: <integer> in #[100, 200, 300]) total := total + a * b end;   // 500
+  // The element setter stores into the pair at the state.
+  let l = #(1, 2);
+  for (x :: <integer> in l, i from 0) l[i] := x * 339 end;   // 339 + 678
+  total + head(l) + head(tail(l))
+end;

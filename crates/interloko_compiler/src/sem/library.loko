@@ -1,0 +1,84 @@
+// The kernel library: the parts of Loko's kernel written in Loko.
+//
+// Each definition here joins a program only when the program needs it:
+// a function when a call or a value names it (one the `library` module
+// exports, or one another library definition calls), and a method of a
+// collection generic when the program uses the generic. Its code is the
+// kernel's, so it sees no definition of the program: `size` here is always
+// the kernel's `size`, whatever the program defines.
+//
+// Code here keeps to what typing proves or checks cheaply, since every
+// program that uses it pays for it.
+
+// --- Lists as sequences --------------------------------------------------
+
+// A list's size is its number of pairs, up to the first tail that is not a
+// pair.
+define method size (c :: <list>) => <integer>
+  let n = 0;
+  let rest :: <object> = c;
+  while (instance?(rest, <pair>))
+    n := n + 1;
+    rest := tail(rest)
+  end;
+  n
+end;
+
+// The pair a list's index `key` names, or `#f` past its end.
+define function list-pair (c :: <list>, key :: <integer>) => <object>
+  let rest :: <object> = c;
+  let i = key;
+  while (i > 0 & instance?(rest, <pair>))
+    i := i - 1;
+    rest := tail(rest)
+  end;
+  if (key >= 0 & instance?(rest, <pair>)) rest else #f end
+end;
+
+define method element (c :: <list>, key :: <integer>, #key default) => <object>
+  let found = list-pair(c, key);
+  if (instance?(found, <pair>))
+    head(found)
+  elseif (default == $unsupplied)
+    error("element: %= has no element %=", c, key)
+  else
+    default
+  end
+end;
+
+define method element-setter (value :: <object>, c :: <list>, key :: <integer>) => <object>
+  let found = list-pair(c, key);
+  if (instance?(found, <pair>))
+    head-setter(value, found)
+  else
+    error("element-setter: %= has no element %=", c, key)
+  end
+end;
+
+// A list's states are its pairs, from the list itself to its last pair:
+// each step is a `tail`, and its element is the pair's `head`.
+define method forward-iteration-protocol (c :: <list>)
+ => (<object>, <object>, callable(<object>, <object>) => <object>,
+     callable(<object>, <object>, <object>) => <boolean>,
+     callable(<object>, <object>) => <object>,
+     callable(<object>, <object>) => <object>, <object>)
+  values(c, #f,
+         method (c :: <object>, s :: <object>) => <object> tail(s) end,
+         method (c :: <object>, s :: <object>, l :: <object>) => <boolean>
+           ~instance?(s, <pair>)
+         end,
+         // The key of a pair is its index, counted from the start.
+         method (c :: <object>, s :: <object>) => <object>
+           let i = 0;
+           let rest :: <object> = c;
+           while (rest ~== s)
+             i := i + 1;
+             rest := tail(rest)
+           end;
+           i
+         end,
+         method (c :: <object>, s :: <object>) => <object> head(s) end,
+         method (v :: <object>, c :: <object>, s :: <object>) => <object>
+           head-setter(v, s)
+         end)
+end;

@@ -50,10 +50,11 @@ pub const FORMS: &[&str] = &[
     "string-to-integer",
 ];
 
-/// Whether `name` names a built-in a call can reach, a form or a function.
+/// Whether `name` names a built-in a call can reach, a form or a function,
+/// the kernel library's included.
 #[must_use]
 pub fn names_built_in(name: &str) -> bool {
-    FORMS.contains(&name) || overloads(name).is_some()
+    FORMS.contains(&name) || overloads(name).is_some() || super::library::exports(name)
 }
 
 /// The overloads a value of the built-in function `name` covers, each as

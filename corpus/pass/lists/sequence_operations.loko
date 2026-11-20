@@ -1,0 +1,22 @@
+// expect: run 127
+// expect: diagnostics 0
+
+// A list is a `<sequence>`: `size` counts its pairs, `l[i]` and `element`
+// read the element at an index (`default:` past the end) and `l[i] := v`
+// stores one, whether typing knows the list or sees an `<object>`. An
+// index past the end without a default signals an `<error>`.
+
+define function main() => <integer>
+  let l = #(10, 20, 30);
+  let boxed :: <object> = l;
+  let checks = 0;
+  if (size(l) = 3 & size(#()) = 0 & size(boxed) = 3) checks := checks + 1 end;
+  if (l[1] = 20 & boxed[2] = 30) checks := checks + 2 end;
+  if (element(l, 5, default: #f) == #f & element(l, -1, default: 0) = 0) checks := checks + 4 end;
+  l[0] := 11;
+  if (head(l) = 11) checks := checks + 8 end;
+  // A dotted list's size counts its pairs.
+  if (size(pair(1, pair(2, 3))) = 2) checks := checks + 16 end;
+  checks := checks + block () l[7] exception (e :: <error>) 32 end;
+  checks + block () l[3] := 0 exception (e :: <error>) 64 end
+end;

@@ -1,0 +1,9 @@
+// expect: diagnostic code sem.collection-method-overrides-kernel
+// expect: diagnostics 1
+
+// The kernel's `size` for `<list>` serves `<pair>`: a program's method
+// would override it.
+
+define method size (p :: <pair>) => <integer> 0 end;
+
+define function main() => <integer> size(#(1)) end;
