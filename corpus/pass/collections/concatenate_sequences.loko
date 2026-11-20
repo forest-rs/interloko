@@ -1,0 +1,25 @@
+// expect: run 127
+// expect: diagnostics 0
+
+// Dylan's `concatenate` takes one or more sequences and answers a new one
+// of the first's kind holding each one's elements in turn. Strings and
+// characters typing knows join inline.
+
+define function same?(a, b) => <boolean> a = b end;
+
+define function main() => <integer>
+  let checks = 0;
+  if (concatenate("a", "b", "c") = "abc") checks := checks + 1 end;
+  let l = concatenate(#(1, 2), #[3], #(4));
+  if (instance?(l, <list>) & same?(size(l), 4) & same?(first(l), 1)) checks := checks + 2 end;
+  let v = concatenate(#[1], #(2, 3));
+  if (instance?(v, <vector>) & same?(third(v), 3)) checks := checks + 4 end;
+  let text :: <object> = "x";
+  if (same?(concatenate(text, "y"), "xy")) checks := checks + 8 end;
+  if (concatenate("x", 'y', "z") = "xyz") checks := checks + 16 end;
+  let one = #(1);
+  let copy = concatenate(one);
+  if (copy ~== one & same?(first(copy), 1)) checks := checks + 32 end;
+  if (same?(concatenate("ab", #('c')), "abc")) checks := checks + 64 end;
+  checks
+end;

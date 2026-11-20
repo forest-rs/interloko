@@ -1,0 +1,6 @@
+// expect: diagnostic contains function `concatenate` expects 1 arguments but got 0
+// expect: diagnostics 1
+
+// `concatenate` takes at least one sequence.
+
+define function main() => <object> concatenate() end;

@@ -10495,6 +10495,9 @@ impl Lowering {
         if let Some(symbol) = self.library_function(callee) {
             return self.lower_function_call(ctx, &symbol, lowered_args, callee, span);
         }
+        if callee == "concatenate" {
+            return self.lower_concatenate(ctx, lowered_args, span);
+        }
         // A built-in with several overloads sends to its generic when no
         // overload takes the arguments' types: an `<object>` among them, or
         // a class a program's method joined the generic for.
@@ -11987,6 +11990,12 @@ impl Lowering {
         if !self.kernel_scope && !library::exports(name) {
             return None;
         }
+        self.kernel_library_function(name)
+    }
+
+    /// The symbol of the kernel library's function `name`, exported or
+    /// not, for code the compiler writes; see [`Self::library_function`].
+    fn kernel_library_function(&mut self, name: &str) -> Option<FunctionSymbol> {
         if let Some((_, id)) = self
             .library_functions
             .iter()
@@ -14648,6 +14657,80 @@ impl Lowering {
             span,
         };
         with_lets(lets, call, span)
+    }
+
+    /// Lowers Dylan's `concatenate(sequence, more, …)`: a new collection of
+    /// the first sequence's kind holding the elements of each in turn.
+    /// Strings and characters typing knows join inline, two at a time;
+    /// any other sequences join through the kernel library's
+    /// `concatenate-two`. Two arguments of which one is a class of the
+    /// program's own send to the built-in `concatenate` generic, which a
+    /// program's method may join.
+    fn lower_concatenate(
+        &mut self,
+        ctx: &mut FunctionContext,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Expr {
+        const CALLEE: &str = "concatenate";
+        if args.is_empty() {
+            ctx.diagnostics
+                .push(Self::arity_mismatch(CALLEE, 1, 0, span));
+            return Expr::Error { span };
+        }
+        let text = |kind: ValueKind| {
+            matches!(
+                kind,
+                ValueKind::String(_) | ValueKind::Char | ValueKind::Error
+            )
+        };
+        if args.len() >= 2 && args.iter().all(|arg| text(self.expr_kind(arg))) {
+            let mut args = args.into_iter();
+            let mut joined = args.next().expect("there are arguments");
+            for next in args {
+                joined = self
+                    .lower_intrinsic_call(ctx, CALLEE, &[joined, next], span)
+                    .unwrap_or(Expr::Error { span });
+            }
+            return joined;
+        }
+        if args.len() == 2
+            && self.sends_to_built_in_generic(CALLEE, &args)
+            && args.iter().any(|arg| {
+                matches!(self.expr_kind(arg), ValueKind::Object(class)
+                if self.classes.get(class.0 as usize).is_some_and(|class| {
+                    matches!(class.origin, ClassOrigin::Native | ClassOrigin::HostBacked { .. })
+                }))
+            })
+            && let Some(generic) = self.built_in_generic_named(CALLEE)
+            && let Some(symbol) = self
+                .generic_symbols
+                .iter()
+                .find(|symbol| symbol.id == generic)
+                .cloned()
+        {
+            return self.lower_generic_send(ctx, &symbol, args, CALLEE, span);
+        }
+        let Some(two) = self.kernel_library_function("concatenate-two") else {
+            return Expr::Error { span };
+        };
+        let mut args = args.into_iter();
+        let first = args.next().expect("there are arguments");
+        let mut rest = args.collect::<Vec<_>>();
+        // One sequence is copied, as joining it to nothing.
+        if rest.is_empty() {
+            rest.push(Expr::IntrinsicCall {
+                intrinsic: Intrinsic::EmptyList,
+                args: Vec::new(),
+                result_kind: self.intrinsic_result_kind(Intrinsic::EmptyList),
+                span,
+            });
+        }
+        let mut joined = first;
+        for next in rest {
+            joined = self.lower_function_call(ctx, &two, vec![joined, next], CALLEE, span);
+        }
+        joined
     }
 
     /// A new list of `elements`, evaluated in order: `#()` for none, and
