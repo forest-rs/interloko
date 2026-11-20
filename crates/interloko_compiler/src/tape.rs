@@ -1773,6 +1773,56 @@ impl<'a> FunctionEmitter<'a> {
             .then_some(accepted)
     }
 
+    /// Emits a cast's passing path without a host call when the layout
+    /// names few enough classes in `class`'s cone ([`Self::keyed_instance_classes`]):
+    /// `obj.key` reads the value's class, a compare per class accepts it,
+    /// and `obj.convert` unboxes a boxed object. A boxed scalar's key
+    /// carries `SCALAR_KEY_BIT`, so it matches no class and, like an object
+    /// of another class, falls through to the checked host call this
+    /// precedes, which signals. Returns the label the accepted path jumps
+    /// to, to be placed after that call, or `None` when the cast asks the
+    /// host every time.
+    fn emit_keyed_cast(
+        &mut self,
+        dst: Reg,
+        value: Reg,
+        class: sem::ClassId,
+        span: Span,
+    ) -> Result<Option<Label>, TapeError> {
+        let (ValueType::Obj(from), ValueType::Obj(to)) =
+            (self.register_type(value)?, self.register_type(dst)?)
+        else {
+            return Ok(None);
+        };
+        let Some(accepted) = self.keyed_instance_classes(class) else {
+            return Ok(None);
+        };
+        let key = self.alloc_temp(ValueType::U64);
+        let expected = self.alloc_temp(ValueType::U64);
+        let same = self.alloc_temp(ValueType::Bool);
+        let (yes, no, done) = (self.asm.label(), self.asm.label(), self.asm.label());
+        self.set_span(span);
+        self.asm.obj_key(key, value);
+        for id in accepted {
+            let next = self.asm.label();
+            self.asm
+                .const_u64(expected, u64::from(id))
+                .u64_eq(same, key, expected)
+                .br(same, yes, next);
+            self.asm.place(next).map_err(build_error)?;
+        }
+        self.asm.jmp(no);
+        self.asm.place(yes).map_err(build_error)?;
+        if from == to {
+            self.asm.mov(dst, value);
+        } else {
+            self.asm.obj_convert(dst, value);
+        }
+        self.asm.jmp(done);
+        self.asm.place(no).map_err(build_error)?;
+        Ok(Some(done))
+    }
+
     fn emit(mut self) -> Result<Asm, TapeError> {
         let instructions = &self.function.instructions;
         for (index, instr) in instructions.iter().enumerate() {
@@ -2857,7 +2907,12 @@ impl<'a> FunctionEmitter<'a> {
                     recheck: Some(self.cast_sig(lower::ValueKind::Object(None))?),
                     class: class.0,
                 };
+                let done = self.emit_keyed_cast(*dst, *value, *class, *span)?;
                 self.emit_checked_call(*dst, *value, check, type_error, *span)?;
+                if let Some(done) = done {
+                    self.asm.jmp(done);
+                    self.asm.place(done).map_err(build_error)?;
+                }
             }
             lower::Instr::CastClassObject {
                 dst,

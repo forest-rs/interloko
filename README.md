@@ -872,6 +872,10 @@ Boxed `<object>` values are VM objects of one host type. Floats (both
 formats), booleans, characters, integers within 47 bits and references to runtime
 objects travel inside the object handle and never allocate a box; wider
 integers live in the runtime host's heap.
+`instance?`, `class-of`, and a cast to a class whose subclasses the
+layout lists in a few classes read an object's class with `obj.key` on the
+tape, without a host call; only a cast that fails asks the host, which
+signals. A `make` of a class literal reads no class metaobject.
 
 The runtime heap has two regions. Each call is one *turn*: everything it
 allocates (instances, strings, vectors, metaobjects, heap boxes) goes to a

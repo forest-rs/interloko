@@ -17526,6 +17526,41 @@ mod tests {
     }
 
     #[test]
+    fn casts_and_makes_of_named_classes_need_no_host_call_until_a_cast_fails() {
+        let source = "\
+define class <shape> (<object>) end;
+define class <circle> (<shape>)
+  slot radius :: <integer>, required-init-keyword: radius:;
+end;
+define class <square> (<shape>) end;
+define function radius-of(s :: <object>) => <integer>
+  as(<circle>, s).radius
+end;
+define function main() => <integer>
+  let fine = radius-of(make(<circle>, radius: 5));
+  let failed = block () radius-of(make(<square>)) exception (e :: <type-error>) 100 end;
+  let scalar = block () radius-of(7) exception (e :: <type-error>) 1000 end;
+  fine + failed + scalar
+end;";
+        let artifacts = CompilerSession::compile_source(
+            "cast.loko",
+            source,
+            RuntimeMode::RunMainTraced {
+                detail: ExecutionTraceDetail::Boundaries,
+            },
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let dump = artifacts.dump_execution_trace();
+        assert!(dump.contains("outcome: returned (1105)"), "{dump}");
+        // The circle's cast reads its class key on the tape; the square
+        // and the boxed integer ask the host, which signals.
+        assert_eq!(dump.matches("host-call interloko.cast_object").count(), 2);
+        assert_eq!(dump.matches("threw interloko.check_failed").count(), 2);
+        // `make` of a class literal reads no class metaobject.
+        assert!(!dump.contains("interloko.meta.class_object"));
+    }
+
+    #[test]
     fn traced_nested_calls_keep_exact_callers_and_outcome_stacks() {
         for should_trap in [false, true] {
             let expression = if should_trap { "helper(x)" } else { "x + 1" };
