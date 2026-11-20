@@ -332,6 +332,15 @@ text_functions! {
     StringToSymbol = "interloko.text.string_to_symbol", (String) -> Symbol, None;
     /// `as(<string>, s)`: a new string holding a symbol's name.
     SymbolToString = "interloko.text.symbol_to_string", (Symbol) -> String, None;
+    /// Whether `string-to-integer(s)` has an integer to answer: an
+    /// optional `-` or `+` and at least one decimal digit, whose value up
+    /// to the first character that is not a digit fits an `<integer>`.
+    IsIntegerText = "interloko.text.is_integer_text", (String) -> Boolean, None;
+    /// `string-to-integer(s)`: the value of the optional sign and the
+    /// decimal digits that start `s`, up to the first character that is
+    /// not a digit. Compiled code calls it only for a string
+    /// [`Self::IsIntegerText`] accepts, and it fails on any other.
+    StringToInteger = "interloko.text.string_to_integer", (String) -> Integer, None;
 }
 
 impl TextFunction {
@@ -561,6 +570,12 @@ impl InterlokoHost {
                 *scalars = 0;
                 self.push_string(text).map_err(|_| Failed)?
             }
+            (F::IsIntegerText, [s]) => {
+                Value::Bool(leading_integer(self.text_arg(*s)?.as_str()).is_some())
+            }
+            (F::StringToInteger, [s]) => {
+                Value::I64(leading_integer(self.text_arg(*s)?.as_str()).ok_or(Failed)?)
+            }
             (F::StringToSymbol, [s]) => {
                 let name = String::from(self.text_arg(*s)?.as_str());
                 self.intern_symbol(name).map_err(|_| Failed)?
@@ -635,6 +650,34 @@ pub fn character_literal(value: char) -> String {
     literal
 }
 
+/// The integer `text` starts with, as `string-to-integer` reads it: an
+/// optional `-` or `+`, then decimal digits up to the first character that
+/// is not one. `None` when there is no digit, or the value does not fit an
+/// `<integer>`.
+fn leading_integer(text: &str) -> Option<i64> {
+    let (negative, digits) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    let end = digits
+        .bytes()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(digits.len());
+    if end == 0 {
+        return None;
+    }
+    // Accumulating negatively reaches the least `<integer>` too.
+    digits.as_bytes()[..end]
+        .iter()
+        .try_fold(0_i64, |value, digit| {
+            let digit = i64::from(digit - b'0');
+            value
+                .checked_mul(10)?
+                .checked_add(if negative { -digit } else { digit })
+        })
+}
+
 /// Writes a symbol named `name` as a Loko symbol literal: `#name` when the
 /// name is a word a symbol literal can spell, such as `#set!`, and the
 /// general `#"…"` form otherwise, such as `#"two words"`.
@@ -702,7 +745,9 @@ fn simple_case(mut mapping: impl Iterator<Item = char>) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TextFunction, TextKind, character_literal, string_literal, symbol_literal};
+    use super::{
+        TextFunction, TextKind, character_literal, leading_integer, string_literal, symbol_literal,
+    };
     use execution_tape::host::ValueRef;
     use execution_tape::value::Value;
 
@@ -727,6 +772,19 @@ mod tests {
         }
         assert_eq!(TextFunction::from_symbol("interloko.text.nope"), None);
         assert_eq!(TextFunction::from_symbol("interloko.float.sin"), None);
+    }
+
+    #[test]
+    fn leading_integers_read_a_sign_and_digits() {
+        assert_eq!(leading_integer("42"), Some(42));
+        assert_eq!(leading_integer("-17x"), Some(-17));
+        assert_eq!(leading_integer("+5"), Some(5));
+        assert_eq!(leading_integer("12abc"), Some(12));
+        assert_eq!(leading_integer("-9223372036854775808"), Some(i64::MIN));
+        assert_eq!(leading_integer("9223372036854775808"), None);
+        for text in ["", "-", "+", "x1", " 1", "--1"] {
+            assert_eq!(leading_integer(text), None, "{text:?}");
+        }
     }
 
     #[test]

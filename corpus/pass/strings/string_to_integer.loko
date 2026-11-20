@@ -1,0 +1,23 @@
+// expect: run 127
+// expect: diagnostics 0
+
+// `string-to-integer` reads an optional sign and the decimal digits a
+// string starts with, up to the first character that is not a digit. One
+// that starts with no integer answers the `default:`, or without one
+// signals a `<simple-error>`.
+
+define function main() => <integer>
+  let checks = 0;
+  if (string-to-integer("42") = 42) checks := checks + 1 end;
+  if (string-to-integer("-17") = -17 & string-to-integer("+5") = 5) checks := checks + 2 end;
+  if (string-to-integer("12abc") = 12) checks := checks + 4 end;
+  if (string-to-integer("x", default: #f) == #f) checks := checks + 8 end;
+  if (string-to-integer("-", default: 9) = 9) checks := checks + 16 end;
+  let text :: <object> = "31";
+  if (string-to-integer(text) = 31) checks := checks + 32 end;
+  checks + block ()
+             string-to-integer("nope")
+           exception (e :: <simple-error>)
+             64
+           end
+end;

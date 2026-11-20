@@ -574,7 +574,13 @@ The current slices include:
   than splitting a character. `=` compares contents and `<` orders by
   character; `as-uppercase` and `as-lowercase` map a whole string fully
   (`"ß"` to `"SS"`); `concatenate` takes characters too, and `as(<string>,
-  c)` makes one. A `<string-builder>` (`make(<string-builder>)`, `add!(b,
+  c)` makes one. `string-to-integer(s)`, common Dylan's, reads the
+  optional sign and decimal digits `s` starts with, up to the first
+  character that is not a digit, and signals a `<simple-error>` when it
+  starts with none (or with more digits than an `<integer>` holds);
+  `string-to-integer(s, default: d)` answers `d` instead, as an `<object>`
+  unless `d` is an `<integer>` (`base:`, `start:` and `end:` and the
+  second value, where reading stopped, are still to come). A `<string-builder>` (`make(<string-builder>)`, `add!(b,
   c)` or `add!(b, s)`, `size(b)`) is the one mutable text type, and
   `as(<string>, b)` takes its text without a copy, leaving it empty; a
   builder in the image cannot change during a turn yet. `s[p]`,

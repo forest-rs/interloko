@@ -23,7 +23,8 @@
 //! its handler supplies, as `error` does, which also takes any number of
 //! format arguments. Those are forms of the language, and naming one
 //! as a value is an error. `copy-sequence` and `starts-with?`, whose
-//! keywords default to positions of their string, are not values yet.
+//! keywords default to positions of their string, and `string-to-integer`,
+//! whose result depends on its `default:`, are not values yet.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -45,6 +46,7 @@ pub const FORMS: &[&str] = &[
     "error",
     "copy-sequence",
     "starts-with?",
+    "string-to-integer",
 ];
 
 /// Whether `name` names a built-in a call can reach, a form or a function.
