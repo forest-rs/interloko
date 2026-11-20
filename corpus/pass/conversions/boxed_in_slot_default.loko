@@ -6,12 +6,12 @@
 
 define constant $held :: <object> = 3;
 
-define class <pair> (<object>)
+define class <couple> (<object>)
   slot whole :: <integer>, init-value: as(<integer>, $held);
   slot real :: <double-float>, init-value: as(<double-float>, $held);
 end;
 
 define function main() => <integer>
-  let p = make(<pair>);
+  let p = make(<couple>);
   p.whole + as(<integer>, p.real)
 end;

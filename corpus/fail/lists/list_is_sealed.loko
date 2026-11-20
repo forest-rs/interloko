@@ -1,0 +1,8 @@
+// expect: diagnostic code sem.invalid-primitive-superclass
+// expect: diagnostics 1
+
+// `<list>` is sealed: its only subclasses are `<pair>` and `<empty-list>`.
+
+define class <my-list> (<list>) end;
+
+define function main() => <integer> 0 end;

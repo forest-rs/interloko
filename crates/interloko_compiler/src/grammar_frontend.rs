@@ -4045,6 +4045,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::KeywordExpr => Some("keyword-symbol"),
         CstKind::MethodExpr => Some("method-expression"),
         CstKind::VectorExpr => Some("vector-expression"),
+        CstKind::ListExpr => Some("list-expression"),
         CstKind::IfExpr => Some("if-expression"),
         CstKind::ElseifClause => Some("elseif-clause"),
         CstKind::ElseClause => Some("else-clause"),

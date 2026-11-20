@@ -133,6 +133,16 @@ pub enum BuiltinValueClass {
     /// iterating through its own `size` and `element`. (`<string>` joins
     /// once it has its own iteration method.)
     Sequence,
+    /// The abstract, sealed built-in `<list>` class: a `<sequence>` that is
+    /// either a `<pair>` or the empty list. Its two subclasses are its only
+    /// ones, so a value known to be a `<list>` is one of the two.
+    List,
+    /// The concrete built-in `<pair>` class: a `<list>` of a head and a
+    /// tail, both any objects, made by `pair(head, tail)`.
+    Pair,
+    /// The concrete built-in `<empty-list>` class, whose one instance is
+    /// `#()`, the empty list.
+    EmptyList,
 }
 
 impl BuiltinValueClass {
@@ -163,6 +173,9 @@ impl BuiltinValueClass {
         (Self::StretchyVector, "<stretchy-vector>"),
         (Self::Table, "<table>"),
         (Self::Sequence, "<sequence>"),
+        (Self::List, "<list>"),
+        (Self::Pair, "<pair>"),
+        (Self::EmptyList, "<empty-list>"),
     ];
 
     /// Returns the Loko-visible class name for this built-in value class.
@@ -194,6 +207,9 @@ impl BuiltinValueClass {
             Self::StretchyVector => "<stretchy-vector>",
             Self::Table => "<table>",
             Self::Sequence => "<sequence>",
+            Self::List => "<list>",
+            Self::Pair => "<pair>",
+            Self::EmptyList => "<empty-list>",
         }
     }
 
@@ -226,6 +242,9 @@ impl BuiltinValueClass {
             b"<stretchy-vector>" => Some(Self::StretchyVector),
             b"<table>" => Some(Self::Table),
             b"<sequence>" => Some(Self::Sequence),
+            b"<list>" => Some(Self::List),
+            b"<pair>" => Some(Self::Pair),
+            b"<empty-list>" => Some(Self::EmptyList),
             _ => None,
         }
     }
@@ -259,6 +278,9 @@ impl BuiltinValueClass {
             Self::StretchyVector => 22,
             Self::Table => 23,
             Self::Sequence => 24,
+            Self::List => 25,
+            Self::Pair => 26,
+            Self::EmptyList => 27,
         }
     }
 
@@ -269,8 +291,8 @@ impl BuiltinValueClass {
     /// then `<real>` > `<rational>` > `<integer>` for exact numbers and
     /// `<real>` > `<float>` > `<double-float>` and `<single-float>` for
     /// floats. The type objects sit under `<type>`: `<class>`,
-    /// `<limited-integer>` and `<subclass-type>`, and `<stretchy-vector>` is a
-    /// `<vector>`. [`Self::ALL`] is in declaration order, not superclass
+    /// `<limited-integer>` and `<subclass-type>`, `<stretchy-vector>` is a
+    /// `<vector>`, and `<pair>` and `<empty-list>` are `<list>`s. [`Self::ALL`] is in declaration order, not superclass
     /// order.
     #[must_use]
     pub const fn builtin_superclass(self) -> Option<Self> {
@@ -281,7 +303,8 @@ impl BuiltinValueClass {
             Self::Integer => Some(Self::Rational),
             Self::DoubleFloat | Self::SingleFloat => Some(Self::Float),
             Self::StretchyVector => Some(Self::Vector),
-            Self::Vector | Self::String => Some(Self::Sequence),
+            Self::Vector | Self::String | Self::List => Some(Self::Sequence),
+            Self::Pair | Self::EmptyList => Some(Self::List),
             _ => None,
         }
     }
@@ -292,7 +315,13 @@ impl BuiltinValueClass {
     pub const fn is_abstract(self) -> bool {
         matches!(
             self,
-            Self::Number | Self::Real | Self::Rational | Self::Float | Self::Type | Self::Sequence
+            Self::Number
+                | Self::Real
+                | Self::Rational
+                | Self::Float
+                | Self::Type
+                | Self::Sequence
+                | Self::List
         )
     }
 
@@ -626,8 +655,19 @@ mod tests {
             assert!(!class.is_abstract() && !class.is_unboxed());
         }
         assert!(BuiltinValueClass::Sequence.is_abstract());
+        // The list classes come last, so adding them moved no other
+        // built-in class's id.
         assert_eq!(
             BuiltinValueClass::Sequence.index(),
+            BuiltinValueClass::ALL.len() - 4
+        );
+        for class in [BuiltinValueClass::Pair, BuiltinValueClass::EmptyList] {
+            assert_eq!(chain(class)[1..], ["<list>", "<sequence>"]);
+            assert!(!class.is_abstract() && !class.is_unboxed());
+        }
+        assert!(BuiltinValueClass::List.is_abstract());
+        assert_eq!(
+            BuiltinValueClass::EmptyList.index(),
             BuiltinValueClass::ALL.len() - 1
         );
     }

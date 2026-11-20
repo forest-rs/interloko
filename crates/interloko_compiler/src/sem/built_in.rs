@@ -18,7 +18,7 @@
 //!   them, sends to it.
 //!
 //! A few built-ins take arguments no callable signature can describe:
-//! `apply` and `values` take any number, `make` the keywords of its class,
+//! `apply`, `values` and `list` take any number, `make` the keywords of its class,
 //! `as` and `limited` compute a type from one, and `signal` answers what
 //! its handler supplies, as `error` does, which also takes any number of
 //! format arguments. Those are forms of the language, and naming one
@@ -39,6 +39,7 @@ use super::{
 pub const FORMS: &[&str] = &[
     "apply",
     "values",
+    "list",
     "make",
     "as",
     "limited",

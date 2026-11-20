@@ -621,6 +621,20 @@ The current slices include:
     supplies the element. Entries keep the order they were added in, and
     a version counter counts changes to the set of keys, which iteration
     checks;
+- Dylan's lists: `<list>` is a sealed abstract `<sequence>` whose two
+  subclasses are `<pair>` and `<empty-list>`. `pair(head, tail)` makes a
+  pair of any two objects, `#()` is the empty list, the one instance of
+  `<empty-list>` (so `l == #()` tests for the end), and `list(a, b)` and
+  the literal `#(a, b)` make a list of pairs ending in it, evaluating
+  their elements in order (a literal's pairs are made afresh each time,
+  as a vector literal's elements are). `head(l)` and `tail(l)` take a list
+  apart, and as in Dylan both answer `#()` for `#()`; `head-setter(v, p)`
+  and `tail-setter(v, p)` store into a `<pair>`. An `<object>` argument is
+  checked to be a `<list>` (or a `<pair>`) as a declaration would check
+  it. As in Dylan, `x.f` is `f(x)` and `x.f := v` is `f-setter(v, x)` for
+  any `f` no class has a slot of, so `p.head` and `p.tail := l` work. A
+  pair is a runtime object of two slots, so `head` and `tail` are a host
+  call each;
 - Dylan's collection generics `size(collection)`, `element(collection,
   key, #key default)`, `element-setter(value, collection, key)` and
   `add!(collection, element)` (whose kernel methods take a stretchy vector

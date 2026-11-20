@@ -423,6 +423,11 @@ fn intrinsic_for_name(name: &str) -> Option<Intrinsic> {
         "method-generic-function" => Intrinsic::MethodGenericFunction,
         "method-specializers" => Intrinsic::MethodSpecializers,
         "key-exists?" => Intrinsic::TableKeyExists,
+        "pair" => Intrinsic::ListPair,
+        "head" => Intrinsic::ListHead,
+        "tail" => Intrinsic::ListTail,
+        "head-setter" => Intrinsic::ListHeadSetter,
+        "tail-setter" => Intrinsic::ListTailSetter,
         "remove-key!" => Intrinsic::TableRemoveKey,
         // The kernel's iteration protocol methods call these; a `%` cannot
         // appear in a source name, so no program can call or shadow them.
@@ -506,8 +511,10 @@ const fn intrinsic_arity(intrinsic: Intrinsic) -> usize {
         Intrinsic::TablePositionValue | Intrinsic::TablePositionKey => 3,
         Intrinsic::VectorConstant => 1,
         Intrinsic::TableNextPosition => 3,
-        Intrinsic::Unsupplied | Intrinsic::KeywordAbsent => 0,
+        Intrinsic::Unsupplied | Intrinsic::KeywordAbsent | Intrinsic::EmptyList => 0,
         Intrinsic::FloatToString | Intrinsic::IntegerToString => 1,
+        Intrinsic::ListHead | Intrinsic::ListTail => 1,
+        Intrinsic::ListPair | Intrinsic::ListHeadSetter | Intrinsic::ListTailSetter => 2,
     }
 }
 
@@ -582,6 +589,8 @@ fn intrinsic_expected_name(intrinsic: Intrinsic, index: usize) -> &'static str {
         (Intrinsic::CharCompare(_) | Intrinsic::CharToInteger, _) => "<character>",
         (Intrinsic::PositionCompare(_) | Intrinsic::PositionToInteger, _) => "<string-position>",
         (Intrinsic::IntegerDivision(_), _) => "<integer>",
+        (Intrinsic::ListHead | Intrinsic::ListTail, 0) => "<list>",
+        (Intrinsic::ListHeadSetter | Intrinsic::ListTailSetter, 1) => "<pair>",
         _ => "<object>",
     }
 }
@@ -1201,7 +1210,10 @@ impl Module {
                     | BuiltinValueClass::StringBuilder
                     | BuiltinValueClass::StretchyVector
                     | BuiltinValueClass::Table
-                    | BuiltinValueClass::Sequence,
+                    | BuiltinValueClass::Sequence
+                    | BuiltinValueClass::List
+                    | BuiltinValueClass::Pair
+                    | BuiltinValueClass::EmptyList,
             } => Some(ValueKind::Object(class)),
             ClassOrigin::ObjectRoot
             | ClassOrigin::Native
@@ -4272,6 +4284,19 @@ pub enum Intrinsic {
     PositionCompare(CompareOp),
     /// `byte-offset(p)`: a `<string-position>`'s byte offset, inline.
     PositionToInteger,
+    /// `pair(head, tail)`: a new `<pair>` of two objects.
+    ListPair,
+    /// `head(list)`: a pair's head, or `#()` for the empty list.
+    ListHead,
+    /// `tail(list)`: a pair's tail, or `#()` for the empty list.
+    ListTail,
+    /// `head-setter(value, pair)`: stores a pair's head and returns it.
+    ListHeadSetter,
+    /// `tail-setter(value, pair)`: stores a pair's tail and returns it.
+    ListTailSetter,
+    /// `#()`, the empty list. It has no name of its own: the literal
+    /// writes it.
+    EmptyList,
     /// One result of an integer division, which the runtime host computes.
     /// Only the division builtins (`floor/` and the others) call it, with a
     /// divisor that is neither zero nor `-1`.
@@ -5466,7 +5491,10 @@ const fn builtin_value_kind(kind: BuiltinValueClass, class: ClassId) -> Option<V
         | BuiltinValueClass::StringBuilder
         | BuiltinValueClass::StretchyVector
         | BuiltinValueClass::Table
-        | BuiltinValueClass::Sequence => Some(ValueKind::Object(class)),
+        | BuiltinValueClass::Sequence
+        | BuiltinValueClass::List
+        | BuiltinValueClass::Pair
+        | BuiltinValueClass::EmptyList => Some(ValueKind::Object(class)),
     }
 }
 
@@ -6426,17 +6454,22 @@ impl Lowering {
                 // has. Saying so for `<vector>`, which `<stretchy-vector>`
                 // extends, lets typing resolve a send on a `<vector>` to the
                 // kernel method both share; every other concrete built-in
-                // is a leaf, closed already.
-                sealing: if !kind.is_abstract()
+                // is a leaf, closed already. `<list>` is Dylan's sealed
+                // abstract class, exactly a `<pair>` or the empty list, so
+                // typing reads it as those two pieces.
+                sealing: if (!kind.is_abstract()
                     && BuiltinValueClass::ALL
                         .iter()
-                        .any(|(other, _)| other.builtin_superclass() == Some(*kind))
+                        .any(|(other, _)| other.builtin_superclass() == Some(*kind)))
+                    || *kind == BuiltinValueClass::List
                 {
                     Sealing::Sealed
                 } else {
                     Sealing::Open
                 },
-                is_abstract: false,
+                // A `<list>` is always one of its two pieces: typing's cone
+                // over it has no instances of its own.
+                is_abstract: *kind == BuiltinValueClass::List,
                 finalized: false,
                 direct_slots: Vec::new(),
                 effective_slots: Vec::new(),
@@ -9807,6 +9840,39 @@ impl Lowering {
                 span,
                 ..
             } => self.lower_make_object(ctx, class, fields, *span),
+            // As in Dylan, `x.f` is `f(x)` and `x.f := v` is
+            // `f-setter(v, x)`: a name no class's slot has is called.
+            ast::Expr::SlotRead {
+                id,
+                receiver,
+                slot,
+                span,
+            } if self.calls_for_slot_syntax(ctx, slot) => {
+                let call = ast::Expr::Call {
+                    id: *id,
+                    callee: slot.clone(),
+                    args: vec![receiver.as_ref().clone()],
+                    keywords: Vec::new(),
+                    span: *span,
+                };
+                self.lower_expr_expected_results(ctx, &call, expected_results)
+            }
+            ast::Expr::SlotAssign {
+                id,
+                receiver,
+                slot,
+                value,
+                span,
+            } if self.calls_for_slot_syntax(ctx, slot) => {
+                let call = ast::Expr::Call {
+                    id: *id,
+                    callee: slot_setter_name(slot),
+                    args: vec![value.as_ref().clone(), receiver.as_ref().clone()],
+                    keywords: Vec::new(),
+                    span: *span,
+                };
+                self.lower_expr_expected_results(ctx, &call, expected_results)
+            }
             ast::Expr::SlotRead {
                 receiver,
                 slot,
@@ -10322,6 +10388,13 @@ impl Lowering {
         }
         match callee {
             "apply" => return self.lower_apply(ctx, args, expected_results, span),
+            "list" | ast::KERNEL_LIST => {
+                let elements = args
+                    .iter()
+                    .map(|arg| self.lower_expr(ctx, arg))
+                    .collect::<Vec<_>>();
+                return self.lower_list(ctx, elements, span);
+            }
             "values" | KERNEL_VALUES => {
                 let mut values = args
                     .iter()
@@ -11493,6 +11566,23 @@ impl Lowering {
             return Some(Expr::Error { span });
         }
         let mut args = args.to_vec();
+        // A list operation checks an `<object>` argument where it takes a
+        // `<list>` or a `<pair>`, as a declaration would.
+        if matches!(
+            intrinsic,
+            Intrinsic::ListHead
+                | Intrinsic::ListTail
+                | Intrinsic::ListHeadSetter
+                | Intrinsic::ListTailSetter
+        ) {
+            let (index, class) = match intrinsic {
+                Intrinsic::ListHead | Intrinsic::ListTail => (0, BuiltinValueClass::List),
+                _ => (1, BuiltinValueClass::Pair),
+            };
+            let class = self.builtin_value_class(class)?;
+            let arg = core::mem::replace(&mut args[index], Expr::Error { span });
+            args[index] = self.narrow(arg, ValueKind::Object(class), None);
+        }
         // `concatenate` takes characters too, each as a one-character
         // string.
         if intrinsic == Intrinsic::Concatenate {
@@ -12989,6 +13079,16 @@ impl Lowering {
                 .builtin_value_class(BuiltinValueClass::Table)
                 .map_or(ValueKind::Error, ValueKind::Object),
             Intrinsic::TableKeyExists | Intrinsic::TableRemoveKey => ValueKind::Bool,
+            Intrinsic::ListPair => self
+                .builtin_value_class(BuiltinValueClass::Pair)
+                .map_or(ValueKind::Error, ValueKind::Object),
+            Intrinsic::EmptyList => self
+                .builtin_value_class(BuiltinValueClass::EmptyList)
+                .map_or(ValueKind::Error, ValueKind::Object),
+            Intrinsic::ListHead
+            | Intrinsic::ListTail
+            | Intrinsic::ListHeadSetter
+            | Intrinsic::ListTailSetter => ValueKind::Any,
             Intrinsic::StretchyAdd => self
                 .builtin_value_class(BuiltinValueClass::StretchyVector)
                 .map_or(ValueKind::Error, ValueKind::Object),
@@ -13208,6 +13308,17 @@ impl Lowering {
             }
             (Intrinsic::IntegerDivision(_), 0 | 1) => {
                 matches!(actual, ValueKind::I64 | ValueKind::I32 | ValueKind::U32)
+            }
+            (Intrinsic::ListHead | Intrinsic::ListTail, 0) => {
+                self.is_builtin_subclass_instance(actual, BuiltinValueClass::List)
+            }
+            (Intrinsic::ListHeadSetter | Intrinsic::ListTailSetter, 1) => {
+                self.is_builtin_subclass_instance(actual, BuiltinValueClass::Pair)
+            }
+            // Any value boxes to the `<object>` a pair holds.
+            (Intrinsic::ListPair, 0 | 1)
+            | (Intrinsic::ListHeadSetter | Intrinsic::ListTailSetter, 0) => {
+                !matches!(actual, ValueKind::Error)
             }
             _ => false,
         }
@@ -14332,6 +14443,28 @@ impl Lowering {
             span,
         };
         with_lets(lets, call, span)
+    }
+
+    /// A new list of `elements`, evaluated in order: `#()` for none, and
+    /// otherwise a `<pair>` of the first and a list of the rest. A list
+    /// literal `#(a, b)` and `list(a, b)` both make one.
+    fn lower_list(&self, ctx: &mut FunctionContext, elements: Vec<Expr>, span: Span) -> Expr {
+        let mut list = Expr::IntrinsicCall {
+            intrinsic: Intrinsic::EmptyList,
+            args: Vec::new(),
+            result_kind: self.intrinsic_result_kind(Intrinsic::EmptyList),
+            span,
+        };
+        for element in elements.into_iter().rev() {
+            list = self.checked_intrinsic_call(
+                ctx,
+                Intrinsic::ListPair,
+                "list",
+                vec![element, list],
+                span,
+            );
+        }
+        list
     }
 
     /// Lowers Dylan's `error`: `error(condition)` signals the condition,
@@ -16510,6 +16643,19 @@ impl Lowering {
     ) -> Expr {
         let receiver = self.lower_expr(ctx, receiver);
         self.lower_accessor_call(ctx, receiver, slot_name, span)
+    }
+
+    /// Whether `x.name` calls `name` rather than reading a slot: no class
+    /// has a slot `name`, and `name` is something a call can reach, a
+    /// binding, a definition or a built-in such as `head`.
+    fn calls_for_slot_syntax(&self, ctx: &FunctionContext, name: &str) -> bool {
+        !self.has_accessor(name)
+            && (ctx.binds(name)
+                || self.resolve_function(name).is_some()
+                || self.resolve_generic(name).is_some()
+                || self.resolve_constant(name).is_some()
+                || self.resolve_host_function(name).is_some()
+                || built_in::names_built_in(name))
     }
 
     /// Lowers `name := value` for a `let` local `name`.

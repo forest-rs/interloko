@@ -4,25 +4,25 @@
 // own collection class joins them with methods, and `c[k]` and
 // `c[k] := v` then work on it as on the kernel's collections.
 
-define class <pair> (<object>)
+define class <couple> (<object>)
   slot left :: <integer>, init-value: 0;
   slot right :: <integer>, init-value: 0;
 end;
 
-define method size (p :: <pair>) => <integer>
+define method size (p :: <couple>) => <integer>
   2
 end;
 
-define method element (p :: <pair>, k :: <integer>) => <object>
+define method element (p :: <couple>, k :: <integer>) => <object>
   if (k = 0) p.left else p.right end
 end;
 
-define method element-setter (v :: <integer>, p :: <pair>, k :: <integer>) => <object>
+define method element-setter (v :: <integer>, p :: <couple>, k :: <integer>) => <object>
   if (k = 0) p.left := v else p.right := v end
 end;
 
 define function main() => <integer>
-  let p = make(<pair>);
+  let p = make(<couple>);
   p[0] := 40;
   p[1] := 2;
   size(p) * 1000 + size(#[1]) * 1000 + as(<integer>, p[0]) + as(<integer>, element(p, 1))

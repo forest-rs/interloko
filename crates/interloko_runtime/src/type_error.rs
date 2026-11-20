@@ -201,6 +201,49 @@ impl InterlokoHost {
         }
     }
 
+    /// Writes a list as its literal, `#(1, 2)`, or `#(1 . 2)` when it ends
+    /// in something other than the empty list. A long or circular list is
+    /// cut off after a few elements.
+    fn describe_list(&self, mut obj: Obj) -> String {
+        const SHOWN: usize = 16;
+        let mut elements = Vec::new();
+        let mut rest = None;
+        loop {
+            if elements.len() == SHOWN {
+                elements.push(String::from("…"));
+                break;
+            }
+            let Ok(RuntimeObjectStorage::Native { slots }) =
+                self.object(obj).map(|object| &object.storage)
+            else {
+                break;
+            };
+            let [head, tail] = slots.as_slice() else {
+                break;
+            };
+            elements.push(self.describe_value(ValueRef::from_value(head)));
+            match self.value_object(ValueRef::from_value(tail)) {
+                Some(next) if self.is_pair_object(next) => obj = next,
+                Some(next)
+                    if matches!(
+                        self.object(next).map(|object| &object.storage),
+                        Ok(RuntimeObjectStorage::Marker(crate::Marker::EmptyList))
+                    ) =>
+                {
+                    break;
+                }
+                _ => {
+                    rest = Some(self.describe_value(ValueRef::from_value(tail)));
+                    break;
+                }
+            }
+        }
+        match rest {
+            Some(rest) => format!("#({} . {rest})", elements.join(", ")),
+            None => format!("#({})", elements.join(", ")),
+        }
+    }
+
     fn describe_object(&self, obj: Obj) -> String {
         let Ok(object) = self.object(obj) else {
             return "{invalid}".into();
@@ -215,6 +258,9 @@ impl InterlokoHost {
             RuntimeObjectStorage::StringBuilder { .. } => "{<string-builder>}".into(),
             RuntimeObjectStorage::Symbol { name } => symbol_literal(name),
             RuntimeObjectStorage::Marker(marker) => marker.name().into(),
+            RuntimeObjectStorage::Native { .. } if self.is_pair_object(obj) => {
+                self.describe_list(obj)
+            }
             RuntimeObjectStorage::Vector { elements, .. } => {
                 let elements = elements
                     .iter()

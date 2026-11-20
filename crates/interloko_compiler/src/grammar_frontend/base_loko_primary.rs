@@ -250,6 +250,7 @@ fn starts_expression(text: &str) -> bool {
         "-" | "~"
             | "("
             | "#["
+            | "#("
             | "#t"
             | "#f"
             | "#"
@@ -303,6 +304,7 @@ fn is_expression_rule(rule: &str) -> bool {
             | "method-expression"
             | "parenthesized-expression"
             | "vector-expression"
+            | "list-expression"
             | "call-expression"
             | "name-expression"
             | "type-expression"
@@ -712,6 +714,7 @@ impl BaseLokoCstProjector<'_> {
                 .map_or_else(|| self.error_node(node.span), |expr| self.build_expr(expr)),
             "method-expression" => self.build_callable(node, CstKind::MethodExpr),
             "vector-expression" => self.build_vector(node),
+            "list-expression" => self.build_list(node),
             "call-expression" => self.build_call(node),
             "argument-list" => self.build_argument_list(node),
             "keyword-argument" => self.build_keyword_arg(node),
@@ -1342,6 +1345,23 @@ impl BaseLokoCstProjector<'_> {
             })
             .unwrap_or_default();
         self.node_with_nested(CstKind::VectorExpr, node, nested)
+    }
+
+    fn build_list(&self, node: &InterpretedRuleNode<'_>) -> CstNode {
+        let nested = node
+            .children
+            .iter()
+            .find(|child| child.is_rule("list-items"))
+            .map(|items| {
+                items
+                    .children
+                    .iter()
+                    .filter(|child| child.is_rule("expression"))
+                    .map(|expr| self.build_expr(expr))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.node_with_nested(CstKind::ListExpr, node, nested)
     }
 
     fn build_call(&self, node: &InterpretedRuleNode<'_>) -> CstNode {

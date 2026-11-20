@@ -1,0 +1,8 @@
+// expect: diagnostic contains expects <pair>
+// expect: diagnostics 1
+
+// The empty list has no head to store into.
+
+define function main() => <object>
+  head-setter(1, #())
+end;

@@ -1,0 +1,11 @@
+// expect: runtime code type-error.cast
+// expect: diagnostics 0
+
+// `head` takes a `<list>`: an `<object>` argument is checked, as a
+// declaration checks it.
+
+define function first-of(x) => <object> head(x) end;
+
+define function main() => <object>
+  first-of(42)
+end;

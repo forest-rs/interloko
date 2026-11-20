@@ -1556,6 +1556,36 @@ fn runtime_call_sigs(builder: &mut ProgramBuilder) -> Vec<(lower::RuntimeOp, Hos
             runtime::vector_constant_signature(),
         ),
         (
+            RuntimeOp::ListPair,
+            runtime::LIST_PAIR,
+            runtime::pair_signature(),
+        ),
+        (
+            RuntimeOp::ListHead,
+            runtime::LIST_HEAD,
+            runtime::list_part_signature(),
+        ),
+        (
+            RuntimeOp::ListTail,
+            runtime::LIST_TAIL,
+            runtime::list_part_signature(),
+        ),
+        (
+            RuntimeOp::ListHeadSetter,
+            runtime::LIST_HEAD_SETTER,
+            runtime::pair_part_setter_signature(),
+        ),
+        (
+            RuntimeOp::ListTailSetter,
+            runtime::LIST_TAIL_SETTER,
+            runtime::pair_part_setter_signature(),
+        ),
+        (
+            RuntimeOp::EmptyList,
+            runtime::EMPTY_LIST,
+            runtime::empty_list_signature(),
+        ),
+        (
             RuntimeOp::TableRemoveKey,
             runtime::TABLE_REMOVE_KEY,
             runtime::table_key_signature(),
