@@ -1831,6 +1831,13 @@ pub enum Instr {
         lhs: Reg,
         /// Right operand register, a boxed `<object>`.
         rhs: Reg,
+        /// Whether the boxed values' handles alone decide it: one operand is an instance of a
+        /// class whose instances are all native objects (of the program's or the kernel's
+        /// condition classes),
+        /// which nothing but the same object denotes, and a box of a runtime object is the
+        /// same handle every time. Otherwise equal handles are identical, and unequal ones may
+        /// still be, such as two metaobjects of one class.
+        by_handle: bool,
         /// Source span.
         span: Span,
     },
@@ -8826,18 +8833,21 @@ impl<'module> BodyLowering<'module> {
                         dst: result.reg,
                         lhs: lhs.reg,
                         rhs: rhs.reg,
+                        by_handle: false,
                         span: *span,
                     });
                     return Ok(result);
                 }
-                let lhs = self.box_any(lhs, *span)?;
                 let rhs = self.lower_expr(rhs)?;
+                let by_handle = self.by_handle(lhs.kind) || self.by_handle(rhs.kind);
+                let lhs = self.box_any(lhs, *span)?;
                 let rhs = self.box_any(rhs, *span)?;
                 let result = self.alloc(ValueKind::Bool);
                 self.instructions.push(Instr::Identical {
                     dst: result.reg,
                     lhs: lhs.reg,
                     rhs: rhs.reg,
+                    by_handle,
                     span: *span,
                 });
                 Ok(result)
@@ -13291,6 +13301,26 @@ impl<'module> BodyLowering<'module> {
         )
     }
 
+    /// Whether every instance of `class` and its subclasses is a native object: of a class
+    /// the program or the kernel's conditions define, never a built-in value, a host-backed
+    /// object or a bare `<object>`. Nothing but the same object denotes such an instance.
+    fn native_instances(&self, class: sem::ClassId) -> bool {
+        class != sem::OBJECT_CLASS_ID
+            && self.module.classes.iter().all(|candidate| {
+                !self.module.is_same_or_subclass(candidate.id, class)
+                    || matches!(
+                        candidate.origin,
+                        sem::ClassOrigin::Native | sem::ClassOrigin::Condition { .. }
+                    )
+            })
+    }
+
+    /// Whether `==` with an operand of `kind` compares boxed handles alone; see
+    /// [`Instr::Identical`].
+    fn by_handle(&self, kind: ValueKind) -> bool {
+        matches!(kind, ValueKind::Object(Some(class)) if self.native_instances(class))
+    }
+
     fn alloc_label(&mut self) -> LabelId {
         let label = LabelId(self.next_label);
         self.next_label = self.next_label.saturating_add(1);
@@ -15353,9 +15383,15 @@ impl Module {
                 dst,
                 lhs,
                 rhs,
+                by_handle,
                 span,
             } => {
-                write!(f, "  %{dst} = identical %{lhs}, %{rhs}")?;
+                let op = if *by_handle {
+                    "identical.handle"
+                } else {
+                    "identical"
+                };
+                write!(f, "  %{dst} = {op} %{lhs}, %{rhs}")?;
                 fmt_span(f, *span)
             }
             Instr::ConstantRead {

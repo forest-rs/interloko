@@ -23,7 +23,7 @@ license = "Apache-2.0 OR MIT"
 version = "0.1.0"
 
 [workspace.dependencies]
-execution_tape = { git = "https://github.com/forest-rs/execution", rev = "a5d4542ac522c5d6f08b6c60a07c2f2fb373ce0a" }
+execution_tape = { git = "https://github.com/forest-rs/execution", rev = "d1f71f114567c6b2508e57ecb543482a7b903fe5" }
 
 [workspace.lints.rust]
 missing_docs = "warn"

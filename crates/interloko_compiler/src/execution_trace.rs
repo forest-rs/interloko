@@ -23,8 +23,8 @@ use core::fmt::{self, Write as _};
 use execution_tape::opcode::Opcode;
 use execution_tape::program::Pc;
 use execution_tape::recording::{
-    CallStack, HostOutcome, InstructionCapture, InstructionOutcome, InstructionStatus, Outcome,
-    RecordLimits, RecordedValue, Recorder, Recording,
+    CallStack, HostOutcome, InstructionCapture, InstructionOutcome, InstructionStatus,
+    ObjectAnswer, Outcome, RecordLimits, RecordedValue, Recorder, Recording,
 };
 use execution_tape::trace::{TraceLocation, TraceMask, TraceSink};
 use execution_tape::value::{FuncId, FuncRef, UnitId};
@@ -554,6 +554,44 @@ impl<'a> ExecutionTraceView<'a> {
             self.write_stack(out, call.location, &call.stack)?;
             writeln!(out)?;
         }
+        // Instructions that asked the runtime about an object without a host call: slot
+        // reads and stores, class keys and the like.
+        let queries = recording.object_queries();
+        if !queries.is_empty() {
+            writeln!(out, "  object queries: {}", queries.len())?;
+        }
+        for (index, query) in queries.iter().enumerate() {
+            write!(out, "    {index:04} ")?;
+            let value = |index: usize| recording.object_values().get(index);
+            match query.answer {
+                ObjectAnswer::Field { field, value: read } => {
+                    write!(out, "obj.field obj#{} field {field}", query.object.handle.0)?;
+                    match read.and_then(value) {
+                        Some(read) => write!(out, " read {}", inline_value(read))?,
+                        None => write!(out, " missing")?,
+                    }
+                }
+                ObjectAnswer::FieldSet {
+                    field,
+                    value: stored,
+                    accepted,
+                } => {
+                    write!(
+                        out,
+                        "obj.set_field obj#{} field {field}",
+                        query.object.handle.0
+                    )?;
+                    if let Some(stored) = value(stored) {
+                        write!(out, " stored {}", inline_value(stored))?;
+                    }
+                    if !accepted {
+                        write!(out, " refused")?;
+                    }
+                }
+                other => write!(out, "obj#{} {other:?}", query.object.handle.0)?,
+            }
+            writeln!(out, " at {}", self.location(query.location))?;
+        }
         if let Some(status) = recording.instruction_status() {
             write!(out, "  instructions: {}", recording.stats().instructions)?;
             match status {
@@ -716,6 +754,22 @@ fn source_position(source: &str, offset: usize) -> Option<SourcePosition> {
         line: prefix.matches('\n').count() + 1,
         column: prefix[line_start..].chars().count() + 1,
     })
+}
+
+/// An inline value an object query read or stored, as a trace shows it.
+fn inline_value(value: &execution_tape::value::Value) -> String {
+    use execution_tape::value::Value;
+    match value {
+        Value::Bool(value) => alloc::format!("{value}"),
+        Value::I64(value) => alloc::format!("{value}"),
+        Value::U64(value) => alloc::format!("{value}u"),
+        Value::F64(value) => alloc::format!("{value:?}"),
+        Value::I32(value) => alloc::format!("{value}i32"),
+        Value::U32(value) => alloc::format!("{value}u32"),
+        Value::F32(value) => alloc::format!("{value:?}f32"),
+        Value::Obj(object) => alloc::format!("obj#{}", object.handle.0),
+        other => alloc::format!("{other:?}"),
+    }
 }
 
 #[cfg(test)]

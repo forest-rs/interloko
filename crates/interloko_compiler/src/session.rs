@@ -7555,6 +7555,17 @@ impl Host for SharedFunctionCallHost<'_> {
     ) -> R {
         self.0.borrow().object_bytes(object, read)
     }
+    fn object_field(&self, object: execution_tape::value::Obj, field: u32) -> Option<Value> {
+        self.0.borrow().object_field(object, field)
+    }
+    fn set_object_field(
+        &mut self,
+        object: execution_tape::value::Obj,
+        field: u32,
+        value: Value,
+    ) -> bool {
+        self.0.borrow_mut().set_object_field(object, field, value)
+    }
 }
 
 struct FunctionCallHost<'a> {
@@ -7649,6 +7660,17 @@ impl Host for FunctionCallHost<'_> {
         read: impl FnOnce(Option<&[u8]>) -> R,
     ) -> R {
         self.runtime.object_bytes(object, read)
+    }
+    fn object_field(&self, object: execution_tape::value::Obj, field: u32) -> Option<Value> {
+        self.runtime.object_field(object, field)
+    }
+    fn set_object_field(
+        &mut self,
+        object: execution_tape::value::Obj,
+        field: u32,
+        value: Value,
+    ) -> bool {
+        self.runtime.set_object_field(object, field, &value)
     }
     fn call(
         &mut self,
@@ -17515,17 +17537,30 @@ mod tests {
         );
         // main and the method: the runtime selects the method directly.
         assert!(view.activation_count() >= 2);
-        let slot_read = view
+        let make = view
             .host_calls()
-            .find(|call| call.symbol == Some("interloko.slot_get"))
-            .expect("the method reads a slot through the host");
+            .find(|call| call.symbol == Some("interloko.make_object"))
+            .expect("main makes the circle through the host");
+        assert_eq!(make.location.function.name(), Some("main"));
+        assert!(make.stack.depth() >= Some(1));
+        // The method reads its slot on the tape, an object query rather than a host call.
+        assert!(
+            view.host_calls()
+                .all(|call| call.symbol != Some("interloko.slot_get"))
+        );
+        let slot_read = trace
+            .recording()
+            .object_queries()
+            .iter()
+            .find(|query| matches!(query.answer, recording::ObjectAnswer::Field { .. }))
+            .expect("the method reads a slot field");
+        let location = view.location(slot_read.location);
         assert!(matches!(
-            slot_read.location.function.kind(),
+            location.function.kind(),
             Some(lower::FunctionKind::Method(_))
         ));
-        let source = slot_read.location.source.expect("slot read has a span");
+        let source = location.source.expect("slot read has a span");
         assert_eq!(&AREA[source.offset..source.offset + 1], "c");
-        assert!(slot_read.stack.depth() >= Some(2));
         let outcome = view.outcome().expect("outcome should be captured");
         assert!(matches!(
             outcome.result,
@@ -17535,8 +17570,9 @@ mod tests {
         let dump = artifacts.dump_execution_trace();
         assert!(dump.starts_with("execution trace: boundaries\n  capture: complete\n"));
         assert!(dump.contains("invocation: main [function:f0] args=()"));
-        assert!(dump.contains("host-call interloko.slot_get"));
-        assert!(dump.contains(" from main@"));
+        assert!(dump.contains("host-call interloko.make_object"));
+        assert!(dump.contains("object queries: 2"));
+        assert!(dump.contains("obj.field obj#"));
         assert!(dump.contains("outcome: returned (100) at main@"));
         assert!(!dump.contains("instructions:"));
 
@@ -17547,6 +17583,56 @@ mod tests {
                 .dump_execution_trace()
                 .contains("traced execution was not requested")
         );
+    }
+
+    #[test]
+    fn slots_identity_constants_and_literals_need_no_host_call_once_read() {
+        let source = "\
+define class <cell> (<object>)
+  slot n :: <integer>, required-init-keyword: n:;
+  slot next, init-value: #f;
+end;
+define constant $nil :: <cell> = make(<cell>, n: 0);
+define function label() => <string> \"cell\" end;
+define function main() => <integer>
+  let c = make(<cell>, n: 1);
+  let total = 0;
+  for (i from 0 below 10)
+    c.n := c.n + $nil.n + 1;
+    c.next := $nil;
+    if (c.next == $nil) total := total + 1 end;
+    if (label() == label()) total := total + 1 end
+  end;
+  total + c.n
+end;";
+        let artifacts = CompilerSession::compile_source(
+            "cells.loko",
+            source,
+            RuntimeMode::RunMainTraced {
+                detail: ExecutionTraceDetail::Boundaries,
+            },
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let dump = artifacts.dump_execution_trace();
+        assert!(dump.contains("outcome: returned (31)"), "{dump}");
+        // Slots are read and stored on the tape, `==` with a `<cell>` compares handles, and
+        // the constant's value and the literal's string are each asked for once, then kept
+        // in a global.
+        for symbol in ["slot_get", "slot_set", "identical"] {
+            assert!(
+                !dump.contains(&format!("host-call interloko.{symbol} ")),
+                "{symbol}: {dump}"
+            );
+        }
+        assert_eq!(
+            dump.matches("host-call interloko.constant.read ").count(),
+            1
+        );
+        assert_eq!(
+            dump.matches("host-call interloko.literal.string ").count(),
+            1
+        );
+        assert!(dump.contains("obj.set_field obj#"));
     }
 
     #[test]
