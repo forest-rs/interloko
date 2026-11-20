@@ -7838,7 +7838,13 @@ impl<'module> BodyLowering<'module> {
                 span,
                 ..
             } => {
-                let _ = self.lower_expr(class)?;
+                // A class literal names the class it makes, and reading it
+                // does nothing else, so it is not read: its metaobject
+                // would be a host call and an allocation per `make`. Any
+                // other class expression runs for what it does.
+                if !matches!(**class, sem::Expr::ClassObject { .. }) {
+                    let _ = self.lower_expr(class)?;
+                }
                 let class_info = self
                     .module
                     .classes
@@ -15317,7 +15323,9 @@ mod tests {
         assert_eq!(module.functions.len(), 5);
         assert_eq!(module.main, Some(FunctionId(0)));
         let dump = module.dump();
-        assert!(dump.contains("runtime.class-object"));
+        // A class literal's `make` names its class without reading the
+        // class's metaobject.
+        assert!(!dump.contains("runtime.class-object"));
         assert!(dump.contains("make <circle>(%r"));
         assert!(dump.contains("slot.read %r1, <circle>.radius: i64"));
         assert!(dump.contains("area#dispatch(%r1 x: object) -> i64"));
