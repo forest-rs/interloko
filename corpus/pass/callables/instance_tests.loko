@@ -5,7 +5,7 @@
 // may call the value it found.
 
 define function call-with-100(f :: <function>) => <integer>
-  let result :: <integer> = apply(f, 100);
+  let result :: <integer> = f(100);
   result
 end;
 

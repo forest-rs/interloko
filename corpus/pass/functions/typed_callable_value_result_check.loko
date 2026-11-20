@@ -32,7 +32,7 @@ define function square-for(c :: <circle>) => <square>
 end;
 
 define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>
-  apply(f, g)
+  f(g)
 end;
 
 define function main()

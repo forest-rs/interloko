@@ -1,0 +1,55 @@
+// expect: run 306420403421210
+// expect: diagnostics 0
+// expect: dump sem contains callable-call result=integer spread
+// expect: dump lowered contains u64.and
+
+// Dylan's `apply(f, a, …, sequence)` calls `f` with `a, …` and then each
+// element of `sequence`: a vector, a string, a stretchy vector, or a
+// program's own `<sequence>`. Its target may be a function, a generic, an
+// operator's function, or any callable value, one taking `#rest`
+// included; each element is checked by the value's entry, as an untyped
+// call's argument is.
+
+define function add(a, b) a + b end;
+
+define function add3(a :: <integer>, b :: <integer>, c :: <integer>) => <integer>
+  a + b + c
+end;
+
+define function count(#rest xs) => <integer>
+  size(xs)
+end;
+
+define generic twice(x);
+
+define method twice(x :: <integer>) 2 * x end;
+
+define class <two> (<sequence>) end;
+
+define method size(s :: <two>) => <integer> 2 end;
+
+define method element(s :: <two>, i :: <integer>, #key default) => <object>
+  i + 10
+end;
+
+define function digits(#rest xs) => <integer>
+  let t = 0;
+  for (x :: <integer> in xs) t := t * 100 + x end;
+  t
+end;
+
+define function main() => <integer>
+  let f :: <function> = method (a, b) a * b end;
+  let g :: <function> = method (#rest xs) size(xs) end;
+  let v = make(<stretchy-vector>);
+  add!(v, 5);
+  add!(v, 6);
+  digits(apply(add, #[1, 2]),          // 3
+         apply(add3, 1, #[2, 3]),      // 6
+         apply(f, #[6, 7]),            // 42
+         apply(g, 1, 2, #[3, 4]),      // 4
+         apply(count, "abc"),          // 3
+         apply(twice, #[21]),          // 42
+         apply(\+, v),                 // 11
+         apply(f, make(<two>)))        // 110
+end;

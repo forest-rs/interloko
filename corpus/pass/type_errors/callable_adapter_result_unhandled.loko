@@ -13,7 +13,7 @@ define function twice(g :: callable(<integer>) => <integer>) => <integer>
 end;
 
 define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>
-  apply(f, g)
+  f(g)
 end;
 
 define function main() => <integer>

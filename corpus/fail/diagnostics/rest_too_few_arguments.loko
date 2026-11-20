@@ -1,0 +1,15 @@
+// expect: diagnostics 2
+// expect: diagnostic code sem.function-too-few-arguments
+// expect: diagnostic contains function `pair` expects at least 2 arguments but got 1
+
+// A call passes at least the arguments before a `#rest` parameter, through
+// a binding of the function or a value of known signature as directly.
+
+define function pair(a, b, #rest more) => <integer>
+  size(more)
+end;
+
+define function main() => <integer>
+  let m = method (x, #rest more) x end;
+  pair(1) + m()
+end;

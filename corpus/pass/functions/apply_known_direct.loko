@@ -1,7 +1,7 @@
 // expect: run 42
 // expect: diagnostics 0
 // expect: dump sem contains known-callable function f0
-// expect: dump sem contains callable-call result=integer
+// expect: dump sem contains callable-call result=integer spread
 // expect: dump lowered contains callable.new
 // expect: dump lowered contains call.indirect
 // expect: dump tape contains const.func
@@ -14,5 +14,5 @@ end;
 
 define function main()
   let f = inc;
-  apply(f, 41)
+  apply(f, #[41])
 end;

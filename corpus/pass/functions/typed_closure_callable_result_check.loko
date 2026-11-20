@@ -19,7 +19,7 @@ define function square-of(x :: <integer>) => <square>
 end;
 
 define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>
-  apply(f, g)
+  f(g)
 end;
 
 define function main()

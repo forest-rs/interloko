@@ -1,0 +1,12 @@
+// expect: run 30
+// expect: diagnostics 0
+
+// `apply` evaluates its function before its arguments, so an argument that
+// assigns the local holding it does not change which function is called.
+
+define function main() => <integer>
+  let f :: <function> = method (a, b) a + b end;
+  let g :: <function> = method (a, b) a * b end;
+  let r :: <integer> = apply(f, begin f := g; 10 end, #[20]);
+  r
+end;

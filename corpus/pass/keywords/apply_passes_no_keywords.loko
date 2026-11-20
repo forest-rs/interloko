@@ -1,0 +1,14 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports <argument-count-error>
+
+// `apply` passes no keywords: each element of its sequence is a positional
+// argument, so one after the required ones is one too many rather than a
+// keyword, and the call signals `<argument-count-error>`.
+
+define function scale(x :: <integer>, #key by :: <integer> = 2) => <integer>
+  x * by
+end;
+
+define function main() => <integer>
+  apply(scale, 3, #[5])
+end;

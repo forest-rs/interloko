@@ -33,5 +33,5 @@ end;
 
 define function main() => <integer>
   // 3 + 6 + 2 + 3 + 4 = 18
-  eval(0, 2) + eval(1, 3) + apply-twice(inc, 0) + thrice(inc, 0) + apply(inc, 3)
+  eval(0, 2) + eval(1, 3) + apply-twice(inc, 0) + thrice(inc, 0) + apply(inc, #[3])
 end;

@@ -18,7 +18,7 @@ define function narrow(x :: <i32>) => <integer>
 end;
 
 define function apply-untyped(f :: <callable>, g :: <callable>) => <integer>
-  apply(f, g)
+  f(g)
 end;
 
 define function main() => <integer>

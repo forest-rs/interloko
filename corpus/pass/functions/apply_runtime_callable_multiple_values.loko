@@ -1,7 +1,7 @@
 // expect: run 42
 // expect: diagnostics 0
 // expect: dump sem contains f:callable
-// expect: dump sem contains callable-call result=(integer, integer)
+// expect: dump sem contains callable-call result=(integer, integer) spread
 // expect: dump lowered contains call.indirect
 // expect: dump tape contains call.indirect
 // expect: dump tape contains rets=[result0
@@ -15,7 +15,7 @@ define function split(use_large :: <boolean>) => (<integer>, <integer>)
 end;
 
 define function callit(f :: <callable>) => (<integer>, <integer>)
-  apply(f, #t)
+  apply(f, #[#t])
 end;
 
 define function main()

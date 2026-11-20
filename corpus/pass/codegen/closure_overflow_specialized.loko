@@ -14,5 +14,5 @@ define function main() => <integer>
   let bump = method (x :: <integer>) => <integer>
     if (x < 100) if (x > 0) x + step else 0 end else 0 end
   end;
-  apply(bump, 5)
+  bump(5)
 end;

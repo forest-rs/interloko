@@ -13,5 +13,5 @@ define class <circle> (<object>)
 end;
 
 define function main()
-  apply(radius, make(<circle>, radius: 3))
+  apply(radius, #[make(<circle>, radius: 3)])
 end;

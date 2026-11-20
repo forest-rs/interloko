@@ -18,7 +18,7 @@ define function radius-of(c :: <circle>) => <integer>
 end;
 
 define function call(f :: <callable>, x :: <object>) => <integer>
-  apply(f, x)
+  f(x)
 end;
 
 define function main() => <integer>

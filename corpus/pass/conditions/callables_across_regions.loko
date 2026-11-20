@@ -26,7 +26,7 @@ define function boxed-across-handle() => <integer>
   let o :: <object> = method (d :: <integer>) => <integer> d * 10 end;
   let r = handle signal(make(<oops>)) with restart c :: <oops> 40 end;
   let f :: <function> = as(<function>, o);
-  let ten :: <integer> = apply(f, 1);
+  let ten :: <integer> = f(1);
   ten + r
 end;
 

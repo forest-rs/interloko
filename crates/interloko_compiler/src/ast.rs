@@ -47,6 +47,9 @@ pub struct Function {
     pub params: Vec<FunctionParam>,
     /// `#key` parameters, after the required ones, in source order.
     pub keywords: Vec<KeywordParam>,
+    /// Dylan's `#rest` parameter, after the required ones: bound to a
+    /// `<vector>` of the arguments after them. It declares no type.
+    pub rest: Option<FunctionParam>,
     /// Optional declared return value types.
     pub return_type: Option<ResultAnnotation>,
     /// Function body.
@@ -761,6 +764,9 @@ pub enum Expr {
         id: AstNodeId,
         /// Function parameters.
         params: Vec<FunctionParam>,
+        /// Dylan's `#rest` parameter, after the others: bound to a
+        /// `<vector>` of the arguments after them.
+        rest: Option<Box<FunctionParam>>,
         /// Optional declared return value types.
         return_type: Option<ResultAnnotation>,
         /// Function body.
@@ -1800,6 +1806,7 @@ impl<'tree> Lowering<'tree> {
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_generic_params(child_node);
                     keywords = self.lower_keyword_params(child_node);
+                    self.refuse_rest_param(child_node);
                 }
                 _ => {}
             }
@@ -1821,6 +1828,9 @@ impl<'tree> Lowering<'tree> {
 
     fn lower_method(&mut self, node: &CstNode) -> Method {
         let mut return_type = None;
+        if let Some(params) = node.child_nodes(CstKind::ParameterList).next() {
+            self.refuse_rest_param(params);
+        }
         let params = node
             .child_nodes(CstKind::ParameterList)
             .next()
@@ -1883,6 +1893,7 @@ impl<'tree> Lowering<'tree> {
         let mut saw_function_keyword = false;
         let mut params = Vec::new();
         let mut keywords = Vec::new();
+        let mut rest = None;
         let mut return_type = None;
         let mut saw_result_arrow = false;
         let mut body = None;
@@ -1913,6 +1924,7 @@ impl<'tree> Lowering<'tree> {
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_function_params(child_node);
                     keywords = self.lower_keyword_params(child_node);
+                    rest = self.lower_rest_param(child_node);
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::Body => {
                     body = Some(self.lower_block(child_node));
@@ -1938,6 +1950,7 @@ impl<'tree> Lowering<'tree> {
             name,
             params,
             keywords,
+            rest,
             return_type,
             body,
             strict,
@@ -2012,6 +2025,44 @@ impl<'tree> Lowering<'tree> {
             });
         }
         params
+    }
+
+    /// Lowers the `#rest` parameter of the parameter list `node`, if it
+    /// has one. It takes no type, which is reported, and no `#key`
+    /// parameters with it yet.
+    fn lower_rest_param(&mut self, node: &CstNode) -> Option<FunctionParam> {
+        let rest = node.child_nodes(CstKind::RestParameter).next()?;
+        let name = rest.child_nodes(CstKind::ParameterName).next()?;
+        let text = self.tree.source[name.span.start..name.span.end].to_string();
+        if self.has_token(rest, TokenKind::DoubleColon) {
+            self.diagnostics.push(Diagnostic::error(
+                rest.span,
+                DiagnosticCode::AstRestParameterType,
+            ));
+        }
+        if let Some(keyword) = node.child_nodes(CstKind::KeywordParameter).next() {
+            self.diagnostics.push(Diagnostic::error(
+                keyword.span,
+                DiagnosticCode::AstRestWithKeywords,
+            ));
+        }
+        Some(FunctionParam {
+            id: AstNodeId::child(node.id, 4, &text),
+            name: text,
+            type_annotation: None,
+            span: name.span,
+        })
+    }
+
+    /// Reports the `#rest` parameter of a generic's or method's parameter
+    /// list `node`, which they cannot take yet.
+    fn refuse_rest_param(&mut self, node: &CstNode) {
+        if let Some(rest) = node.child_nodes(CstKind::RestParameter).next() {
+            self.diagnostics.push(Diagnostic::error(
+                rest.span,
+                DiagnosticCode::AstGenericRestParameter,
+            ));
+        }
     }
 
     /// Lowers the `#key` parameters of the parameter list `node`.
@@ -2351,6 +2402,7 @@ impl<'tree> Lowering<'tree> {
 
     fn lower_method_expr(&mut self, node: &CstNode) -> Expr {
         let mut params = Vec::new();
+        let mut rest = None;
         let mut return_type = None;
         let mut saw_result_arrow = false;
         let mut body = None;
@@ -2367,6 +2419,7 @@ impl<'tree> Lowering<'tree> {
                 }
                 CstElement::Node(child_node) if child_node.kind == CstKind::ParameterList => {
                     params = self.lower_function_params(child_node);
+                    rest = self.lower_rest_param(child_node);
                     // Anonymous functions take no keywords yet; a defined
                     // function can be passed as a value instead.
                     for keyword in child_node.child_nodes(CstKind::KeywordParameter) {
@@ -2396,6 +2449,7 @@ impl<'tree> Lowering<'tree> {
         Expr::Function {
             id: self.ast_id(node),
             params,
+            rest: rest.map(Box::new),
             return_type,
             body: Box::new(body),
             span: node.span,
@@ -4207,6 +4261,7 @@ impl FrontendFormLowering {
                 name: function.name.clone(),
                 params: Vec::new(),
                 keywords: Vec::new(),
+                rest: None,
                 return_type: None,
                 body: self.lower_function_body(form, region_slug, form_index),
                 strict: false,

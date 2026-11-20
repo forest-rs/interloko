@@ -1,0 +1,34 @@
+// expect: run 1023
+// expect: diagnostics 0
+
+// An untyped value entering typed code gets an adapter of the signature
+// it is called by there, and a boxed entry of that signature too, which
+// calls the value as its own shape says: with its arguments in a vector
+// when it takes `#rest`, keeping the results the signature declares.
+
+define function count(a, #rest xs) => <integer>
+  size(xs) + 10 * a
+end;
+
+define function two-values(x :: <integer>) => (<integer>, <integer>)
+  values(x + 1, x + 2)
+end;
+
+define function pair(f :: callable(<integer>, <integer>) => <integer>) => <integer>
+  apply(f, #[1, 2])
+end;
+
+define function one(f :: callable(<integer>) => <integer>) => <integer>
+  let g :: <function> = f;
+  let r :: <integer> = g(1000);
+  r + apply(f, #[10])
+end;
+
+define function via(t :: <callable>, g :: <callable>) => <integer>
+  t(g)
+end;
+
+define function main() => <integer>
+  via(pair, count)            // 11
+    + via(one, two-values)    // 1001 + 11
+end;

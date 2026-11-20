@@ -18,7 +18,7 @@ end;
 
 define function call-with(f :: <callable>, s :: <square>) => <integer>
   handle
-    apply(f, s)
+    f(s)
   with restart e :: <type-error>
     if (e.type-error-code = "type-error.entry") 4 else 0 end
   end

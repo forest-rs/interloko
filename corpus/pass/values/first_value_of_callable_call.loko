@@ -13,7 +13,7 @@ define function split(flag :: <boolean>) => (<integer>, <integer>)
 end;
 
 define function callit(f :: <callable>) => (<integer>, <integer>)
-  apply(f, #t)
+  f(#t)
 end;
 
 define function main()

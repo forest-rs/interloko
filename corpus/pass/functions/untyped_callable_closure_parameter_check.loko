@@ -14,7 +14,7 @@ define class <square> (<object>)
 end;
 
 define function call-with(f :: <callable>, s :: <square>) => <integer>
-  apply(f, s)
+  f(s)
 end;
 
 define function main()

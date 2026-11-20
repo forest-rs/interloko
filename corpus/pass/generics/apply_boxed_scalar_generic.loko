@@ -25,5 +25,5 @@ define method truthy(x :: <object>) => <integer>
 end;
 
 define function main() => <integer>
-  apply(weight, 0) + weight(make(<circle>)) + truthy(#t)
+  apply(weight, #[0]) + weight(make(<circle>)) + truthy(#t)
 end;

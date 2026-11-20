@@ -24,7 +24,10 @@ rule constant-definition = `define` definition-adjective* `constant` value-defin
 rule value-definition-name = name
 rule generic-adjective = `sealed` | `open` | `strict`
 rule definition-adjective = `strict`
-rule parameter-list = keyword-parameters | trailing-list-of<parameter, `,`> keyword-parameters?
+rule parameter-list = parameter-tail | trailing-list-of<parameter, `,`> parameter-tail?
+rule parameter-tail = rest-parameter (`,` keyword-parameters)? | keyword-parameters
+// Dylan's `#rest name`: the arguments after the required ones, as a vector.
+rule rest-parameter = `#rest` parameter-name type-annotation?
 rule keyword-parameters = `#key` trailing-list-of<keyword-parameter, `,`>
 rule keyword-parameter = keyword-parameter-name type-annotation? keyword-default?
 rule keyword-parameter-name = name

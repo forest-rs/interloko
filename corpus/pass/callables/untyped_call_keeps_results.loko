@@ -49,7 +49,7 @@ define function typed(f :: callable(<integer>) => <integer>) => <integer>
 end;
 
 define function through(f :: <callable>, g :: <callable>) => <integer>
-  apply(f, g)
+  f(g)
 end;
 
 define function main() => <integer>

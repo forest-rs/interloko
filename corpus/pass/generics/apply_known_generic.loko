@@ -1,7 +1,7 @@
 // expect: run 25
 // expect: diagnostics 0
 // expect: dump sem contains known-callable generic g0
-// expect: dump sem contains callable-call result=integer
+// expect: dump sem contains callable-call result=integer spread
 // expect: dump lowered contains callable.new
 // expect: dump lowered contains call.indirect
 // expect: dump lowered contains area#dispatch
@@ -21,5 +21,5 @@ end;
 
 define function main()
   let g = area;
-  apply(g, make(<circle>, radius: 5))
+  apply(g, #[make(<circle>, radius: 5)])
 end;

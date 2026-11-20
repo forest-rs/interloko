@@ -375,7 +375,7 @@ define function default-called(d :: <integer>) => <integer>
 end;
 
 define function untyped-tree(f :: <callable>, d :: <integer>) => <integer>
-  if (d = 0) apply(f, d) else untyped-tree(f, d - 1) + untyped-tree(f, d - 1) end
+  if (d = 0) f(d) else untyped-tree(f, d - 1) + untyped-tree(f, d - 1) end
 end;
 
 define function untyped(d :: <integer>) => <integer>
@@ -391,7 +391,7 @@ define function typed-callable(d :: <integer>) => <integer>
 end;
 
 define function closure-tree(f :: <callable>, d :: <integer>) => <integer>
-  if (d = 0) apply(f, d) else closure-tree(f, d - 1) + closure-tree(f, d - 1) end
+  if (d = 0) f(d) else closure-tree(f, d - 1) + closure-tree(f, d - 1) end
 end;
 
 define function closure-call(d :: <integer>) => <integer>
@@ -399,7 +399,7 @@ define function closure-call(d :: <integer>) => <integer>
 end;
 
 define function mismatched-tree(f :: <callable>, x :: <object>, d :: <integer>) => <integer>
-  if (d = 0) apply(f, x) else mismatched-tree(f, x, d - 1) + mismatched-tree(f, x, d - 1) end
+  if (d = 0) f(x) else mismatched-tree(f, x, d - 1) + mismatched-tree(f, x, d - 1) end
 end;
 
 define function mismatched(d :: <integer>) => <integer>

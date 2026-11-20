@@ -6,7 +6,7 @@
 // run as an unhandled `<argument-count-error>`, not a VM trap.
 
 define function call-with-one(f :: <callable>) => <integer>
-  let r :: <integer> = apply(f, 1);
+  let r :: <integer> = f(1);
   r
 end;
 

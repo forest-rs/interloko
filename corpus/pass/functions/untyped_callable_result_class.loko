@@ -21,12 +21,12 @@ define function label(x :: <integer>) => <string>
 end;
 
 define function radius-via(f :: <callable>, x :: <integer>) => <integer>
-  let c :: <circle> = apply(f, x);
+  let c :: <circle> = f(x);
   c.radius
 end;
 
 define function describe(f :: <callable>, x :: <integer>) => <string>
-  apply(f, x)
+  f(x)
 end;
 
 define function main()

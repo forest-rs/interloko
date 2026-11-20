@@ -244,6 +244,11 @@ pub const COLLECTION_SIZE: &str = "interloko.collection.size";
 /// the vector raises [`control::CHECK_FAILED_TAG`]. It takes
 /// [`vector_element_signature`].
 pub const VECTOR_ELEMENT: &str = "interloko.collection.vector_element";
+/// Host-call symbol for a new constant `<vector>` of a vector's elements
+/// from an index, `(vector, start) -> <vector>`: a `#rest` parameter's
+/// vector, of the arguments after the required ones. It takes
+/// [`vector_tail_signature`].
+pub const VECTOR_TAIL: &str = "interloko.collection.vector_tail";
 /// Host-call symbol for a vector's element at an index, or a default when
 /// the index is outside the vector. It takes
 /// [`vector_element_or_signature`].
@@ -3075,6 +3080,13 @@ impl InterlokoHost {
                     .ok_or_else(|| type_error::check_failed(&ctx))?;
                 Ok(0)
             }
+            VECTOR_TAIL => {
+                let [ValueRef::Obj(vector), ValueRef::I64(start)] = args else {
+                    return Err(HostError::Failed);
+                };
+                rets[0] = self.vector_tail(*vector, *start)?;
+                Ok(0)
+            }
             VECTOR_ELEMENT_OR => {
                 let [ValueRef::Obj(vector), ValueRef::I64(index), default] = args else {
                     return Err(HostError::Failed);
@@ -4227,6 +4239,15 @@ pub fn vector_element_signature() -> HostSig {
     HostSig {
         args: vec![object_type(), ValueType::I64],
         rets: vec![any_type()],
+    }
+}
+
+/// Host signature for [`VECTOR_TAIL`]: `(vector, start) -> <vector>`.
+#[must_use]
+pub fn vector_tail_signature() -> HostSig {
+    HostSig {
+        args: vec![object_type(), ValueType::I64],
+        rets: vec![object_type()],
     }
 }
 

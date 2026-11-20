@@ -291,6 +291,37 @@ pub enum ValueKind {
     Array(ArrayKind),
 }
 
+/// What a boxed call through a value of known signature relies on, which
+/// the tape knows and checks the call against: whether its boxed entry
+/// takes `#rest` arguments in a vector ([`REST_SHAPE`]), and how many
+/// results it returns.
+#[derive(Copy, Clone, Debug)]
+struct KnownCall {
+    rest: bool,
+    /// The arguments its boxed entry takes, before any `#rest` ones.
+    required: usize,
+    returned: usize,
+}
+
+/// How many arguments a call passes: known to lowering, or counted at run
+/// time in an `<integer>` register, as `apply`'s are.
+enum ArgumentCount {
+    Known(usize),
+    Register(Value),
+}
+
+impl From<usize> for ArgumentCount {
+    fn from(count: usize) -> Self {
+        Self::Known(count)
+    }
+}
+
+impl From<Value> for ArgumentCount {
+    fn from(count: Value) -> Self {
+        Self::Register(count)
+    }
+}
+
 /// What a boxed call knows of whether its callee takes keywords; see
 /// [`BodyLowering::call_boxed`].
 #[derive(Copy, Clone, Debug)]
@@ -370,6 +401,11 @@ pub struct CallableSignature {
     /// ([`RuntimeOp::KeywordAbsent`]) when the call does not pass it. The
     /// value's typed entry fills defaults and checks the types.
     pub keywords: Vec<CallableKeyword>,
+    /// Whether the last of `params` is a `#rest` parameter: the `<vector>`
+    /// of the arguments after the required ones, which the caller makes.
+    /// Such a value's boxed entry takes every argument in one vector, as
+    /// its shape records.
+    pub rest: bool,
 }
 
 /// One `#key` parameter of a [`CallableSignature`].
@@ -558,6 +594,9 @@ pub enum RuntimeOp {
     MethodGenericFunction,
     /// Returns a vector of class metaobjects for a method's specializers.
     MethodSpecializers,
+    /// A new constant `<vector>` of a vector's elements from an index on:
+    /// the vector a `#rest` parameter takes from a boxed call's arguments.
+    VectorTail,
     /// Makes a `<vector>` or `<stretchy-vector>` from its class, size and
     /// fill.
     MakeVector,
@@ -2415,6 +2454,9 @@ struct LowerIds {
     /// The function that opens callable values
     /// ([`FunctionKind::CallableParts`]).
     callable_parts: Option<FunctionId>,
+    /// Whether any callable value of the program takes `#rest`, so a call
+    /// through an untyped value tests its shape for it ([`REST_SHAPE`]).
+    rest_values: bool,
     restarts: Vec<RestartDescriptor>,
     call_sigs: Vec<CallableSignature>,
     /// Runtime method selection of each generic, in generic id order, which
@@ -2451,6 +2493,9 @@ struct KnownCallableThunk {
     /// The target's `#key` parameters, its last ones, which `call_params`
     /// takes boxed.
     keywords: Vec<KnownKeyword>,
+    /// Whether the target's last parameter is `#rest`, so its boxed entry
+    /// takes every argument in one vector ([`REST_SHAPE`]).
+    rest: bool,
     span: Span,
 }
 
@@ -2504,7 +2549,8 @@ impl<'module> Lowering<'module> {
                 &function.result_kinds,
                 &function.result_callable_sigs,
             )?;
-            let signature = with_keywords(signature, &keyword_names(&function.keywords));
+            let mut signature = with_keywords(signature, &keyword_names(&function.keywords));
+            signature.rest = function.rest;
             let sig = intern_callable_signature(&mut ids.call_sigs, signature);
             ids.function_sigs.push(sig);
             next = next.saturating_add(1);
@@ -2559,6 +2605,10 @@ impl<'module> Lowering<'module> {
                 &closure.result_kinds,
                 &closure.result_callable_sigs,
             )?;
+            let signature = CallableSignature {
+                rest: closure.rest,
+                ..signature
+            };
             let sig = intern_callable_signature(&mut ids.call_sigs, signature);
             ids.closure_sigs.push(sig);
             next = next.saturating_add(1);
@@ -2690,6 +2740,15 @@ impl<'module> Lowering<'module> {
         // shape the tape cannot see leaves it out without renumbering.
         ids.callable_parts = Some(take());
         ids.restarts = callable_uses.restarts;
+        ids.rest_values = module
+            .functions
+            .iter()
+            .zip(&ids.function_closure_thunks)
+            .any(|(function, thunk)| function.rest && thunk.is_some())
+            || module
+                .closures
+                .iter()
+                .any(|closure| closure.rest && !closure.restart_guard);
 
         let mut this = Self {
             module,
@@ -3331,6 +3390,7 @@ impl<'module> Lowering<'module> {
             entry_sites: Some((function.definition, sites)),
             rets: self.value_kinds(&function.result_kinds)?,
             keywords,
+            rest: function.rest,
             span: function.span,
         })
     }
@@ -3396,6 +3456,7 @@ impl<'module> Lowering<'module> {
             entry_sites: None,
             rets: self.value_kinds(&generic.result_kinds)?,
             keywords,
+            rest: false,
             span: generic.span,
         })
     }
@@ -3822,11 +3883,20 @@ impl<'module> Lowering<'module> {
         // Keywords come in the tail, not as positional wires.
         call_params.truncate(call_params.len().saturating_sub(spec.keywords.len()));
         let env = body.push_param("$env", ValueKind::Aggregate);
-        let wires = call_params
-            .iter()
-            .enumerate()
-            .map(|(index, _)| body.push_param(&format!("arg{index}"), BOXED_WIRE))
-            .collect::<Vec<_>>();
+        // A target taking `#rest` gets every argument in one vector, and
+        // its rest parameter the vector of those after the required ones.
+        let (wires, rest) = if spec.rest {
+            let required = call_params.len().saturating_sub(1);
+            let (wires, rest) = body.push_rest_params(required, spec.rets.len(), spec.span)?;
+            (wires, Some(rest))
+        } else {
+            let wires = call_params
+                .iter()
+                .enumerate()
+                .map(|(index, _)| body.push_param(&format!("arg{index}"), BOXED_WIRE))
+                .collect::<Vec<_>>();
+            (wires, None)
+        };
         let tail = keyword_entry.then(|| body.push_keyword_tail());
         let generic = match spec.callable {
             sem::KnownCallable::GenericFunction(generic) => Some(
@@ -3857,6 +3927,9 @@ impl<'module> Lowering<'module> {
             };
             let range = spec.param_ranges.get(index).copied().flatten();
             args.push(body.unwire(wire, *kind, range, &site, spec.span)?);
+        }
+        if let (Some(rest), Some(kind)) = (rest, call_params.last()) {
+            args.push(body.coerce_value(rest, *kind, spec.span)?);
         }
         let results = spec
             .rets
@@ -4017,12 +4090,21 @@ impl<'module> Lowering<'module> {
             .ok_or_else(|| invalid_semantic("closure signature id is out of range"))?;
         let mut body = BodyLowering::new(self.module, &self.ids, &[]).typed(self.facts, owner);
         let env = body.push_param("$env", ValueKind::Aggregate);
-        let wires = sig
-            .params
-            .iter()
-            .enumerate()
-            .map(|(index, _)| body.push_param(&format!("arg{index}"), BOXED_WIRE))
-            .collect::<Vec<_>>();
+        // A closure taking `#rest` gets every argument in one vector, and
+        // its rest parameter the vector of those after the required ones.
+        let (wires, rest) = if sig.rest {
+            let required = sig.params.len().saturating_sub(1);
+            let (wires, rest) = body.push_rest_params(required, sig.rets.len(), closure.span)?;
+            (wires, Some(rest))
+        } else {
+            let wires = sig
+                .params
+                .iter()
+                .enumerate()
+                .map(|(index, _)| body.push_param(&format!("arg{index}"), BOXED_WIRE))
+                .collect::<Vec<_>>();
+            (wires, None)
+        };
         let mut args = vec![env.reg];
         for (index, (wire, kind)) in wires.into_iter().zip(&sig.params).enumerate() {
             let site = closure
@@ -4041,6 +4123,9 @@ impl<'module> Lowering<'module> {
             };
             let range = closure.param_ranges.get(index).copied().flatten();
             args.push(body.unwire(wire, *kind, range, &name, closure.span)?.reg);
+        }
+        if let (Some(rest), Some(kind)) = (rest, sig.params.last()) {
+            args.push(body.coerce_value(rest, *kind, closure.span)?.reg);
         }
         let results = sig
             .rets
@@ -4127,7 +4212,7 @@ impl<'module> Lowering<'module> {
             .iter()
             .map(|_| body.alloc(BOXED_WIRE))
             .collect::<Vec<_>>();
-        body.call_entry_counted((boxed, shape), &wired, wired.len(), &results, span)?;
+        body.call_boxed_entry((boxed, shape, None), &wired, &results, span)?;
         // A class result need only be an object here: typed callers cast
         // the class results they rely on themselves, at sites typing
         // classifies.
@@ -4248,7 +4333,7 @@ impl<'module> Lowering<'module> {
             Instr::Label { label: without },
         ]);
         body.parse_keywords(names, values, &[], span)?;
-        body.call_entry_counted((boxed, shape), &wired, wired.len(), &results, span)?;
+        body.call_boxed_entry((boxed, shape, None), &wired, &results, span)?;
         body.instructions.extend([
             Instr::Jump { label: join, span },
             Instr::Label { label: join },
@@ -4661,6 +4746,7 @@ fn callable_signature_from_sem(
         params,
         rets,
         keywords: Vec::new(),
+        rest: false,
     })
 }
 
@@ -4719,6 +4805,7 @@ fn intern_sem_callable_signature(
         .params
         .extend(signature.keywords.iter().map(|_| ValueKind::Any));
     lowered.keywords = lowered_keywords(&signature.keywords)?;
+    lowered.rest = signature.rest;
     Ok(intern_callable_signature(signatures, lowered))
 }
 
@@ -4763,6 +4850,7 @@ fn sem_callable_signature_id(
             .map(|(index, result)| kind(*result, signature.result_sig(index)))
             .collect::<Result<Vec<_>, _>>()?,
         keywords: lowered_keywords(&signature.keywords)?,
+        rest: signature.rest,
     };
     ids.call_sigs
         .iter()
@@ -4855,6 +4943,7 @@ fn generic_callable_signature(
             .map(value_kind)
             .collect::<Result<Vec<_>, _>>()?,
         keywords: Vec::new(),
+        rest: false,
     };
     Ok(with_keywords(signature, &keyword_names(&generic.keywords)))
 }
@@ -4952,6 +5041,99 @@ struct BodyLowering<'module> {
 }
 
 impl<'module> BodyLowering<'module> {
+    /// The kind of a `<vector>` object register.
+    fn vector_kind(&self) -> Result<ValueKind, LowerError> {
+        builtin_class(self.module, sem::BuiltinValueClass::Vector)
+            .map(|class| ValueKind::Object(Some(class)))
+            .ok_or_else(|| invalid_semantic("the <vector> class is missing"))
+    }
+
+    /// Pushes the parameters of the boxed entry of a value taking `#rest`
+    /// after `required` arguments ([`REST_SHAPE`]): how many arguments the
+    /// call passes, and a `<vector>` of them. Returns the required ones as
+    /// boxed wires, read from the vector, and a new constant `<vector>` of
+    /// the others, the rest parameter's. A call passing fewer than
+    /// `required` signals `<argument-count-error>`, and the entry returns
+    /// its `returned` results unless a handler supplies them.
+    fn push_rest_params(
+        &mut self,
+        required: usize,
+        returned: usize,
+        span: Span,
+    ) -> Result<(Vec<Value>, Value), LowerError> {
+        let count = self.push_param("$count", ValueKind::I64);
+        let arguments = self.push_param("$arguments", self.vector_kind()?);
+        let at_least = self.const_i64(required, span);
+        let enough = self.alloc(ValueKind::Bool);
+        // The count and vector registers are the entry's parameters.
+        let (short, ok) = (self.alloc_label(), self.alloc_label());
+        self.instructions.extend([
+            Instr::I64Compare {
+                dst: enough.reg,
+                op: sem::CompareOp::Ge,
+                lhs: count.reg,
+                rhs: at_least.reg,
+                span,
+            },
+            Instr::Branch {
+                cond: enough.reg,
+                then_label: ok,
+                else_label: short,
+                span,
+            },
+            Instr::Label { label: short },
+        ]);
+        let results = (0..returned)
+            .map(|_| self.alloc(BOXED_WIRE))
+            .collect::<Vec<_>>();
+        self.signal_argument_count_of(at_least, count, &results, span)?;
+        self.instructions.extend([
+            Instr::Return {
+                values: results.iter().map(|result| result.reg).collect(),
+                span,
+            },
+            Instr::Label { label: ok },
+        ]);
+        let wires = (0..required)
+            .map(|index| self.vector_element(arguments, index, span))
+            .collect::<Vec<_>>();
+        let rest = self.alloc(self.vector_kind()?);
+        self.instructions.push(Instr::RuntimeCall {
+            dst: rest.reg,
+            op: RuntimeOp::VectorTail,
+            args: vec![arguments.reg, at_least.reg],
+            kind: rest.kind,
+            span,
+        });
+        Ok((wires, rest))
+    }
+
+    /// An `<integer>` constant of `value`, a count or index.
+    fn const_i64(&mut self, value: usize, span: Span) -> Value {
+        let reg = self.alloc(ValueKind::I64);
+        self.instructions.push(Instr::ConstI64 {
+            dst: reg.reg,
+            value: i64::try_from(value).unwrap_or(i64::MAX),
+            span,
+        });
+        reg
+    }
+
+    /// The element at `index` of `vector`, boxed, which lowering knows is
+    /// inside it.
+    fn vector_element(&mut self, vector: Value, index: usize, span: Span) -> Value {
+        let at = self.const_i64(index, span);
+        let element = self.alloc(BOXED_WIRE);
+        self.instructions.push(Instr::RuntimeCall {
+            dst: element.reg,
+            op: RuntimeOp::VectorElement,
+            args: vec![vector.reg, at.reg],
+            kind: BOXED_WIRE,
+            span,
+        });
+        element
+    }
+
     /// Pushes a boxed entry's keyword tail ([`BOXED_WIRE`]): the names of
     /// the keywords the call passes, as tape strings, and their values,
     /// boxed, in the same order.
@@ -5060,7 +5242,7 @@ impl<'module> BodyLowering<'module> {
     fn call_boxed(
         &mut self,
         [boxed_entry, keyword_entry]: [Value; 2],
-        shape: Value,
+        (shape, rest): (Value, Option<KnownCall>),
         takes: TakesKeywords,
         wired: &[Value],
         keywords: &[String],
@@ -5081,7 +5263,7 @@ impl<'module> BodyLowering<'module> {
             }
             TakesKeywords::Known(false) => {
                 return self.call_without_tail(
-                    (boxed_entry, shape),
+                    (boxed_entry, shape, rest),
                     wired,
                     keywords,
                     keyword_values,
@@ -5142,7 +5324,7 @@ impl<'module> BodyLowering<'module> {
             Instr::Label { label: without },
         ]);
         self.call_without_tail(
-            (boxed_entry, shape),
+            (boxed_entry, shape, rest),
             wired,
             keywords,
             keyword_values,
@@ -5178,7 +5360,7 @@ impl<'module> BodyLowering<'module> {
     /// passes, if any.
     fn call_without_tail(
         &mut self,
-        (entry, shape): (Value, Value),
+        (entry, shape, rest): (Value, Value, Option<KnownCall>),
         wired: &[Value],
         keywords: &[String],
         keyword_values: &[Value],
@@ -5218,12 +5400,264 @@ impl<'module> BodyLowering<'module> {
                 Instr::Label { label: next },
             ]);
         }
-        self.call_entry_counted((entry, shape), wired, wired.len(), results, span)?;
+        self.call_boxed_entry((entry, shape, rest), wired, results, span)?;
         self.instructions.extend([
             Instr::Jump { label: done, span },
             Instr::Label { label: done },
         ]);
         Ok(())
+    }
+
+    /// Calls the boxed entry `entry` of a callable value of shape `shape`
+    /// with `wired`, its boxed arguments, into `results`, keeping them as
+    /// [`Self::call_entry_keeping`] does, once the shape says the value
+    /// takes as many arguments ([`Self::call_entry_counted`]). A value
+    /// taking `#rest` ([`REST_SHAPE`]) gets the arguments' count and a
+    /// `<vector>` of them instead, and counts them itself. `known` is what
+    /// lowering knows of the value's signature, which the tape knows too
+    /// and checks the call against; otherwise, when the program has a value
+    /// taking `#rest`, the shape is tested for it.
+    fn call_boxed_entry(
+        &mut self,
+        (entry, shape, known): (Value, Value, Option<KnownCall>),
+        wired: &[Value],
+        results: &[Value],
+        span: Span,
+    ) -> Result<(), LowerError> {
+        match known {
+            Some(known) if known.rest => {
+                let arguments = self.argument_vector(wired, span)?;
+                self.call_entry_returning(entry, &arguments, results, known.returned, span);
+                return Ok(());
+            }
+            Some(known) if known.required == wired.len() => {
+                self.call_entry_returning(entry, wired, results, known.returned, span);
+                return Ok(());
+            }
+            Some(_) => return self.signal_argument_count(shape, wired.len(), results, span),
+            None if !self.ids.rest_values => {
+                return self.call_entry_counted((entry, shape), wired, wired.len(), results, span);
+            }
+            None => {}
+        }
+        let (rest, each, join) = (self.alloc_label(), self.alloc_label(), self.alloc_label());
+        self.branch_on_rest_shape(shape, rest, each, span);
+        self.instructions.push(Instr::Label { label: rest });
+        let arguments = self.argument_vector(wired, span)?;
+        self.call_entry_keeping(entry, &arguments, results, Some(shape), span);
+        self.instructions.extend([
+            Instr::Jump { label: join, span },
+            Instr::Label { label: each },
+        ]);
+        // A count no value of this program takes one by one is one the
+        // tape would refuse where it knows the values a register may hold.
+        if self.boxed_argument_counts().contains(&wired.len()) {
+            self.call_entry_counted((entry, shape), wired, wired.len(), results, span)?;
+        } else {
+            self.signal_argument_count(shape, wired.len(), results, span)?;
+        }
+        self.instructions.extend([
+            Instr::Jump { label: join, span },
+            Instr::Label { label: join },
+        ]);
+        Ok(())
+    }
+
+    /// Signals the `<argument-count-error>` of a call passing `passed`
+    /// arguments, a count or an `<integer>` register, to the value of shape
+    /// `shape`, which takes another number; the resumption values, which
+    /// no handler supplies, would land in `results`.
+    fn signal_argument_count(
+        &mut self,
+        shape: Value,
+        passed: impl Into<ArgumentCount>,
+        results: &[Value],
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let takes = self.alloc(ValueKind::I64);
+        self.instructions.push(Instr::U64Field {
+            dst: takes.reg,
+            src: shape.reg,
+            shift: PARAMS_SHAPE_SHIFT,
+            mask: PARAMS_SHAPE_MAX,
+            span,
+        });
+        self.signal_argument_count_of(takes, passed, results, span)
+    }
+
+    /// [`Self::signal_argument_count`] for a value taking `takes`
+    /// arguments, an `<integer>` register.
+    fn signal_argument_count_of(
+        &mut self,
+        takes: Value,
+        passed: impl Into<ArgumentCount>,
+        results: &[Value],
+        span: Span,
+    ) -> Result<(), LowerError> {
+        let class = self
+            .module
+            .condition_class(sem::ConditionClass::ArgumentCountError)
+            .ok_or_else(|| invalid_semantic("the <argument-count-error> class is missing"))?;
+        let passed = match passed.into() {
+            ArgumentCount::Known(count) => self.const_i64(count, span),
+            ArgumentCount::Register(count) => count,
+        };
+        let condition = self.alloc(ValueKind::Object(Some(class)));
+        self.instructions.extend([
+            Instr::MakeObject {
+                dst: condition.reg,
+                class,
+                fields: vec![takes.reg, passed.reg],
+                span,
+            },
+            Instr::Signal {
+                dsts: results.iter().map(|result| result.reg).collect(),
+                condition: condition.reg,
+                span,
+            },
+        ]);
+        // A signal ends its block; what a handler supplies lands after it.
+        let resumed = self.alloc_label();
+        self.instructions.extend([
+            Instr::Jump {
+                label: resumed,
+                span,
+            },
+            Instr::Label { label: resumed },
+        ]);
+        Ok(())
+    }
+
+    /// What a call relies on of the callable value `callee`, when lowering
+    /// knows its boxed entry is its signature's: a value made here, which
+    /// the tape knows too and checks calls of against that entry. A value
+    /// from elsewhere may be an adapter sharing another's boxed entry
+    /// ([`BoxedEntry::Shared`]), whose shape alone says what it takes.
+    fn known_rest(&self, callee: Value) -> Option<KnownCall> {
+        if !self.made_here(callee.reg) {
+            return None;
+        }
+        match callee.kind {
+            ValueKind::Closure(Some(sig)) => {
+                self.ids
+                    .call_sigs
+                    .get(sig.0 as usize)
+                    .map(|signature| KnownCall {
+                        rest: signature.rest,
+                        required: signature.params.len()
+                            - signature.keywords.len()
+                            - usize::from(signature.rest),
+                        returned: signature.rets.len(),
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the callable value in `reg` was made in this body with a
+    /// boxed entry of its own signature, through any moves.
+    fn made_here(&self, reg: Reg) -> bool {
+        let mut reg = reg;
+        for instr in self.instructions.iter().rev() {
+            match instr {
+                Instr::Move { dst, src, .. } if *dst == reg => reg = *src,
+                Instr::CallableNew { dst, boxed, .. } if *dst == reg => {
+                    return matches!(boxed, BoxedEntry::Function(_));
+                }
+                Instr::Call { dsts, .. } | Instr::CallIndirect { dsts, .. }
+                    if dsts.contains(&reg) =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// The arguments a boxed entry taking `#rest` takes for `wired`, boxed
+    /// arguments: their count and a `<vector>` of them ([`REST_SHAPE`]).
+    fn argument_vector(&mut self, wired: &[Value], span: Span) -> Result<[Value; 2], LowerError> {
+        let count = self.const_i64(wired.len(), span);
+        let arguments = self.alloc(self.vector_kind()?);
+        let class = builtin_class(self.module, sem::BuiltinValueClass::Vector)
+            .ok_or_else(|| invalid_semantic("the <vector> class is missing"))?;
+        self.instructions.push(Instr::VectorLiteral {
+            dst: arguments.reg,
+            elements: wired.iter().map(|wire| wire.reg).collect(),
+            class,
+            span,
+        });
+        Ok([count, arguments])
+    }
+
+    /// Branches to `rest` when the callable value of shape `shape` takes
+    /// `#rest` ([`REST_SHAPE`]), and to `each` otherwise.
+    fn branch_on_rest_shape(&mut self, shape: Value, rest: LabelId, each: LabelId, span: Span) {
+        let (bit, flag, zero, none) = (
+            self.alloc(ValueKind::U64),
+            self.alloc(ValueKind::U64),
+            self.alloc(ValueKind::U64),
+            self.alloc(ValueKind::Bool),
+        );
+        self.instructions.extend([
+            Instr::ConstU64 {
+                dst: bit.reg,
+                value: REST_SHAPE,
+                span,
+            },
+            Instr::AndU64 {
+                dst: flag.reg,
+                lhs: shape.reg,
+                rhs: bit.reg,
+                span,
+            },
+            Instr::ConstU64 {
+                dst: zero.reg,
+                value: 0,
+                span,
+            },
+            Instr::EqU64 {
+                dst: none.reg,
+                lhs: flag.reg,
+                rhs: zero.reg,
+                span,
+            },
+            Instr::Branch {
+                cond: none.reg,
+                then_label: each,
+                else_label: rest,
+                span,
+            },
+        ]);
+    }
+
+    /// Calls the boxed entry `entry` of a value lowering knows returns
+    /// `returned` results, with `args`, keeping the first `results.len()`
+    /// of them in `results`.
+    fn call_entry_returning(
+        &mut self,
+        entry: Value,
+        args: &[Value],
+        results: &[Value],
+        returned: usize,
+        span: Span,
+    ) {
+        if returned == results.len() {
+            self.call_entry(entry, args, results, span);
+            return;
+        }
+        let all = (0..returned)
+            .map(|_| self.alloc(BOXED_WIRE))
+            .collect::<Vec<_>>();
+        self.call_entry(entry, args, &all, span);
+        for (result, value) in results.iter().zip(&all) {
+            self.instructions.push(Instr::Move {
+                dst: result.reg,
+                src: value.reg,
+                span,
+            });
+        }
     }
 
     /// Calls the boxed entry `entry` with `args`, into `results`.
@@ -7650,6 +8084,7 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::CallableCall {
                 callable,
                 args,
+                arguments,
                 arg_kinds,
                 keywords,
                 result_kinds,
@@ -7664,6 +8099,7 @@ impl<'module> BodyLowering<'module> {
                 let mut results = self.lower_callable_results(
                     callable,
                     args,
+                    *arguments,
                     arg_kinds,
                     keywords,
                     result_kinds,
@@ -8446,6 +8882,7 @@ impl<'module> BodyLowering<'module> {
             sem::Expr::CallableCall {
                 callable,
                 args,
+                arguments,
                 arg_kinds,
                 keywords,
                 result_kinds,
@@ -8454,6 +8891,7 @@ impl<'module> BodyLowering<'module> {
             } => self.lower_callable_results(
                 callable,
                 args,
+                *arguments,
                 arg_kinds,
                 keywords,
                 result_kinds,
@@ -9110,6 +9548,7 @@ impl<'module> BodyLowering<'module> {
             &self.ids.call_sigs,
             &signature.params,
             &signature.keywords,
+            signature.rest,
             &signature.rets,
         );
         let result = self.alloc(ValueKind::Closure(Some(sig)));
@@ -9198,8 +9637,8 @@ impl<'module> BodyLowering<'module> {
         };
         self.emit_callable_new(adapter, boxed, sig, &captures, span)
     }
-    /// Applies a callable sem knows to be `generic`, such as
-    /// `apply(area, x)`: a send, as a call through the generic's value would
+    /// Calls a callable sem knows to be `generic`, such as `(area)(x)` or
+    /// `g(x)` for a `g` bound to it: a send, as a call through the generic's value would
     /// make, but with the arguments as given, so a boxed `<object>` reaches
     /// dispatch (see [`Self::send`]) instead of a cast to the value's
     /// parameter kind. The callable is still evaluated, for its effects.
@@ -9268,15 +9707,27 @@ impl<'module> BodyLowering<'module> {
     /// called through its typed entry ([`Self::call_typed_entry`]), and an
     /// untyped one through whichever entry the call's shape picks
     /// ([`Self::call_untyped`]).
+    #[allow(clippy::too_many_arguments)]
     fn lower_callable_results(
         &mut self,
         callable: &sem::Expr,
         args: &[sem::Expr],
+        arguments: sem::CallArguments,
         arg_kinds: &[sem::ValueKind],
         keywords: &[String],
         result_kinds: &[sem::ValueKind],
         span: Span,
     ) -> Result<Vec<Value>, LowerError> {
+        // `apply` calls the value with the elements of one vector.
+        if arguments == sem::CallArguments::Spread {
+            let [vector] = args else {
+                return Err(invalid_semantic("apply's call takes one vector"));
+            };
+            let callee = self.lower_expr(callable)?;
+            let vector = self.lower_expr(vector)?;
+            let kinds = self.value_kinds(result_kinds)?;
+            return self.call_spread(callee, vector, &kinds, span);
+        }
         // A generic that takes keywords is called through its typed entry,
         // which fills the defaults of those passed as `$unsupplied`.
         if let sem::ValueKind::KnownCallable(sem::KnownCallable::GenericFunction(generic)) =
@@ -9319,15 +9770,217 @@ impl<'module> BodyLowering<'module> {
                             .all(|(declared, passed)| declared.name == *passed)
                 })
         };
+        // A value taking `#rest` is called typed only when sem made the
+        // vector of the arguments after the required ones.
+        let rest = |sig: CallableSigId| {
+            self.ids
+                .call_sigs
+                .get(sig.0 as usize)
+                .is_some_and(|signature| signature.rest)
+        };
         match callee.kind {
-            ValueKind::Closure(Some(sig)) if typed_keywords(sig) => {
+            ValueKind::Closure(Some(sig))
+                if typed_keywords(sig) && rest(sig) == (arguments == sem::CallArguments::Rest) =>
+            {
                 self.call_typed_entry(callee, values, sig, &kinds, span)
             }
+            _ if arguments == sem::CallArguments::Rest => Err(invalid_semantic(
+                "a call making a #rest vector targets no value taking #rest",
+            )),
             ValueKind::Closure(_) => self.call_untyped(callee, values, keywords, &kinds, span),
             _ => Err(invalid_semantic(
                 "callable call target is not a callable value",
             )),
         }
+    }
+
+    /// Calls `callee` with the elements of `vector`, a `<vector>`, as its
+    /// arguments, and returns its results at `kinds`: `apply`'s call, as
+    /// Dylan's spreads its last argument. It crosses under the boxed
+    /// callable ABI, since the elements are boxed `<object>`s: a value
+    /// taking `#rest` ([`REST_SHAPE`]) gets the vector itself, and any
+    /// other value as many arguments as it takes, read from the vector. The
+    /// count is tested against the value's when lowering knows its
+    /// signature, and otherwise against each count a callable value of
+    /// this program takes; a vector of another size signals
+    /// `<argument-count-error>`.
+    fn call_spread(
+        &mut self,
+        callee: Value,
+        vector: Value,
+        kinds: &[ValueKind],
+        span: Span,
+    ) -> Result<Vec<Value>, LowerError> {
+        let results = kinds
+            .iter()
+            .map(|kind| self.alloc(*kind))
+            .collect::<Vec<_>>();
+        let [_, Some(boxed_entry), Some(shape)] =
+            self.open_callable(callee.reg, [false, true, true], span)
+        else {
+            return Err(invalid_semantic("opening a callable dropped a part"));
+        };
+        let vector_kind = self.vector_kind()?;
+        let vector = self.coerce_value(vector, vector_kind, span)?;
+        let count = self.alloc(ValueKind::I64);
+        self.instructions.push(Instr::RuntimeCall {
+            dst: count.reg,
+            op: RuntimeOp::CollectionSize,
+            args: vec![vector.reg],
+            kind: ValueKind::I64,
+            span,
+        });
+        let boxed_results = kinds
+            .iter()
+            .map(|_| self.alloc(BOXED_WIRE))
+            .collect::<Vec<_>>();
+        let known = match callee.kind {
+            ValueKind::Closure(Some(sig)) if self.made_here(callee.reg) => {
+                self.ids.call_sigs.get(sig.0 as usize).cloned()
+            }
+            _ => None,
+        };
+        let join = self.alloc_label();
+        match known {
+            // The tape knows a value of known signature, and checks that a
+            // call expects exactly the results it returns.
+            Some(signature) if signature.rest => {
+                self.call_entry_returning(
+                    boxed_entry,
+                    &[count, vector],
+                    &boxed_results,
+                    signature.rets.len(),
+                    span,
+                );
+                self.instructions.push(Instr::Jump { label: join, span });
+            }
+            Some(signature) => {
+                let takes = signature.params.len() - signature.keywords.len();
+                self.spread_counts(
+                    (boxed_entry, shape),
+                    vector,
+                    count,
+                    &[takes],
+                    (&boxed_results, Some(signature.rets.len())),
+                    join,
+                    span,
+                )?;
+            }
+            None => {
+                if self.ids.rest_values {
+                    let (rest, each) = (self.alloc_label(), self.alloc_label());
+                    self.branch_on_rest_shape(shape, rest, each, span);
+                    self.instructions.push(Instr::Label { label: rest });
+                    self.call_entry_keeping(
+                        boxed_entry,
+                        &[count, vector],
+                        &boxed_results,
+                        Some(shape),
+                        span,
+                    );
+                    self.instructions.extend([
+                        Instr::Jump { label: join, span },
+                        Instr::Label { label: each },
+                    ]);
+                }
+                let counts = self.boxed_argument_counts();
+                self.spread_counts(
+                    (boxed_entry, shape),
+                    vector,
+                    count,
+                    &counts,
+                    (&boxed_results, None),
+                    join,
+                    span,
+                )?;
+            }
+        }
+        self.instructions.push(Instr::Label { label: join });
+        self.move_unboxed_results(&results, boxed_results, span)?;
+        Ok(results)
+    }
+
+    /// Whether the typed entry of some callable value of this program may
+    /// have the call shape `shape`.
+    fn shape_taken(&self, shape: u64) -> bool {
+        self.ids.call_sigs.iter().any(|signature| {
+            callable_shape(
+                &self.ids.call_sigs,
+                &signature.params,
+                &signature.keywords,
+                signature.rest,
+                &signature.rets,
+            ) == shape
+        })
+    }
+
+    /// The numbers of arguments the boxed entries of this program's
+    /// callable values take, in increasing order: every count `apply`
+    /// through an untyped value tests for. A value taking `#rest` takes
+    /// them in a vector instead.
+    fn boxed_argument_counts(&self) -> Vec<usize> {
+        let mut counts = self
+            .ids
+            .call_sigs
+            .iter()
+            .filter(|signature| !signature.rest)
+            .map(|signature| signature.params.len() - signature.keywords.len())
+            .collect::<Vec<_>>();
+        counts.sort_unstable();
+        counts.dedup();
+        counts
+    }
+
+    /// For each of `counts`, calls `boxed_entry` with that many elements
+    /// of `vector` when it has that many (`count`), into `results`, then
+    /// jumps to `join`; a vector of any other size signals
+    /// `<argument-count-error>`. `returned` is how many results the value
+    /// returns, when lowering knows; otherwise the shape says.
+    #[allow(clippy::too_many_arguments)]
+    fn spread_counts(
+        &mut self,
+        (boxed_entry, shape): (Value, Value),
+        vector: Value,
+        count: Value,
+        counts: &[usize],
+        (results, returned): (&[Value], Option<usize>),
+        join: LabelId,
+        span: Span,
+    ) -> Result<(), LowerError> {
+        for takes in counts {
+            let (expected, same) = (self.const_i64(*takes, span), self.alloc(ValueKind::Bool));
+            let (call, next) = (self.alloc_label(), self.alloc_label());
+            self.instructions.extend([
+                Instr::I64Compare {
+                    dst: same.reg,
+                    op: sem::CompareOp::Eq,
+                    lhs: count.reg,
+                    rhs: expected.reg,
+                    span,
+                },
+                Instr::Branch {
+                    cond: same.reg,
+                    then_label: call,
+                    else_label: next,
+                    span,
+                },
+                Instr::Label { label: call },
+            ]);
+            let wired = (0..*takes)
+                .map(|index| self.vector_element(vector, index, span))
+                .collect::<Vec<_>>();
+            match returned {
+                Some(returned) => {
+                    self.call_entry_returning(boxed_entry, &wired, results, returned, span);
+                }
+                None => self.call_entry_keeping(boxed_entry, &wired, results, Some(shape), span),
+            }
+            self.instructions.extend([
+                Instr::Jump { label: join, span },
+                Instr::Label { label: next },
+            ]);
+        }
+        self.signal_argument_count(shape, count, results, span)
     }
 
     /// Calls `callee`, a callable value of signature `sig`, through its
@@ -9474,7 +10127,7 @@ impl<'module> BodyLowering<'module> {
             .map(|kind| self.alloc(*kind))
             .collect::<Vec<_>>();
         let arg_kinds = args.iter().map(|arg| arg.kind).collect::<Vec<_>>();
-        let shape = callable_shape(&self.ids.call_sigs, &arg_kinds, &[], kinds);
+        let shape = callable_shape(&self.ids.call_sigs, &arg_kinds, &[], false, kinds);
         // A value whose signature lowering knows has a shape known here
         // too, and the tape checks a call of its typed entry against it.
         let known = match callee.kind {
@@ -9484,6 +10137,7 @@ impl<'module> BodyLowering<'module> {
                         &self.ids.call_sigs,
                         &signature.params,
                         &signature.keywords,
+                        signature.rest,
                         &signature.rets,
                     ) == shape
                 })
@@ -9511,6 +10165,10 @@ impl<'module> BodyLowering<'module> {
                 return Ok(results);
             }
             Some(false) => {}
+            // No value of this program has a typed entry of this call's
+            // shape, so the boxed entry takes every call; the tape refuses
+            // a call no value it may hold could take.
+            None if !self.shape_taken(shape) => {}
             None => {
                 let [Some(typed_entry), _, Some(actual)] =
                     self.open_callable(callee.reg, [true, false, true], span)
@@ -9553,7 +10211,8 @@ impl<'module> BodyLowering<'module> {
         }
         // A call passing no keywords takes the plain boxed callable ABI,
         // whatever the value takes, once its shape says it takes as many
-        // arguments as the call passes.
+        // arguments as the call passes, its arguments in a vector for a
+        // value taking `#rest`.
         let [_, Some(boxed_entry), Some(shape)] =
             self.open_callable(callee.reg, [false, true, true], span)
         else {
@@ -9569,8 +10228,8 @@ impl<'module> BodyLowering<'module> {
             .iter()
             .map(|_| self.alloc(BOXED_WIRE))
             .collect::<Vec<_>>();
-        let count = wired.len();
-        self.call_entry_counted((boxed_entry, shape), &wired, count, &boxed_results, span)?;
+        let rest = self.known_rest(callee);
+        self.call_boxed_entry((boxed_entry, shape, rest), &wired, &boxed_results, span)?;
         self.move_unboxed_results(&results, boxed_results, span)?;
         self.instructions.extend([
             Instr::Jump { label: join, span },
@@ -9623,9 +10282,10 @@ impl<'module> BodyLowering<'module> {
             .iter()
             .map(|_| self.alloc(BOXED_WIRE))
             .collect::<Vec<_>>();
+        let rest = self.known_rest(callee);
         self.call_boxed(
             [boxed_entry, keyword_entry],
-            shape,
+            (shape, rest),
             takes,
             &wired,
             keywords,
@@ -12940,6 +13600,7 @@ fn runtime_op_arg_is_any(op: RuntimeOp, index: usize) -> bool {
         RuntimeOp::CollectionSize
         | RuntimeOp::VectorElement
         | RuntimeOp::MakeTable
+        | RuntimeOp::VectorTail
         | RuntimeOp::TableVersion
         | RuntimeOp::TablePositions
         | RuntimeOp::TableNextPosition
@@ -13461,12 +14122,19 @@ fn callable_shape(
     signatures: &[CallableSignature],
     params: &[ValueKind],
     keywords: &[CallableKeyword],
+    rest: bool,
     rets: &[ValueKind],
 ) -> u64 {
     let mut text = String::new();
     for kind in params {
         shape_text(signatures, *kind, true, &mut text);
     }
+    let rest_bit = if rest {
+        text.push_str("#rest");
+        REST_SHAPE
+    } else {
+        0
+    };
     let keyword_bit = if keywords.is_empty() {
         0
     } else {
@@ -13491,14 +14159,29 @@ fn callable_shape(
     });
     let results =
         u64::try_from(rets.len()).map_or(RESULTS_SHAPE_MAX, |count| count.min(RESULTS_SHAPE_MAX));
-    let required = params.len().saturating_sub(keywords.len());
+    let required = params
+        .len()
+        .saturating_sub(keywords.len() + usize::from(rest));
     let required =
         u64::try_from(required).map_or(PARAMS_SHAPE_MAX, |count| count.min(PARAMS_SHAPE_MAX));
-    (hash & !(KEYWORD_SHAPE | RESULTS_SHAPE | PARAMS_SHAPE))
+    (hash & !(KEYWORD_SHAPE | RESULTS_SHAPE | PARAMS_SHAPE | REST_SHAPE))
         | keyword_bit
+        | rest_bit
         | (results << RESULTS_SHAPE_SHIFT)
         | (required << PARAMS_SHAPE_SHIFT)
 }
+
+/// The bit of a [`callable_shape`] set exactly when the value takes a
+/// `#rest` parameter. Such a value's boxed entry takes every argument in
+/// one `<vector>`, after their count as an `<integer>`, and makes the
+/// vector of those after its required ones itself; a call through an
+/// untyped value tests the bit when the program has such a value, and
+/// `apply` always does. The count's register type keeps a caller that
+/// does not test the bit from passing the value its arguments one by one:
+/// the tape refuses that call rather than misread an argument. Whether
+/// the program has such a value, like the counts `apply` tests, is a fact
+/// of the whole program that each compile lowers every body against.
+const REST_SHAPE: u64 = 1 << 46;
 
 /// The bit of a [`callable_shape`] set exactly when the value takes
 /// keywords. Such a value holds, in its typed entry's place, a keyword
@@ -13548,9 +14231,10 @@ const PARAMS_SHAPE_MAX: u64 = 0xFF;
 const PARAMS_SHAPE: u64 = PARAMS_SHAPE_MAX << PARAMS_SHAPE_SHIFT;
 
 /// The bits of a [`callable_shape`] that count what its boxed and keyword
-/// entries take and return, which a value sharing another's boxed entry
+/// entries take and return, and whether they take `#rest`, which a value
+/// sharing another's boxed entry
 /// ([`BoxedEntry::Shared`]) takes from that value's shape.
-pub(crate) const ENTRY_COUNTS_SHAPE: u64 = PARAMS_SHAPE | RESULTS_SHAPE;
+pub(crate) const ENTRY_COUNTS_SHAPE: u64 = PARAMS_SHAPE | RESULTS_SHAPE | REST_SHAPE;
 
 /// Writes `kind`'s part of a [`callable_shape`]: its register type, and a
 /// typed callable's signature when `full`.
@@ -13931,6 +14615,7 @@ fn runtime_op_name(op: RuntimeOp) -> &'static str {
         RuntimeOp::MethodSpecializers => "method-specializers",
         RuntimeOp::MakeVector => "make-vector",
         RuntimeOp::MakeTable => "make-table",
+        RuntimeOp::VectorTail => "vector-tail",
         RuntimeOp::CollectionSize => "size",
         RuntimeOp::VectorElement => "vector-element",
         RuntimeOp::VectorElementOr => "vector-element-or",
@@ -15156,13 +15841,13 @@ mod tests {
     }
 
     #[test]
-    fn lowers_known_callable_apply_to_existing_calls() {
+    fn lowers_known_callable_value_calls_to_existing_calls() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
              define generic area(x);\n\
              define method area(c :: <circle>)\n  c.radius * c.radius\nend;\n\
              define function inc(x)\n  x + 1\nend;\n\
-             define function main()\n  let f = inc;\n  let g = area;\n  apply(f, 2) + apply(g, make(<circle>, radius: 3))\nend;",
+             define function main()\n  let f = inc;\n  let g = area;\n  (f)(2) + (g)(make(<circle>, radius: 3))\nend;",
         );
 
         let dump = module.dump();
@@ -15180,13 +15865,14 @@ mod tests {
         let module = lower_source(
             "define function inc(x :: <integer>)\n  x + 1\nend;\n\
              define function dec(x :: <integer>)\n  x - 1\nend;\n\
-             define function main()\n  let f = inc;\n  let g = dec;\n  apply(f, 2) + apply(g, 2)\nend;",
+             define function main()\n  let f = inc;\n  let g = dec;\n  (f)(2) + (g)(2)\nend;",
         );
 
         assert!(module.call_sigs.contains(&CallableSignature {
             params: vec![ValueKind::I64],
             rets: vec![ValueKind::I64],
             keywords: Vec::new(),
+            rest: false,
         }));
         assert_eq!(
             module.call_sigs[0],
@@ -15194,6 +15880,7 @@ mod tests {
                 params: vec![ValueKind::I64],
                 rets: vec![ValueKind::I64],
                 keywords: Vec::new(),
+                rest: false,
             }
         );
         assert_eq!(
@@ -15215,7 +15902,7 @@ mod tests {
         // handed to `deliver` it is a callable value, entered through its
         // exit procedure.
         let module = lower_source(
-            "define function deliver(f :: <callable>, n :: <integer>) => <integer>\n  apply(f, n)\nend;\n\
+            "define function deliver(f :: <callable>, n :: <integer>) => <integer>\n  f(n)\nend;\n\
              define function pick(n :: <integer>) => <integer>\n  \
                block (return)\n    if (n > 3) return(n) + 1 else deliver(return, 7) end\n  end\nend;",
         );
@@ -15256,10 +15943,10 @@ mod tests {
     }
 
     #[test]
-    fn lowers_runtime_callable_parameter_apply_to_indirect_call() {
+    fn lowers_runtime_callable_parameter_call_to_indirect_call() {
         let module = lower_source(
             "define function inc(x :: <integer>)\n  x + 1\nend;\n\
-             define function callit(f :: <callable>) => <integer>\n  apply(f, 41)\nend;\n\
+             define function callit(f :: <callable>) => <integer>\n  f(41)\nend;\n\
              define function main()\n  callit(inc)\nend;",
         );
 
@@ -15267,6 +15954,7 @@ mod tests {
             params: vec![ValueKind::I64],
             rets: vec![ValueKind::I64],
             keywords: Vec::new(),
+            rest: false,
         }));
         assert_eq!(module.functions[1].params[0].kind, ValueKind::Closure(None));
         let dump = module.dump();
@@ -15294,10 +15982,46 @@ mod tests {
     }
 
     #[test]
-    fn lowers_slot_getter_apply_to_a_send() {
+    fn a_rest_value_takes_its_arguments_in_one_vector() {
+        let module = lower_source(
+            "define function count(a, #rest xs) => <integer>\n  size(xs)\nend;\n\
+             define function callit(f :: <callable>) => <integer>\n  \
+               let r :: <integer> = f(1, 2);\n  r\nend;\n\
+             define function main() => <integer>\n  callit(count) + count(1, 2, 3)\nend;",
+        );
+        let dump = module.dump();
+        // The function takes its rest parameter as a vector, which a direct
+        // call makes.
+        assert!(dump.contains("fn l0 count(%r1 a: any, %r2 xs: object(<vector>)) -> i64"));
+        assert!(dump.contains("literal.vector <vector>"));
+        // Its value's boxed entry takes the count and a vector of every
+        // argument, signals for too few, and splits off the required ones.
+        assert!(dump.contains(
+            "count#closure#boxed(%r1 $env: agg, %r2 $count: i64, %r3 $arguments: object(<vector>)) -> any"
+        ));
+        assert!(dump.contains("<argument-count-error>"));
+        assert!(dump.contains("runtime.vector-element(%r3,"));
+        assert!(dump.contains("runtime.vector-tail(%r3,"));
+        // An untyped call tests the shape for `#rest`, since the program has
+        // a value taking it.
+        assert!(dump.contains("u64.and"));
+        let shape = module
+            .functions
+            .iter()
+            .flat_map(|function| &function.instructions)
+            .find_map(|instr| match instr {
+                Instr::CallableNew { shape, .. } => Some(*shape),
+                _ => None,
+            })
+            .expect("a callable value");
+        assert_ne!(shape & REST_SHAPE, 0);
+    }
+
+    #[test]
+    fn lowers_slot_getter_value_call_to_a_send() {
         let module = lower_source(
             "define class <circle> (<object>)\n  slot radius :: <integer>;\nend;\n\
-             define function main()\n  let getter = radius;\n  apply(getter, make(<circle>, radius: 3))\nend;",
+             define function main()\n  let getter = radius;\n  (getter)(make(<circle>, radius: 3))\nend;",
         );
 
         // The getter is a generic: its value is the generic's, applying it

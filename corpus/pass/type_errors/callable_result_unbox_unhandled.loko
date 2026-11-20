@@ -12,7 +12,7 @@ define function name(n :: <integer>) => <object>
 end;
 
 define function call(f :: <callable>, n :: <integer>) => <double-float>
-  apply(f, n)
+  f(n)
 end;
 
 define function main() => <double-float>

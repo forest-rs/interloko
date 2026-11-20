@@ -45,6 +45,11 @@ pub struct Contract {
     pub params: Vec<ValueContract>,
     /// What each result may hold, in return order.
     pub results: Vec<ValueContract>,
+    /// Whether the last parameter is a `#rest` parameter: callers pass the
+    /// arguments after the required ones in a vector they make, so a
+    /// definition that takes one cannot stand in for one that does not,
+    /// nor the other way round.
+    pub rest: bool,
 }
 
 /// What callers assume about one parameter or result.
@@ -119,7 +124,10 @@ impl Contract {
         old: &Self,
         hierarchy: &H,
     ) -> Result<(), ContractBreak> {
-        if self.params.len() != old.params.len() || self.results.len() != old.results.len() {
+        if self.params.len() != old.params.len()
+            || self.results.len() != old.results.len()
+            || self.rest != old.rest
+        {
             return Err(ContractBreak::Arity);
         }
         let exact = self.refers_outward() || old.refers_outward();
@@ -212,9 +220,13 @@ impl<N: TypeNames + ClassHierarchy + ?Sized> fmt::Display for ValueContractDispl
             Some(CallableContract::Signature(contract)) => contract,
         };
         out.write_str("callable(")?;
+        let required = contract.params.len() - usize::from(contract.rest);
         for (index, param) in contract.params.iter().enumerate() {
             if index > 0 {
                 out.write_str(", ")?;
+            }
+            if index == required {
+                out.write_str("#rest ")?;
             }
             write!(out, "{}", param.display(names))?;
         }
@@ -290,6 +302,7 @@ mod tests {
         Contract {
             params: params.to_vec(),
             results: results.to_vec(),
+            rest: false,
         }
     }
 
@@ -351,6 +364,27 @@ mod tests {
         );
         assert_eq!(
             contract(&[cone(1)], &[cone(1)]).check_replaces(&old, &Shapes),
+            Err(ContractBreak::Arity)
+        );
+    }
+
+    #[test]
+    fn taking_rest_or_not_is_an_arity_break() {
+        // A caller passes a `#rest` parameter's vector of the arguments
+        // after the required ones itself, so a parameter of the same type
+        // that is not `#rest` means a different call.
+        let plain = contract(&[cone(1)], &[]);
+        let rest = Contract {
+            rest: true,
+            ..plain.clone()
+        };
+        assert_eq!(rest.check_replaces(&rest, &Shapes), Ok(()));
+        assert_eq!(
+            rest.check_replaces(&plain, &Shapes),
+            Err(ContractBreak::Arity)
+        );
+        assert_eq!(
+            plain.check_replaces(&rest, &Shapes),
             Err(ContractBreak::Arity)
         );
     }

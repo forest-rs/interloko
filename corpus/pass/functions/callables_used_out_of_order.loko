@@ -15,7 +15,7 @@ define function b(x :: <integer>) => <integer>
 end;
 
 define function call-with(f :: <callable>, x :: <integer>) => <integer>
-  apply(f, x)
+  f(x)
 end;
 
 define function main()

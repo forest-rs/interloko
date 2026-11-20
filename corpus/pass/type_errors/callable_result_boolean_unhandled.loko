@@ -9,7 +9,7 @@ define function three(x :: <integer>) => <object>
   as(<object>, 3)
 end;
 define function call(f :: <callable>, x :: <integer>) => <boolean>
-  apply(f, x)
+  f(x)
 end;
 define function main() => <boolean>
   call(three, 3)

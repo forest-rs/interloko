@@ -22,7 +22,7 @@ define function square-of(x :: <integer>) => <square>
 end;
 
 define function radius-via(f :: <callable>, x :: <integer>) => <integer>
-  let r :: <circle> = apply(f, x);
+  let r :: <circle> = f(x);
   r.radius
 end;
 

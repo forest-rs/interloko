@@ -1,0 +1,17 @@
+// expect: diagnostics 3
+// expect: diagnostic code ast.generic-rest-parameter
+// expect: diagnostic code ast.rest-parameter-type
+// expect: diagnostic code ast.rest-with-keywords
+
+// A `#rest` parameter is a `<vector>`, so it takes no type of its own.
+// Generics and methods, and `#rest` with `#key`, are not supported yet.
+
+define generic g(x, #rest r);
+
+define function typed(#rest xs :: <integer>) => <integer>
+  1
+end;
+
+define function both(#rest xs, #key k) => <integer>
+  1
+end;

@@ -3066,8 +3066,18 @@ fn base_loko_rules(grammar: GrammarId, grammar_slug: &str) -> Vec<GrammarRule> {
         ),
         (
             "parameter-list",
-            "keyword-parameters | trailing-list-of<parameter, `,`> keyword-parameters?",
+            "parameter-tail | trailing-list-of<parameter, `,`> parameter-tail?",
             "syntax.rs:Parser::parse_parameter_list",
+        ),
+        (
+            "parameter-tail",
+            "rest-parameter (`,` keyword-parameters)? | keyword-parameters",
+            "base_loko_primary::BaseLokoCstBuilder::build_parameter_list",
+        ),
+        (
+            "rest-parameter",
+            "`#rest` parameter-name type-annotation?",
+            "base_loko_primary::BaseLokoCstBuilder::build_parameter_list",
         ),
         (
             "keyword-parameters",
@@ -4027,6 +4037,7 @@ fn cst_rule_name(kind: CstKind) -> Option<&'static str> {
         CstKind::ParameterName => Some("parameter-name"),
         CstKind::KeywordParameter => Some("keyword-parameter"),
         CstKind::KeywordParameterName => Some("keyword-parameter-name"),
+        CstKind::RestParameter => Some("rest-parameter"),
         CstKind::LetName => Some("let-name"),
         CstKind::RestartName => Some("restart-name"),
         CstKind::BinaryExpr => None,
@@ -4510,7 +4521,7 @@ mod tests {
 
         assert_eq!(grammar.extends, vec![base_grammar]);
         assert!(grammar.direct_rules.is_empty());
-        assert_eq!(grammar.effective_rules.len(), 93);
+        assert_eq!(grammar.effective_rules.len(), 95);
 
         assert!(
             !records

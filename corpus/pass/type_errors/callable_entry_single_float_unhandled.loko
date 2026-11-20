@@ -10,7 +10,7 @@ define function half(x :: <single-float>) => <single-float>
 end;
 
 define function call(f :: <callable>, n :: <integer>) => <single-float>
-  apply(f, n)
+  f(n)
 end;
 
 define function main() => <single-float>

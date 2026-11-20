@@ -2,7 +2,7 @@
 // expect: diagnostics 0
 
 // An `<object>` value is boxed, while `area`'s dispatcher takes runtime
-// objects: a send unboxes it, whether it is direct, through `apply`, or
+// objects: a send unboxes it, whether it is direct, through `apply`, which spreads a sequence of them, or
 // through the generic as a known value, and dispatches on what it holds.
 // One that holds a number finds no method and signals, under either
 // codegen policy.
@@ -21,12 +21,12 @@ define function direct(x :: <object>) => <integer>
 end;
 
 define function applied(x :: <object>) => <integer>
-  apply(area, x)
+  apply(area, #[x])
 end;
 
 define function valued(x :: <object>) => <integer>
   let g = area;
-  apply(g, x)
+  apply(g, #[x])
 end;
 
 define function guarded(x :: <object>) => <integer>
