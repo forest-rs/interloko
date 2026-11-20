@@ -10353,6 +10353,7 @@ impl Lowering {
                 };
                 return self.lower_signal(ctx, condition, expected_results, span);
             }
+            "error" => return self.lower_error(ctx, id, args, expected_results, span),
             "as" => return self.lower_as_call(ctx, args, span),
             "instance?" => {
                 if let [value, target] = args
@@ -14155,6 +14156,17 @@ impl Lowering {
         span: Span,
     ) -> Expr {
         let condition = self.lower_expr(ctx, condition);
+        self.signal_lowered(ctx, condition, expected_results, span)
+    }
+
+    /// Signals `condition`, already lowered; see [`Self::lower_signal`].
+    fn signal_lowered(
+        &mut self,
+        ctx: &mut FunctionContext,
+        condition: Expr,
+        expected_results: Option<&[ValueKind]>,
+        span: Span,
+    ) -> Expr {
         let condition_class = match self.expr_kind(&condition) {
             ValueKind::Object(class) => class,
             ValueKind::Error => ClassId(u32::MAX),
@@ -14181,6 +14193,87 @@ impl Lowering {
             condition_class,
             result_kinds,
             result_callable_sigs,
+            span,
+        }
+    }
+
+    /// Lowers Dylan's `error`: `error(condition)` signals the condition,
+    /// and `error(format-string, argument, …)` signals a `<simple-error>`
+    /// holding the string and a vector of the arguments. Either way it
+    /// does not return unless a handler supplies its values, so like
+    /// `signal` it takes the result kinds its context expects.
+    fn lower_error(
+        &mut self,
+        ctx: &mut FunctionContext,
+        id: AstNodeId,
+        args: &[ast::Expr],
+        expected_results: Option<&[ValueKind]>,
+        span: Span,
+    ) -> Expr {
+        let Some((first, arguments)) = args.split_first() else {
+            ctx.diagnostics
+                .push(Self::arity_mismatch("error", 1, 0, span));
+            return Expr::Error { span };
+        };
+        let first_value = self.lower_expr(ctx, first);
+        if !matches!(self.expr_kind(&first_value), ValueKind::String(_)) {
+            if !arguments.is_empty() {
+                for argument in arguments {
+                    let _ = self.lower_expr(ctx, argument);
+                }
+                ctx.diagnostics
+                    .push(Self::arity_mismatch("error", 1, args.len(), span));
+                return Expr::Error { span };
+            }
+            return self.signal_lowered(ctx, first_value, expected_results, span);
+        }
+        // The format string, evaluated first, is read back from a local
+        // whose name source cannot spell.
+        let scope = ctx.scope_start();
+        let name = format!("error format-string@{}", span.start);
+        let bound = self.bind_hidden_local(ctx, id, &name, first_value, first.span());
+        let condition = ast::Expr::MakeObject {
+            id,
+            class: Box::new(ast::Expr::ClassName {
+                id,
+                class_name: ConditionClass::SimpleError.name().into(),
+                span,
+            }),
+            fields: vec![
+                ast::KeywordArg {
+                    id,
+                    name: "format-string".into(),
+                    value: ast::Expr::Name {
+                        id,
+                        name,
+                        span: first.span(),
+                    },
+                    span,
+                },
+                ast::KeywordArg {
+                    id,
+                    name: "format-arguments".into(),
+                    value: ast::Expr::Vector {
+                        id,
+                        elements: arguments.to_vec(),
+                        span,
+                    },
+                    span,
+                },
+            ],
+            span,
+        };
+        let condition = self.lower_expr(ctx, &condition);
+        let signal = self.signal_lowered(ctx, condition, expected_results, span);
+        ctx.hide_locals_from(scope);
+        Expr::Block {
+            exit: None,
+            body: Box::new(Block {
+                statements: vec![Statement::Let(bound)],
+                result: signal,
+                span,
+            }),
+            cleanup: None,
             span,
         }
     }
@@ -19865,7 +19958,18 @@ mod tests {
         let unknown_keyword = class(&module, "<unknown-keyword-error>");
         assert_eq!(unknown_keyword.superclass, Some(error));
         assert_eq!(unknown_keyword.id.0, by_zero.id.0 + 1);
-        assert_eq!(unknown_keyword.id.0 as usize, module.classes.len() - 1);
+        let simple = class(&module, "<simple-error>");
+        assert_eq!(simple.superclass, Some(error));
+        assert_eq!(simple.id.0, unknown_keyword.id.0 + 1);
+        assert_eq!(simple.id.0 as usize, module.classes.len() - 1);
+        assert_eq!(
+            simple
+                .effective_slots
+                .iter()
+                .map(|slot| slot.name.as_str())
+                .collect::<Vec<_>>(),
+            ["condition-format-string", "condition-format-arguments"]
+        );
         assert_eq!(
             unknown_keyword
                 .effective_slots

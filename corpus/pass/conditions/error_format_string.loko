@@ -1,0 +1,20 @@
+// expect: run 7
+// expect: diagnostics 0
+
+// `error(format-string, argument, …)` signals a `<simple-error>`, an
+// `<error>`, holding the string and the arguments.
+
+define function lookup(name :: <symbol>) => <integer>
+  error("unbound variable %=", name)
+end;
+
+define function main() => <integer>
+  block ()
+    lookup(#x)
+  exception (e :: <simple-error>)
+    let arguments = e.condition-format-arguments;
+    (if (e.condition-format-string = "unbound variable %=") 1 else 0 end)
+      + (if (size(arguments) = 1) 2 else 0 end)
+      + (if (arguments[0] == #x) 4 else 0 end)
+  end
+end;

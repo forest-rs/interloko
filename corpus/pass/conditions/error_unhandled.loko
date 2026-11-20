@@ -1,0 +1,8 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: diagnostics 0
+
+// A `<simple-error>` no handler takes ends the run.
+
+define function main() => <integer>
+  error("no handler for this")
+end;
