@@ -1,0 +1,10 @@
+// expect: runtime code type-error.cast
+// expect: diagnostics 0
+
+// Only a string converts to a symbol: any other value is cast, and fails.
+
+define function intern(x) => <object> as(<symbol>, x) end;
+
+define function main() => <object>
+  intern(42)
+end;

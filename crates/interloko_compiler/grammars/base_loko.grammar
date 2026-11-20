@@ -133,7 +133,9 @@ rule number-literal = number
 rule bool-literal = `#t` | `#f`
 rule string-literal raw = `"` until(`"`) `"`
 rule character-literal raw = `'` (`\` [^\n] [^'\n]* | [^'\\\n] [^'\n]*) `'`
-rule symbol-literal = `#` symbol-name
+// `#"set!"` is Dylan's symbol literal for any name, one that is not a
+// word included.
+rule symbol-literal = `#` symbol-name | `#` string-literal
 rule keyword-symbol = explicit-keyword-symbol | expression-keyword-symbol
 rule explicit-keyword-symbol = `#:` name
 rule expression-keyword-symbol = name `:` !`=`

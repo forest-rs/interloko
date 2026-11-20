@@ -9808,6 +9808,9 @@ impl<'module> BodyLowering<'module> {
                 self.module,
                 sem::BuiltinValueClass::StringBuilder,
             )),
+            interloko_runtime::TextKind::Symbol => {
+                ValueKind::Object(builtin_class(self.module, sem::BuiltinValueClass::Symbol))
+            }
         };
         let result = self.alloc(result);
         self.instructions.push(Instr::TextCall {

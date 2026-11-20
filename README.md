@@ -545,7 +545,12 @@ The current slices include:
   restates or widens its generic's range: unlike Dylan's DRM, methods do
   not dispatch on ranges, so a send's range check is the only one;
 - symbols and keywords; a symbol's name is any word after `#`, reserved
-  words included, so a lexer may mark its last token `#end`;
+  words included, so a lexer may mark its last token `#end`, and Dylan's
+  `#"…"` names a symbol with any text (`#"two words"`). `as(<symbol>, s)`
+  interns a string's text, so it answers the literal's symbol, and
+  `as(<string>, s)` gives a symbol's name; a boxed value converts by its
+  class at run time, as a number does. Unlike Dylan's, symbols keep their
+  case: `#Foo` and `#foo` are different symbols;
 - strings: a `<string>` is immutable, validated UTF-8 whose header caches
   its character count, so `size(s)` is O(1), and whether it is all ASCII;
   a Rust host borrows its text as `&str` without a copy. Strings have no

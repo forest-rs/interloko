@@ -12250,6 +12250,7 @@ impl Lowering {
         Some(TextClasses {
             string: self.builtin_value_class(BuiltinValueClass::String)?,
             builder: self.builtin_value_class(BuiltinValueClass::StringBuilder)?,
+            symbol: self.builtin_value_class(BuiltinValueClass::Symbol)?,
         })
     }
 
@@ -15011,7 +15012,6 @@ impl Lowering {
                 span,
             };
         }
-
         ctx.diagnostics.push(
             Diagnostic::error(span, DiagnosticCode::ComparisonOperandTypeMismatch)
                 .with_arg(DiagnosticArg::text("lhs", self.kind_name(lhs_kind)))
@@ -15219,15 +15219,17 @@ impl Lowering {
         self.cast_boxed(ctx, value, AsTarget::Class(class_id), span)
     }
 
-    /// Lowers `as(target, value)`. A number's conversion depends on its
+    /// Lowers `as(target, value)`. A conversion depends on the value's
     /// class, as Dylan's `as` does, so when `value` is a boxed `<object>`
-    /// and `target` is a number type, `as` tests the value's class at run
-    /// time and converts it from there by the rules it applies when the
-    /// class is known: an `<integer>`, a `<double-float>` and a
-    /// `<single-float>` each convert, and any other value is cast, which
-    /// signals `type-error.cast`. The tests are ordinary `instance?` tests
-    /// on a hidden local, so typing decides the ones it can, and lowering
-    /// keeps only the conversion that can run.
+    /// and `target` converts from other classes, `as` tests the value's
+    /// class at run time and converts it from there by the rules it applies
+    /// when the class is known: to a number type, an `<integer>`, a
+    /// `<double-float>` and a `<single-float>` each convert; to `<string>`,
+    /// a `<character>`, a `<symbol>` and a `<string-builder>`; to
+    /// `<symbol>`, a `<string>`. Any other value is cast, which signals
+    /// `type-error.cast`. The tests are ordinary `instance?` tests on a
+    /// hidden local, so typing decides the ones it can, and lowering keeps
+    /// only the conversion that can run.
     fn cast_boxed(
         &mut self,
         ctx: &mut FunctionContext,
@@ -15235,14 +15237,25 @@ impl Lowering {
         target: AsTarget,
         span: Span,
     ) -> Expr {
-        let numeric_target = match target {
-            AsTarget::Class(class) => self
-                .kind_for_builtin_class(class)
-                .and_then(NumericKind::of)
-                .is_some(),
-            AsTarget::Limited(_) | AsTarget::Range(_) => true,
+        let target_kind = match target {
+            AsTarget::Class(class) => self.kind_for_builtin_class(class),
+            AsTarget::Limited(_) | AsTarget::Range(_) => Some(ValueKind::I64),
         };
-        if !numeric_target || self.expr_kind(&value) != ValueKind::Any {
+        let sources: &[BuiltinValueClass] = match target_kind {
+            Some(kind) if NumericKind::of(kind).is_some() => &[
+                BuiltinValueClass::SingleFloat,
+                BuiltinValueClass::DoubleFloat,
+                BuiltinValueClass::Integer,
+            ],
+            Some(ValueKind::String(_)) => &[
+                BuiltinValueClass::StringBuilder,
+                BuiltinValueClass::Symbol,
+                BuiltinValueClass::Character,
+            ],
+            Some(ValueKind::Symbol(_)) => &[BuiltinValueClass::String],
+            _ => &[],
+        };
+        if sources.is_empty() || self.expr_kind(&value) != ValueKind::Any {
             return self.cast_to(ctx, value, target, span);
         }
         let scope = ctx.scope_start();
@@ -15265,13 +15278,9 @@ impl Lowering {
             callable_signature: None,
             span,
         };
-        // Anything but a number is cast, and fails unless it is one.
+        // Anything else is cast, and fails unless it is of the target.
         let mut chain = self.cast_to(ctx, boxed.clone(), target, span);
-        for kind in [
-            BuiltinValueClass::SingleFloat,
-            BuiltinValueClass::DoubleFloat,
-            BuiltinValueClass::Integer,
-        ] {
+        for kind in sources.iter().copied() {
             let Some(class) = self.builtin_value_class(kind) else {
                 continue;
             };
@@ -15429,13 +15438,20 @@ impl Lowering {
                     span,
                 };
             }
-            // A character or a builder's text becomes a `<string>`.
+            // A character, a builder's text or a symbol's name becomes a
+            // `<string>`.
             (actual, Some(ValueKind::String(class))) => {
                 let builder = self.builtin_value_class(BuiltinValueClass::StringBuilder);
+                let symbol = self.builtin_value_class(BuiltinValueClass::Symbol);
                 let function = match actual {
                     ValueKind::Char => Some(TextFunction::CharacterToString),
                     ValueKind::Object(object) if Some(object) == builder => {
                         Some(TextFunction::BuilderToString)
+                    }
+                    ValueKind::Symbol(_) => Some(TextFunction::SymbolToString),
+                    // A boxed symbol `instance?` narrowed.
+                    ValueKind::Object(object) if Some(object) == symbol => {
+                        Some(TextFunction::SymbolToString)
                     }
                     _ => None,
                 };
@@ -15447,6 +15463,26 @@ impl Lowering {
                         span,
                     };
                 }
+            }
+            // A string names the symbol it interns; a boxed one `instance?`
+            // narrowed is an object of the string class.
+            (ValueKind::String(_), Some(ValueKind::Symbol(class))) => {
+                return Expr::IntrinsicCall {
+                    intrinsic: Intrinsic::Text(TextFunction::StringToSymbol),
+                    args: vec![value],
+                    result_kind: ValueKind::Symbol(class),
+                    span,
+                };
+            }
+            (ValueKind::Object(object), Some(ValueKind::Symbol(class)))
+                if Some(object) == self.builtin_value_class(BuiltinValueClass::String) =>
+            {
+                return Expr::IntrinsicCall {
+                    intrinsic: Intrinsic::Text(TextFunction::StringToSymbol),
+                    args: vec![value],
+                    result_kind: ValueKind::Symbol(class),
+                    span,
+                };
             }
             _ => {}
         }
