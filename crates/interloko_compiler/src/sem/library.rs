@@ -231,7 +231,8 @@ fn clear_expr(expr: &mut Expr) {
         }
         | Expr::Binary { lhs, rhs, span, .. }
         | Expr::Compare { lhs, rhs, span, .. }
-        | Expr::Identical { lhs, rhs, span, .. } => {
+        | Expr::Identical { lhs, rhs, span, .. }
+        | Expr::Or { lhs, rhs, span, .. } => {
             *span = Span::default();
             clear_expr(lhs);
             clear_expr(rhs);

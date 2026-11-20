@@ -1053,6 +1053,21 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// `lhs | rhs`, Dylan's short-circuit disjunction: `lhs`'s value when
+    /// it is true, otherwise `rhs`'s, which runs only then.
+    ///
+    /// `lhs & rhs` needs no form of its own: it is `if (lhs) rhs else #f
+    /// end`, whose value is `#f` or `rhs`'s.
+    Or {
+        /// Stable-ish AST node identity.
+        id: AstNodeId,
+        /// Left operand, evaluated first.
+        lhs: Box<Expr>,
+        /// Right operand, evaluated only when `lhs` is `#f`.
+        rhs: Box<Expr>,
+        /// Source span.
+        span: Span,
+    },
     /// `if (test) body elseif (test) body … else body end`.
     ///
     /// The arms are tried in order and the first whose test is true runs.
@@ -1297,7 +1312,8 @@ impl Expr {
             }
             | Self::Binary { lhs, rhs, .. }
             | Self::Compare { lhs, rhs, .. }
-            | Self::Identical { lhs, rhs, .. } => {
+            | Self::Identical { lhs, rhs, .. }
+            | Self::Or { lhs, rhs, .. } => {
                 visit(lhs);
                 visit(rhs);
             }
@@ -1420,6 +1436,7 @@ impl Expr {
             | Self::UnaryMinus { id, .. }
             | Self::Compare { id, .. }
             | Self::Identical { id, .. }
+            | Self::Or { id, .. }
             | Self::If { id, .. }
             | Self::Unless { id, .. }
             | Self::Case { id, .. }
@@ -1460,6 +1477,7 @@ impl Expr {
             | Self::UnaryMinus { span, .. }
             | Self::Compare { span, .. }
             | Self::Identical { span, .. }
+            | Self::Or { span, .. }
             | Self::If { span, .. }
             | Self::Unless { span, .. }
             | Self::Case { span, .. }
@@ -3308,9 +3326,10 @@ impl<'tree> Lowering<'tree> {
             _ => None,
         });
 
-        // `a & b` is `if (a) b else #f end` and `a | b` is
-        // `if (a) #t else b end`: each evaluates its right operand only
-        // when it must, and an arm sees what its test established.
+        // `a & b` is `if (a) b else #f end`, and `a | b` answers `a`'s
+        // value when it is true, else `b`'s: each evaluates its right
+        // operand only when it must, and it sees what the left one
+        // established, as an arm sees what its test did.
         let constant = |this: &Self, value: bool| Block {
             id: this.ast_id(node),
             statements: Vec::new(),
@@ -3342,15 +3361,10 @@ impl<'tree> Lowering<'tree> {
                 };
             }
             Some(TokenKind::Bar) => {
-                let else_body = operand(self, rhs);
-                return Expr::If {
+                return Expr::Or {
                     id: self.ast_id(node),
-                    arms: vec![CondArm {
-                        span: node.span,
-                        test: lhs,
-                        body: constant(self, true),
-                    }],
-                    else_body: Some(Box::new(else_body)),
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
                     span: node.span,
                 };
             }

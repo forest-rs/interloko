@@ -1,0 +1,15 @@
+// expect: run 3
+// expect: diagnostics 0
+
+// `a | b` whose value is discarded, as a statement or at the end of a
+// loop's body, runs `b` for its effects when `a` is false, and its arms
+// need not agree, as an `if`'s need not there.
+
+define function main() => <integer>
+  let count = 0;
+  let note = method () => () count := count + 1 end;
+  let done? = 1 > 2;
+  done? | note();
+  for (i from 0 below 3) i = 1 | note() end;
+  count
+end;
