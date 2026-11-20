@@ -895,6 +895,16 @@ symbols it interned, the evacuation work and the number of logged stores;
 `interloko_corpus heap [root...]` prints survival for every program with a
 `main`.
 
+Each call runs under `RunLimits`: fuel, of which every VM instruction costs
+one unit and every runtime host call `HOST_CALL_FUEL` (8) more, so the VM
+keeps no separate count of host calls; and a call depth, 100,000 frames by
+default, enough for recursion tens of thousands of calls deep. The VM's
+contract, aggregate and byte work budgets get as many units as the fuel.
+`CompilerSession::set_run_limits` gives the artifacts a session compiles
+their limits (a compile's run of `main` included), and
+`SessionArtifacts::set_run_limits` and `SessionRuntime::set_run_limits`
+change them for later calls; running out traps.
+
 Compiler error and trace wrappers containing `TrapInfo` implement `Clone` and
 `Debug`, and no longer derive `Eq`/`PartialEq`: traps may carry an owned typed
 host error. Match the error variant or inspect its cause instead of comparing

@@ -48,6 +48,17 @@ use interloko_model::{
     OBJECT_CLASS_ID, SingleFloatBits, SlotId,
 };
 
+/// Fuel each runtime host call costs above the instruction that makes it.
+///
+/// A host call takes about as long as this many VM instructions (in the
+/// `lisp` bench, about 80 ns against 10 ns): it marshals its arguments and
+/// results and looks its symbol up, and most read or allocate in the
+/// runtime heap. Charging fuel for it lets one
+/// budget, the VM's fuel, bound a run however its work divides between
+/// instructions and host calls, so an embedder sets no separate count of
+/// host calls.
+pub const HOST_CALL_FUEL: u64 = 8;
+
 /// Host object type used for Interloko runtime objects.
 pub const INTERLOKO_OBJECT_TYPE: HostTypeId = HostTypeId(0x494c_4f4b_5f4f_424a);
 /// Host object type used for boxed top `<object>` values.
@@ -2497,7 +2508,24 @@ impl Host for InterlokoHost {
     fn object_bytes<R>(&self, object: Obj, read: impl FnOnce(Option<&[u8]>) -> R) -> R {
         read(self.string_bytes(object))
     }
+    /// Charges every host call [`HOST_CALL_FUEL`], above the instruction
+    /// that makes it.
     fn call(
+        &mut self,
+        symbol: &str,
+        sig_hash: SigHash,
+        args: &[ValueRef<'_>],
+        rets: &mut [Value],
+        ctx: HostContext<'_, '_>,
+    ) -> Result<u64, HostError> {
+        self.call_import(symbol, sig_hash, args, rets, ctx)
+            .map(|extra| extra.saturating_add(HOST_CALL_FUEL))
+    }
+}
+
+impl InterlokoHost {
+    /// Answers one runtime host call; [`Host::call`] charges for it.
+    fn call_import(
         &mut self,
         symbol: &str,
         sig_hash: SigHash,

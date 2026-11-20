@@ -55,6 +55,10 @@ traces come from the existing compiler/runtime interface.
   A runtime image that outlives calls (`SessionArtifacts::runtime`) is tied
   to one runtime layout, which an accepted edit may change, so it is not
   retained here.
+- `set_run_limits` sets the fuel and call depth each call runs under
+  (`RunLimits`; host calls are charged as fuel). It is a runtime setting, not
+  an edit: it keeps the revision, and source replacement, mutation and
+  rewind keep it.
 - The codegen policy decides whether lowering acts on what soft typing
   proved. `with_codegen_policy` chooses it at construction (the other
   constructors use the compiler's default, `Proved`; `Off` keeps every

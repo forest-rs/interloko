@@ -469,14 +469,31 @@ pub struct FunctionCallOutcome {
 pub struct SessionRuntime {
     host: InterlokoHost,
     vm: Option<ParkedVm>,
+    limits: RunLimits,
 }
 
 impl SessionRuntime {
-    /// A fresh runtime image for `tape`, with no VM yet.
-    fn new(tape: &tape::TapeModule) -> Self {
+    /// A fresh runtime image for `tape`, with no VM yet, whose calls run
+    /// under `limits`.
+    fn new(tape: &tape::TapeModule, limits: RunLimits) -> Self {
         Self {
             host: InterlokoHost::new(tape.runtime().clone()),
             vm: None,
+            limits,
+        }
+    }
+
+    /// Returns the limits this runtime's calls run under.
+    #[must_use]
+    pub const fn run_limits(&self) -> RunLimits {
+        self.limits
+    }
+
+    /// Sets the limits later calls run under.
+    pub fn set_run_limits(&mut self, limits: RunLimits) {
+        self.limits = limits;
+        if let Some(parked) = self.vm.as_mut() {
+            parked.vm.set_limits(limits.vm_limits());
         }
     }
 
@@ -1649,6 +1666,9 @@ pub struct SessionArtifacts {
     /// Codegen policy these artifacts were compiled under. Read through
     /// [`SessionArtifacts::codegen_policy`].
     codegen_policy: lower::CodegenPolicy,
+    /// The limits calls of these artifacts run under; see
+    /// [`SessionArtifacts::run_limits`].
+    run_limits: RunLimits,
     invalidation: QueryInvalidation,
     artifact_metrics: Vec<ArtifactMetricEntry>,
 }
@@ -2240,6 +2260,24 @@ impl SessionArtifacts {
     #[must_use]
     pub const fn codegen_policy(&self) -> lower::CodegenPolicy {
         self.codegen_policy
+    }
+
+    /// Returns the limits calls of these artifacts run under, and the
+    /// runtimes [`Self::runtime`] makes start with.
+    #[must_use]
+    pub const fn run_limits(&self) -> RunLimits {
+        self.run_limits
+    }
+
+    /// Sets the limits later calls of these artifacts run under. A recorded
+    /// run of `main` ([`Self::runtime_result`]) ran under the earlier
+    /// limits, so it is dropped.
+    pub fn set_run_limits(&mut self, limits: RunLimits) {
+        if self.run_limits != limits {
+            self.run_limits = limits;
+            self.runtime_result = None;
+            self.runtime_trace = None;
+        }
     }
 
     /// Returns these artifacts lowered again under codegen `policy`.
@@ -3036,7 +3074,7 @@ impl SessionArtifacts {
             &self.sem,
             &self.host_registry,
             tape,
-            &mut SessionRuntime::new(tape),
+            &mut SessionRuntime::new(tape, self.run_limits),
             function_name,
             arguments,
             trace,
@@ -3049,7 +3087,7 @@ impl SessionArtifacts {
     /// reported errors ([`Self::check_runnable`]).
     pub fn runtime(&self) -> Result<SessionRuntime, FunctionCallError> {
         let tape = self.runnable_tape()?;
-        Ok(SessionRuntime::new(tape))
+        Ok(SessionRuntime::new(tape, self.run_limits))
     }
 
     /// Calls a direct function while serving declared scalar host functions
@@ -3070,7 +3108,7 @@ impl SessionArtifacts {
             &self.sem,
             &self.host_registry,
             tape,
-            &mut SessionRuntime::new(tape),
+            &mut SessionRuntime::new(tape, self.run_limits),
             function_name,
             arguments,
             trace,
@@ -3151,7 +3189,7 @@ impl SessionArtifacts {
             &self.sem,
             &self.host_registry,
             tape,
-            &mut SessionRuntime::new(tape),
+            &mut SessionRuntime::new(tape, self.run_limits),
             function_name,
             arguments,
             trace,
@@ -3455,6 +3493,7 @@ impl SessionArtifacts {
             &self.host_registry,
             self.typing.config,
             self.codegen_policy,
+            self.run_limits,
         );
 
         let new_diagnostics = new_error_diagnostics(&pre_mutation_diagnostic_codes, &candidate);
@@ -3730,6 +3769,7 @@ impl SessionArtifacts {
             &self.host_registry,
             self.typing.config,
             self.codegen_policy,
+            self.run_limits,
         );
 
         let pre_mutation_diagnostic_codes: Vec<DiagnosticCode> = self
@@ -3910,6 +3950,7 @@ impl SessionArtifacts {
             &self.host_registry,
             self.typing.config,
             self.codegen_policy,
+            self.run_limits,
         );
 
         let runtime_layout = runtime_bridge::runtime_layout_from_sem(&candidate.sem);
@@ -3969,6 +4010,7 @@ impl SessionArtifacts {
             &self.host_registry,
             self.typing.config,
             self.codegen_policy,
+            self.run_limits,
         );
 
         let mut applied: Vec<AppliedMutation> = Vec::new();
@@ -4278,6 +4320,7 @@ pub struct CompilerSession {
     grammar_registry: GrammarFrontendRegistry,
     typing_config: typing::TypingConfig,
     codegen_policy: lower::CodegenPolicy,
+    run_limits: RunLimits,
 }
 
 impl CompilerSession {
@@ -4295,6 +4338,7 @@ impl CompilerSession {
             grammar_registry,
             typing_config: typing::TypingConfig::soft(),
             codegen_policy: lower::CodegenPolicy::Proved,
+            run_limits: RunLimits::DEFAULT,
         }
     }
 
@@ -4324,6 +4368,18 @@ impl CompilerSession {
     /// Sets the codegen policy used by future compiles.
     pub fn set_codegen_policy(&mut self, policy: lower::CodegenPolicy) {
         self.codegen_policy = policy;
+    }
+
+    /// Returns the limits the artifacts this session compiles run under.
+    #[must_use]
+    pub const fn run_limits(&self) -> RunLimits {
+        self.run_limits
+    }
+
+    /// Sets the limits the artifacts of future compiles run under: a
+    /// compile's run of `main`, their calls, and the runtimes they make.
+    pub fn set_run_limits(&mut self, limits: RunLimits) {
+        self.run_limits = limits;
     }
 
     /// Adds a named source file and returns its id.
@@ -4395,6 +4451,7 @@ impl CompilerSession {
                 self.grammar_registry,
                 self.typing_config,
                 self.codegen_policy,
+                self.run_limits,
             )
         })
     }
@@ -4415,6 +4472,7 @@ impl CompilerSession {
                 registry,
                 self.typing_config,
                 self.codegen_policy,
+                self.run_limits,
             )
         })
     }
@@ -4440,6 +4498,7 @@ impl CompilerSession {
             grammar_registry,
             typing::TypingConfig::default(),
             lower::CodegenPolicy::default(),
+            RunLimits::default(),
         )
     }
 
@@ -4561,6 +4620,7 @@ pub struct IncrementalCompilerSession {
     grammar_registry: GrammarFrontendRegistry,
     typing_config: typing::TypingConfig,
     codegen_policy: lower::CodegenPolicy,
+    run_limits: RunLimits,
 }
 
 impl IncrementalCompilerSession {
@@ -4578,6 +4638,7 @@ impl IncrementalCompilerSession {
             grammar_registry,
             typing_config: typing::TypingConfig::soft(),
             codegen_policy: lower::CodegenPolicy::Proved,
+            run_limits: RunLimits::DEFAULT,
         }
     }
 
@@ -4615,6 +4676,18 @@ impl IncrementalCompilerSession {
     /// consults it.
     pub fn set_codegen_policy(&mut self, policy: lower::CodegenPolicy) {
         self.codegen_policy = policy;
+    }
+
+    /// Returns the limits the artifacts this session compiles run under.
+    #[must_use]
+    pub const fn run_limits(&self) -> RunLimits {
+        self.run_limits
+    }
+
+    /// Sets the limits the artifacts of future compiles run under: a
+    /// compile's run of `main`, their calls, and the runtimes they make.
+    pub fn set_run_limits(&mut self, limits: RunLimits) {
+        self.run_limits = limits;
     }
 
     /// Adds a named source file and returns its stable id.
@@ -4736,6 +4809,7 @@ impl IncrementalCompilerSession {
             self.grammar_registry,
             self.typing_config,
             self.codegen_policy,
+            self.run_limits,
         );
         let diff = previous_artifacts
             .as_ref()
@@ -4790,18 +4864,24 @@ impl CachedSourceFile {
         grammar_registry: GrammarFrontendRegistry,
         typing_config: typing::TypingConfig,
         codegen_policy: lower::CodegenPolicy,
+        run_limits: RunLimits,
     ) -> SessionArtifacts {
         if let Some(previous) = &self.artifacts
             && previous.source == *source
             && previous.grammar_registry == grammar_registry
         {
-            if previous.typing.config == typing_config && previous.codegen_policy == codegen_policy
+            if previous.typing.config == typing_config
+                && previous.codegen_policy == codegen_policy
+                && previous.run_limits == run_limits
             {
                 return artifacts_for_mode(previous, mode);
             }
             // Only session inputs changed: re-derive what depends on them
             // from the recorded artifacts instead of recompiling.
             let mut updated = previous.clone();
+            // Code compiles the same under any limits; only a recorded run
+            // of `main` depends on them.
+            updated.set_run_limits(run_limits);
             if updated.typing.config != typing_config {
                 updated = updated.with_typing_config(typing_config);
             }
@@ -4816,6 +4896,7 @@ impl CachedSourceFile {
             grammar_registry,
             typing_config,
             codegen_policy,
+            run_limits,
         )
     }
 }
@@ -4829,8 +4910,14 @@ fn artifacts_for_mode(previous: &SessionArtifacts, mode: RuntimeMode) -> Session
             // Errors block running, and with it any recorded result.
             previous.runnable_tape().ok().and_then(|tape| {
                 previous.runtime_result.clone().or_else(|| {
-                    let (result, elapsed_nanos) =
-                        measure_elapsed(|| run_main(&previous.sem, &previous.host_registry, tape));
+                    let (result, elapsed_nanos) = measure_elapsed(|| {
+                        run_main(
+                            &previous.sem,
+                            &previous.host_registry,
+                            tape,
+                            previous.run_limits,
+                        )
+                    });
                     timings.record(QueryArtifact::RuntimeResult, elapsed_nanos);
                     Some(result)
                 })
@@ -4844,6 +4931,7 @@ fn artifacts_for_mode(previous: &SessionArtifacts, mode: RuntimeMode) -> Session
                         &previous.sem,
                         &previous.host_registry,
                         tape,
+                        previous.run_limits,
                         Some(detail),
                     );
                     (Some(result), trace)
@@ -6630,6 +6718,7 @@ fn compile_file(file: &SourceFile, mode: RuntimeMode) -> SessionArtifacts {
         GrammarFrontendRegistry::builtin(),
         typing::TypingConfig::default(),
         lower::CodegenPolicy::default(),
+        RunLimits::default(),
     )
 }
 
@@ -6639,6 +6728,7 @@ fn compile_file_with_grammar_registry(
     grammar_registry: GrammarFrontendRegistry,
     typing_config: typing::TypingConfig,
     codegen_policy: lower::CodegenPolicy,
+    run_limits: RunLimits,
 ) -> SessionArtifacts {
     compile_file_with_registries(
         file,
@@ -6647,6 +6737,7 @@ fn compile_file_with_grammar_registry(
         &sem::HostMetaRegistry::new(),
         typing_config,
         codegen_policy,
+        run_limits,
     )
 }
 
@@ -6662,6 +6753,7 @@ fn compile_file_with_host_registry(
         registry,
         typing::TypingConfig::default(),
         lower::CodegenPolicy::default(),
+        RunLimits::default(),
     )
 }
 
@@ -6672,6 +6764,7 @@ pub(crate) fn compile_file_with_registries(
     registry: &sem::HostMetaRegistry,
     typing_config: typing::TypingConfig,
     codegen_policy: lower::CodegenPolicy,
+    run_limits: RunLimits,
 ) -> SessionArtifacts {
     let mut timings = ArtifactTimingCollector::default();
     let (source, elapsed_nanos) = measure_elapsed(|| file.clone());
@@ -6717,9 +6810,13 @@ pub(crate) fn compile_file_with_registries(
         .filter(|_| !diagnostics.iter().any(Diagnostic::is_error));
     let ((runtime_result, runtime_trace), elapsed_nanos) = measure_elapsed(|| match mode {
         RuntimeMode::CompileOnly => (None, None),
-        RuntimeMode::RunMain => (runnable.map(|tape| run_main(&sem, registry, tape)), None),
+        RuntimeMode::RunMain => (
+            runnable.map(|tape| run_main(&sem, registry, tape, run_limits)),
+            None,
+        ),
         RuntimeMode::RunMainTraced { detail } => runnable.map_or((None, None), |tape| {
-            let (result, trace) = run_main_with_trace(&sem, registry, tape, Some(detail));
+            let (result, trace) =
+                run_main_with_trace(&sem, registry, tape, run_limits, Some(detail));
             (Some(result), trace)
         }),
     });
@@ -6746,6 +6843,7 @@ pub(crate) fn compile_file_with_registries(
         pristine_source,
         next_mutation_id: 0,
         codegen_policy,
+        run_limits,
         invalidation,
         artifact_metrics: Vec::new(),
     };
@@ -6817,21 +6915,23 @@ fn run_main(
     module: &sem::Module,
     host_registry: &sem::HostMetaRegistry,
     tape: &tape::TapeModule,
+    limits: RunLimits,
 ) -> RuntimeResult {
-    run_main_with_trace(module, host_registry, tape, None).0
+    run_main_with_trace(module, host_registry, tape, limits, None).0
 }
 
 fn run_main_with_trace(
     module: &sem::Module,
     host_registry: &sem::HostMetaRegistry,
     tape: &tape::TapeModule,
+    limits: RunLimits,
     trace: Option<ExecutionTraceDetail>,
 ) -> (RuntimeResult, Option<ExecutionTrace>) {
     match call_function(
         module,
         host_registry,
         tape,
-        &mut SessionRuntime::new(tape),
+        &mut SessionRuntime::new(tape, limits),
         "main",
         &[],
         trace,
@@ -6925,7 +7025,11 @@ fn call_function<'a>(
     trace: Option<ExecutionTraceDetail>,
     services: CallServices<'a>,
 ) -> Result<FunctionCallOutcome, FunctionCallError> {
-    let SessionRuntime { host: runtime, vm } = image;
+    let SessionRuntime {
+        host: runtime,
+        vm,
+        limits,
+    } = image;
     runtime
         .begin_turn()
         .map_err(|error| FunctionCallError::TurnFailed { error })?;
@@ -6934,7 +7038,7 @@ fn call_function<'a>(
         host_registry,
         tape,
         &mut *runtime,
-        vm,
+        (vm, *limits),
         function_name,
         arguments,
         trace,
@@ -6980,7 +7084,7 @@ fn run_turn_body<'a>(
     host_registry: &'a sem::HostMetaRegistry,
     tape: &tape::TapeModule,
     runtime: &'a mut InterlokoHost,
-    vm: &mut Option<ParkedVm>,
+    (vm, limits): (&mut Option<ParkedVm>, RunLimits),
     function_name: &str,
     arguments: &[FunctionValue],
     trace: Option<ExecutionTraceDetail>,
@@ -7075,7 +7179,9 @@ fn run_turn_body<'a>(
 
     let mut parked = match vm.take() {
         Some(parked) if Arc::ptr_eq(parked.installed.code(), &tape.code) => parked,
-        _ => ParkedVm::new(&tape.code).map_err(|error| FunctionCallError::Link { error })?,
+        _ => {
+            ParkedVm::new(&tape.code, limits).map_err(|error| FunctionCallError::Link { error })?
+        }
     };
     let mut capture = trace.map(|detail| TraceCapture::new(tape.program(), detail));
     // The call's host borrows the image for this call only; the parked VM
@@ -7215,21 +7321,76 @@ struct ParkedVm {
     installed: Installed,
 }
 
-/// Instructions one call of a session's code may run before it traps.
+/// What one call of a session's code may spend before it traps.
 ///
-/// `execution_tape`'s default allows a million, which a loop of a few
-/// hundred thousand iterations exhausts. This allows a hundred times that:
-/// enough for ordinary loops, and a runaway one still traps in well under
-/// a second.
-const RUN_FUEL: u64 = 100_000_000;
+/// A [`SessionRuntime`] runs every call under its limits, and
+/// [`SessionArtifacts`] run one-off calls, and a compile's `main`, under
+/// theirs; a session gives the artifacts it compiles its own
+/// ([`CompilerSession::set_run_limits`]). The defaults let ordinary
+/// programs recurse tens of thousands of calls deep and run for a few
+/// seconds, while a runaway loop or recursion still ends in a trap.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunLimits {
+    /// Fuel the call may burn: each VM instruction costs one unit, and each
+    /// runtime host call [`runtime::HOST_CALL_FUEL`] more, as a host call
+    /// does about that much more work. Running out traps with
+    /// `fuel limit exceeded`.
+    pub fuel: u64,
+    /// How deep the call's stack may grow, in VM frames: one per Loko call,
+    /// plus the frames of closures, adapters and handlers between them.
+    /// Going deeper traps with `call depth limit exceeded`.
+    pub max_call_depth: usize,
+}
+
+impl RunLimits {
+    /// Fuel a call gets by default: ten times what a session allowed when
+    /// host calls had a separate budget, a second or two of arithmetic and
+    /// several seconds of object-heavy code before a runaway call traps.
+    pub const DEFAULT_FUEL: u64 = 1_000_000_000;
+
+    /// Call depth a call gets by default.
+    pub const DEFAULT_MAX_CALL_DEPTH: usize = 100_000;
+
+    /// The default limits: [`Self::DEFAULT_FUEL`] and
+    /// [`Self::DEFAULT_MAX_CALL_DEPTH`].
+    pub const DEFAULT: Self = Self {
+        fuel: Self::DEFAULT_FUEL,
+        max_call_depth: Self::DEFAULT_MAX_CALL_DEPTH,
+    };
+
+    /// The VM limits a call under these limits runs with.
+    ///
+    /// Fuel is the one budget for a call's work. Host calls are charged as
+    /// fuel ([`runtime::HOST_CALL_FUEL`]), so the VM's own count of them is
+    /// unbounded, and its separate budgets for contract checks, aggregate
+    /// construction and copied bytes, each of which grows with the work
+    /// instructions do, get as many units as there is fuel. The VM's frame
+    /// limit, which also counts the frames of computations it keeps saved,
+    /// leaves the default room for those above the call depth.
+    fn vm_limits(self) -> Limits {
+        let defaults = Limits::default();
+        Limits {
+            fuel: self.fuel,
+            max_call_depth: self.max_call_depth,
+            max_frames: self.max_call_depth.saturating_add(defaults.max_frames),
+            max_host_calls: u64::MAX,
+            max_contract_work: self.fuel.max(defaults.max_contract_work),
+            max_aggregate_work: self.fuel.max(defaults.max_aggregate_work),
+            max_payload_work: self.fuel.max(defaults.max_payload_work),
+            ..defaults
+        }
+    }
+}
+
+impl Default for RunLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
 
 impl ParkedVm {
-    fn new(code: &Arc<CodeUnit>) -> Result<Self, driver::LinkError> {
-        let limits = Limits {
-            fuel: RUN_FUEL,
-            ..Limits::default()
-        };
-        let mut vm = Vm::new(Idle, limits);
+    fn new(code: &Arc<CodeUnit>, limits: RunLimits) -> Result<Self, driver::LinkError> {
+        let mut vm = Vm::new(Idle, limits.vm_limits());
         let installed = driver::install(&mut vm, code)?;
         Ok(Self { vm, installed })
     }
@@ -17371,13 +17532,22 @@ mod tests {
             let source = format!(
                 "define function helper(x :: <integer>) => <integer>\n  {expression}\nend;\ndefine function main()\n  helper(41)\nend;"
             );
-            let artifacts = CompilerSession::compile_source(
-                "nested.loko",
-                &source,
-                RuntimeMode::RunMainTraced {
-                    detail: ExecutionTraceDetail::Instructions,
-                },
-            );
+            // A shallow stack keeps the runaway recursion's instructions
+            // within the trace's limit.
+            let mut session = CompilerSession::new();
+            session.set_run_limits(RunLimits {
+                max_call_depth: 256,
+                ..RunLimits::DEFAULT
+            });
+            let id = session.add_source("nested.loko", &source);
+            let artifacts = session
+                .compile(
+                    id,
+                    RuntimeMode::RunMainTraced {
+                        detail: ExecutionTraceDetail::Instructions,
+                    },
+                )
+                .expect("the source was added");
             assert!(
                 artifacts.diagnostics.is_empty(),
                 "{:?}",
@@ -28688,6 +28858,132 @@ end;
         let one = runtime.call_function(&artifacts, "one", &[], None);
         assert_eq!(one.expect("one runs").value, FunctionValue::Integer(1));
         assert_eq!(on_marked(&runtime), Limits::default().fuel - 1);
+    }
+
+    const LIMITED_PROGRAM: &str = "\
+define class <cell> (<object>)
+  constant slot x :: <integer>, required-init-keyword: x:;
+end;
+define function down(n :: <integer>) => <integer>
+  if (n = 0) 0 else 1 + down(n - 1) end
+end;
+define function reads(n :: <integer>) => <integer>
+  let c = make(<cell>, x: 1);
+  let total = 0;
+  for (i from 0 below n) total := total + c.x end;
+  total
+end;";
+
+    fn trap_of(outcome: Result<FunctionCallOutcome, FunctionCallError>) -> Trap {
+        match outcome {
+            Err(FunctionCallError::Trap { trap, .. }) => trap.trap,
+            other => panic!("expected a trap, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_limits_bound_call_depth_and_fuel_for_each_runtime() {
+        let mut artifacts = CompilerSession::compile_source(
+            "limited.loko",
+            LIMITED_PROGRAM,
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        assert_eq!(artifacts.run_limits(), RunLimits::DEFAULT);
+        let int = FunctionValue::Integer;
+
+        // The defaults allow tens of thousands of frames.
+        let mut runtime = artifacts.runtime().expect("tape is available");
+        let deep = runtime.call_function(&artifacts, "down", &[int(50_000)], None);
+        assert_eq!(deep.expect("recursion runs").value, int(50_000));
+
+        // Limits set on a runtime apply to its next call, on the VM it kept.
+        runtime.set_run_limits(RunLimits {
+            max_call_depth: 1_000,
+            ..RunLimits::DEFAULT
+        });
+        let shallow = runtime.call_function(&artifacts, "down", &[int(500)], None);
+        assert_eq!(shallow.expect("within the depth").value, int(500));
+        assert!(matches!(
+            trap_of(runtime.call_function(&artifacts, "down", &[int(2_000)], None)),
+            Trap::CallDepthExceeded
+        ));
+
+        // Each slot read is a host call, charged as fuel: running out of
+        // fuel ends the loop, and no separate count of host calls does.
+        let fuel = 100_000;
+        runtime.set_run_limits(RunLimits {
+            fuel,
+            ..RunLimits::DEFAULT
+        });
+        let reads = fuel / (runtime::HOST_CALL_FUEL + 1);
+        let few = runtime.call_function(&artifacts, "reads", &[int(1_000)], None);
+        assert_eq!(few.expect("within the fuel").value, int(1_000));
+        let too_many = i64::try_from(reads).expect("small");
+        assert!(matches!(
+            trap_of(runtime.call_function(&artifacts, "reads", &[int(too_many)], None)),
+            Trap::FuelExceeded
+        ));
+
+        // Artifacts' limits govern their own calls and the runtimes they make.
+        artifacts.set_run_limits(RunLimits {
+            max_call_depth: 1_000,
+            ..RunLimits::DEFAULT
+        });
+        assert!(matches!(
+            trap_of(artifacts.call_function("down", &[int(2_000)], None)),
+            Trap::CallDepthExceeded
+        ));
+        let mut runtime = artifacts.runtime().expect("tape is available");
+        assert_eq!(runtime.run_limits(), artifacts.run_limits());
+        assert!(matches!(
+            trap_of(runtime.call_function(&artifacts, "down", &[int(2_000)], None)),
+            Trap::CallDepthExceeded
+        ));
+    }
+
+    #[test]
+    fn a_session_compiles_artifacts_that_run_under_its_limits() {
+        let source =
+            format!("{LIMITED_PROGRAM}\ndefine function main() => <integer> down(2000) end;");
+        let mut session = CompilerSession::new();
+        let id = session.add_source("limited.loko", &source);
+        let ran = session.compile(id, RuntimeMode::RunMain).expect("added");
+        assert!(matches!(
+            ran.runtime_result,
+            Some(RuntimeResult::Returned(FunctionValue::Integer(2_000)))
+        ));
+        let limits = RunLimits {
+            max_call_depth: 1_000,
+            ..RunLimits::DEFAULT
+        };
+        session.set_run_limits(limits);
+        assert_eq!(session.run_limits(), limits);
+        let trapped = session.compile(id, RuntimeMode::RunMain).expect("added");
+        assert_eq!(trapped.run_limits(), limits);
+        assert!(matches!(
+            trapped.runtime_result,
+            Some(RuntimeResult::Trap { ref trap }) if matches!(trap.trap, Trap::CallDepthExceeded)
+        ));
+
+        // An incremental session reruns `main` when only its limits change.
+        let mut incremental = IncrementalCompilerSession::new();
+        let id = incremental.add_source("limited.loko", &source);
+        let ran = incremental
+            .compile(id, RuntimeMode::RunMain)
+            .expect("added");
+        assert!(matches!(
+            ran.artifacts.runtime_result,
+            Some(RuntimeResult::Returned(_))
+        ));
+        incremental.set_run_limits(limits);
+        let trapped = incremental
+            .compile(id, RuntimeMode::RunMain)
+            .expect("added");
+        assert!(matches!(
+            trapped.artifacts.runtime_result,
+            Some(RuntimeResult::Trap { .. })
+        ));
     }
 
     #[test]
