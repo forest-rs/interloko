@@ -1,0 +1,55 @@
+// expect: run 1105
+// expect: diagnostics 0
+
+// As in Dylan, `false-or(t)` is the type of `t`'s values or `#f`, usable in
+// any declaration: a slot, a `let`, a parameter and a result. Its values
+// are boxed `<object>`s, checked where they meet the declaration, and a
+// test narrows one: `frame` is an `<environment>` wherever it is true, so
+// `frame.bindings` and `e.parent` are proved, not dispatched blindly, and
+// `c` a `<character>`, so `whitespace?` takes it with a check typing
+// proves, as any declaration would.
+
+define class <environment> (<object>)
+  constant slot bindings :: <table> = make(<table>);
+  constant slot parent :: false-or(<environment>), init-value: #f, init-keyword: parent:;
+end;
+
+// The innermost frame binding `name`, or `#f`.
+define function binding-frame(env :: <environment>, name :: <symbol>)
+ => false-or(<environment>)
+  let frame :: false-or(<environment>) = env;
+  until (~frame | key-exists?(frame.bindings, name))
+    frame := frame.parent
+  end;
+  frame
+end;
+
+define function depth(e :: false-or(<environment>)) => <integer>
+  if (e) 1 + depth(e.parent) else 0 end
+end;
+
+// The character at `p`, or `#f` at the end.
+define function peek(s :: <string>, p :: <string-position>) => false-or(<character>)
+  if (p < end-position(s)) s[p] else #f end
+end;
+
+define function leading-blanks(s :: <string>) => <integer>
+  let n = 0;
+  let p = start-position(s);
+  let c = peek(s, p);
+  while (c & whitespace?(c))
+    n := n + 1;
+    p := next-position(s, p);
+    c := peek(s, p)
+  end;
+  n
+end;
+
+define function main() => <integer>
+  let global = make(<environment>);
+  global.bindings[#x] := 1;
+  let inner = make(<environment>, parent: make(<environment>, parent: global));
+  let found = if (binding-frame(inner, #x) == global) 1000 else 0 end;
+  let missing = if (binding-frame(inner, #y)) 0 else 100 end;
+  found + missing + depth(inner) + leading-blanks("  x")
+end;

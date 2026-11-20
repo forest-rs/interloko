@@ -197,6 +197,14 @@ pub enum DiagnosticCode {
     LimitedTypeOption,
     /// A `limited(...)` bound is not an `<integer>` literal.
     LimitedTypeBound,
+    /// A type a union cannot hold is a member of one: a callable type, a
+    /// class object type, or a singleton of a value types cannot name.
+    UnionMemberType,
+    /// A union has more members than the type lattice holds exactly.
+    UnionTooLarge,
+    /// A callable type takes or returns a union, which calls through a
+    /// callable value cannot check yet.
+    UnionInCallableType,
     /// A `limited(...)` type's `min:` is above its `max:`, so no value has it.
     EmptyLimitedType,
     /// A method specializes a limited-type generic parameter on a class instead of restating the limited type.
@@ -476,6 +484,9 @@ impl DiagnosticCode {
         Self::LimitedTypeBase,
         Self::LimitedTypeOption,
         Self::LimitedTypeBound,
+        Self::UnionMemberType,
+        Self::UnionTooLarge,
+        Self::UnionInCallableType,
         Self::EmptyLimitedType,
         Self::LimitedParameterSpecializer,
         Self::ComparisonOperandTypeMismatch,
@@ -641,6 +652,9 @@ impl DiagnosticCode {
             Self::LimitedTypeBase => "sem.limited-type-base",
             Self::LimitedTypeOption => "sem.limited-type-option",
             Self::LimitedTypeBound => "sem.limited-type-bound",
+            Self::UnionMemberType => "sem.union-member-type",
+            Self::UnionTooLarge => "sem.union-too-large",
+            Self::UnionInCallableType => "sem.union-in-callable-type",
             Self::EmptyLimitedType => "sem.empty-limited-type",
             Self::LimitedParameterSpecializer => "sem.limited-parameter-specializer",
             Self::ComparisonOperandTypeMismatch => "sem.comparison-operand-type-mismatch",
@@ -807,6 +821,9 @@ impl DiagnosticCode {
             "sem.limited-type-base" => Self::LimitedTypeBase,
             "sem.limited-type-option" => Self::LimitedTypeOption,
             "sem.limited-type-bound" => Self::LimitedTypeBound,
+            "sem.union-member-type" => Self::UnionMemberType,
+            "sem.union-too-large" => Self::UnionTooLarge,
+            "sem.union-in-callable-type" => Self::UnionInCallableType,
             "sem.empty-limited-type" => Self::EmptyLimitedType,
             "sem.limited-parameter-specializer" => Self::LimitedParameterSpecializer,
             "sem.comparison-operand-type-mismatch" => Self::ComparisonOperandTypeMismatch,

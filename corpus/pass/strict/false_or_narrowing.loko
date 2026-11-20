@@ -1,0 +1,28 @@
+// expect: run 13
+// expect: diagnostics 0
+
+// Strict typing proves what a `false-or` declaration's readers rely on: a
+// true test narrows the value to the type besides `#f`, so the slot read
+// and the recursive call's argument check are proved, and a value of the
+// type itself needs no check at all.
+
+define class <node> (<object>)
+  constant slot parent :: false-or(<node>), init-value: #f, init-keyword: parent:;
+end;
+
+define strict function depth(n :: false-or(<node>)) => <integer>
+  if (n) 1 + depth(n.parent) else 0 end
+end;
+
+define strict function chain() => <node>
+  make(<node>, parent: make(<node>, parent: make(<node>)))
+end;
+
+// A built-in's parameter takes the narrowed value too.
+define strict function blank?(c :: false-or(<character>)) => <boolean>
+  c & whitespace?(c)
+end;
+
+define function main() => <integer>
+  depth(chain()) + if (~blank?(#f) & blank?(' ')) 10 else 0 end
+end;

@@ -758,13 +758,15 @@ for an overflow, a vector of the operation's operands),
 
 The expected type is a type object, an instance of the abstract kernel
 class `<type>`, so a handler can test values against it, compare it and
-name it rather than parse text. Following Dylan, there are three kinds:
+name it rather than parse text. Following Dylan, there are these kinds:
 
 | Expected type | Type object | Inspect with |
 | --- | --- | --- |
 | a class, such as `<circle>` or `<integer>` (a cast, an entry check, an overflow) | the class object, a `<class>` | `class-name`, the class MOP |
 | a limited integer type, such as `<i32>` or `limited(<integer>, min: 0, max: 255)` (a range check) | a `<limited-integer>` | `limited-integer-base` (always `<integer>`), `limited-integer-min`, `limited-integer-max` (each an `<integer>`, or `#f` for no bound) |
 | the class objects of a class and its subclasses, written `class <shape>` | a `<subclass-type>`, printed `subclass(<shape>)` | `subclass-type-class` |
+| one value, written `singleton(#f)` (a check of a union declaration) | a `<singleton>` | `type-name`, `instance?` |
+| any member's values, written `type-union(<a>, <b>)` or `false-or(<a>)` (a check of a union declaration) | a `<union>`, printed as written | `type-name`, `instance?` |
 
 ```loko
 define function largest(expected :: <type>) => <integer>

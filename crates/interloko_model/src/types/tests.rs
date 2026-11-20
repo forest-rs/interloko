@@ -743,6 +743,15 @@ fn display_uses_source_names() {
         )),
         "type-union(exactly <circle>, <boolean>, <callable>)"
     );
+    // One type or `#f` is written as Dylan writes it.
+    assert_eq!(
+        show(Type::union([Atom::Cone(SHAPE), Atom::Boolean(false)], &Toy)),
+        "false-or(<shape>)"
+    );
+    assert_eq!(
+        show(Type::union([Atom::Cone(SHAPE), Atom::Boolean(true)], &Toy)),
+        "type-union(<shape>, singleton(#t))"
+    );
 }
 
 /// [`Toy`] with `<shape>` sealed and abstract, holding `<circle>`,

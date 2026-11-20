@@ -1,0 +1,26 @@
+// expect: run 121
+// expect: diagnostics 0
+
+// A `for` variable and a binding of a values pattern may declare a union
+// too: each value is checked against it as a `let`'s is.
+
+define class <node> (<object>) end;
+
+define function two(x) => (<object>, <integer>)
+  values(x, 1)
+end;
+
+define function main() => <integer>
+  let total = 0;
+  let items = make(<stretchy-vector>);
+  add!(items, #f);
+  add!(items, make(<node>));
+  add!(items, #f);
+  for (n :: false-or(<node>) in items)
+    total := total + if (n) 0 else 10 end
+  end;
+  let (first :: false-or(<node>), second) = two(make(<node>));
+  if (first) total := total + 100 end;
+  let (none :: false-or(<node>), more) = two(#f);
+  total + more + if (none) 1000 else 0 end
+end;

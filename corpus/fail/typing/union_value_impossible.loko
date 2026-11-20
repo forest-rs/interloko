@@ -1,0 +1,13 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.local-type-mismatch
+// expect: diagnostic contains local `parent` expects false-or(<shape>) but initializer has <string>
+
+// A value that can never be one of a union's is an error where it meets
+// the declaration, as one of a class it can never be an instance of is.
+
+define class <shape> (<object>) end;
+
+define function main() => <integer>
+  let parent :: false-or(<shape>) = "none";
+  0
+end;

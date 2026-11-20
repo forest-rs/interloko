@@ -1820,6 +1820,10 @@ fn method_origin_label(origin: MethodOrigin) -> String {
 fn value_kind_label(module: &sem::Module, kind: ValueKind) -> String {
     match kind {
         ValueKind::Any => "<object>".into(),
+        ValueKind::Union(union) => module.union_type_object(union).map_or_else(
+            || "<union>".into(),
+            |union| union.display(module).to_string(),
+        ),
         ValueKind::I64 => "<integer>".into(),
         ValueKind::F64 => "<double-float>".into(),
         ValueKind::I32 => "<i32>".into(),

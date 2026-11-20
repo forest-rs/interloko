@@ -456,6 +456,14 @@ impl<'a> Analysis<'a> {
                         Vec::new(),
                     )
                 }
+                sem::EntryTarget::Union(union) => {
+                    let target = self.module.kind_type(sem::ValueKind::Union(union));
+                    (
+                        decide(self.module, env, &passed.ty, &target, CAST_RULES),
+                        TypingExpectation::Type(target),
+                        Vec::new(),
+                    )
+                }
                 sem::EntryTarget::Unbox(kind) => {
                     let target = self.module.kind_type(kind);
                     (
@@ -665,9 +673,11 @@ impl<'a> Analysis<'a> {
         Fact { ty, reason }
     }
 
-    /// The type of every value sem's category for `expr` can hold.
+    /// Every value `expr` may produce, as sem's category says; a read of a
+    /// declaration of a union type is bounded by the union, which the
+    /// declaration checked.
     fn bound(&self, expr: &sem::Expr) -> Type {
-        self.module.kind_type(self.module.expr_kind(expr))
+        self.module.kind_type(self.module.recorded_kind(expr))
     }
 
     /// The type of a call `expr` whose callee declares `ranges` for its
@@ -1332,6 +1342,40 @@ impl<'a> Analysis<'a> {
                     None,
                 );
                 self.fact(ReasonKind::Check { site: *site }, *span, ty, from)
+            }
+            E::CheckUnion {
+                value,
+                union,
+                site,
+                span,
+            } => {
+                let value = self.eval(env, value);
+                let target = module.kind_type(sem::ValueKind::Union(*union));
+                let assumes = self.class_assumptions(&[&value.ty, &target]);
+                let decided = decide(module, env, &value.ty, &target, CAST_RULES);
+                // As for a cast, a failed check's `use-value` replacement
+                // is any value of the union, which the check tests again.
+                let ty = if decided.0 == TypingVerdict::Proved {
+                    value.ty.meet(&target, module)
+                } else {
+                    target.clone()
+                };
+                self.record(
+                    *site,
+                    (TypingCheck::Cast, CheckOrigin::of(false)),
+                    decided,
+                    *span,
+                    TypingExpectation::Type(target),
+                    core::slice::from_ref(&value),
+                    assumes,
+                    None,
+                );
+                self.fact(
+                    ReasonKind::Check { site: *site },
+                    *span,
+                    ty,
+                    vec![value.reason],
+                )
             }
             E::MakeObject {
                 class,
@@ -3107,6 +3151,7 @@ const fn site_of(expr: &sem::Expr) -> Option<SiteId> {
     match expr {
         sem::Expr::GenericCall { site, .. }
         | sem::Expr::Cast { site, .. }
+        | sem::Expr::CheckUnion { site, .. }
         | sem::Expr::InstanceOf { site, .. }
         | sem::Expr::InstanceOfLimited { site, .. }
         | sem::Expr::Convert { site, .. }
@@ -3207,6 +3252,7 @@ fn walk(module: &sem::Module, expr: &sem::Expr, visit: &mut impl FnMut(&sem::Exp
         | E::InstanceOf { value: inner, .. }
         | E::InstanceOfLimited { value: inner, .. }
         | E::Cast { value: inner, .. }
+        | E::CheckUnion { value: inner, .. }
         | E::AccessorCall {
             receiver: inner, ..
         } => walk(module, inner, visit),

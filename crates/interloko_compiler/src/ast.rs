@@ -145,6 +145,40 @@ pub enum TypeExpr {
     },
     /// A limited type: `limited(<integer>, min: 0, max: 255)`.
     Limited(LimitedTypeExpr),
+    /// A union type: `type-union(<a>, <b>)`, whose values are those of any
+    /// member.
+    Union {
+        /// The member types, in source order.
+        members: Vec<TypeExpr>,
+        /// Source span, from `type-union` to the closing parenthesis.
+        span: Span,
+    },
+    /// `false-or(<a>)`: `<a>`'s values or `#f`, the union of the type and
+    /// `singleton(#f)`.
+    FalseOr {
+        /// The type besides `#f`.
+        base: Box<TypeExpr>,
+        /// Source span, from `false-or` to the closing parenthesis.
+        span: Span,
+    },
+    /// A singleton type: `singleton(#f)`, whose one value is the literal.
+    Singleton {
+        /// The value.
+        value: SingletonLiteral,
+        /// Source span, from `singleton` to the closing parenthesis.
+        span: Span,
+    },
+}
+
+/// The value a `singleton(...)` type holds: a literal types name exactly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SingletonLiteral {
+    /// `#t` or `#f`.
+    Boolean(bool),
+    /// An `<integer>` literal, possibly negative.
+    Integer(i64),
+    /// Any other literal, as written, which types cannot name yet.
+    Unsupported(String),
 }
 
 impl TypeExpr {
@@ -155,7 +189,10 @@ impl TypeExpr {
             Self::Named { span, .. }
             | Self::ClassObject { span, .. }
             | Self::Callable { span, .. }
-            | Self::Limited(LimitedTypeExpr { span, .. }) => *span,
+            | Self::Limited(LimitedTypeExpr { span, .. })
+            | Self::Union { span, .. }
+            | Self::FalseOr { span, .. }
+            | Self::Singleton { span, .. } => *span,
         }
     }
 
@@ -232,8 +269,9 @@ pub struct ResultAnnotation {
 
 impl core::fmt::Display for TypeExpr {
     /// Writes the type as source would spell it: `<circle>`,
-    /// `class <shape>`, `callable(<integer>) => <circle>`, or
-    /// `limited(<integer>, min: 0, max: 255)`.
+    /// `class <shape>`, `callable(<integer>) => <circle>`,
+    /// `limited(<integer>, min: 0, max: 255)`, `type-union(<a>, <b>)`,
+    /// `false-or(<a>)` or `singleton(#f)`.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Named { name, .. } => f.write_str(name),
@@ -264,6 +302,23 @@ impl core::fmt::Display for TypeExpr {
                 }
                 f.write_str(")")
             }
+            Self::Union { members, .. } => {
+                f.write_str("type-union(")?;
+                for (index, member) in members.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{member}")?;
+                }
+                f.write_str(")")
+            }
+            Self::FalseOr { base, .. } => write!(f, "false-or({base})"),
+            Self::Singleton { value, .. } => match value {
+                SingletonLiteral::Boolean(true) => f.write_str("singleton(#t)"),
+                SingletonLiteral::Boolean(false) => f.write_str("singleton(#f)"),
+                SingletonLiteral::Integer(value) => write!(f, "singleton({value})"),
+                SingletonLiteral::Unsupported(text) => write!(f, "singleton({text})"),
+            },
         }
     }
 }
@@ -4279,6 +4334,70 @@ impl<'tree> Lowering<'tree> {
         }
         if ident_at(index, "limited") && kind_at(index + 1) == Some(TokenKind::LParen) {
             return self.limited_type_from_tokens(tokens, index);
+        }
+        if (ident_at(index, "type-union") || ident_at(index, "false-or"))
+            && kind_at(index + 1) == Some(TokenKind::LParen)
+        {
+            let constructor = self.tree.tokens[tokens[index]];
+            index += 2;
+            let mut members = Vec::new();
+            loop {
+                let (member, next) = self.type_annotation_from_tokens(tokens, index)?;
+                members.push(member);
+                index = next;
+                match kind_at(index)? {
+                    TokenKind::Comma if kind_at(index + 1) == Some(TokenKind::RParen) => {
+                        index += 1;
+                        break;
+                    }
+                    TokenKind::Comma => index += 1,
+                    TokenKind::RParen => break,
+                    _ => return None,
+                }
+            }
+            let span = constructor.span.cover(self.tree.tokens[tokens[index]].span);
+            let ty = if constructor.text(&self.tree.source) == "false-or" {
+                let [base] = <[TypeExpr; 1]>::try_from(members).ok()?;
+                TypeExpr::FalseOr {
+                    base: Box::new(base),
+                    span,
+                }
+            } else {
+                TypeExpr::Union { members, span }
+            };
+            return Some((ty, index + 1));
+        }
+        if ident_at(index, "singleton") && kind_at(index + 1) == Some(TokenKind::LParen) {
+            let constructor = self.tree.tokens[tokens[index]];
+            index += 2;
+            let negative = kind_at(index) == Some(TokenKind::Minus);
+            if negative {
+                index += 1;
+            }
+            let token = self.tree.tokens[*tokens.get(index)?];
+            let text = token.text(&self.tree.source);
+            let value = match (token.kind, text) {
+                (TokenKind::Bool, "#t") if !negative => SingletonLiteral::Boolean(true),
+                (TokenKind::Bool, "#f") if !negative => SingletonLiteral::Boolean(false),
+                (TokenKind::Number, digits) => integer_bound(negative, digits).map_or_else(
+                    || {
+                        SingletonLiteral::Unsupported(if negative {
+                            format!("-{digits}")
+                        } else {
+                            digits.into()
+                        })
+                    },
+                    SingletonLiteral::Integer,
+                ),
+                _ => return None,
+            };
+            if kind_at(index + 1)? != TokenKind::RParen {
+                return None;
+            }
+            let span = constructor
+                .span
+                .cover(self.tree.tokens[tokens[index + 1]].span);
+            return Some((TypeExpr::Singleton { value, span }, index + 2));
         }
         let class_object = kind_at(index) == Some(TokenKind::Class);
         if class_object {

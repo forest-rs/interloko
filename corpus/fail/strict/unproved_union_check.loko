@@ -1,0 +1,14 @@
+// expect: diagnostics 1
+// expect: diagnostic code typing.unproved-cast
+// expect: diagnostic contains function adopt is strict (declared), but typing cannot prove that <object> is false-or(<shape>)
+
+// A value meeting a `false-or` declaration is checked against it, and a
+// strict definition must prove that check as it must prove a cast.
+
+define class <shape> (<object>)
+  constant slot parent :: false-or(<shape>), init-value: #f, init-keyword: parent:;
+end;
+
+define strict function adopt(x) => <shape>
+  make(<shape>, parent: x)
+end;

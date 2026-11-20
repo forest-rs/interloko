@@ -66,7 +66,9 @@ method-specializers(method)         => <vector> of class metaobjects or #f
 ```
 
 Type object queries (a type object is a `<type>`: a class object, a
-`<limited-integer>` or a `<subclass-type>`):
+`<limited-integer>`, a `<subclass-type>`, or a `<singleton>` or `<union>`
+a check of a union declaration expects, which `instance?` and `type-name`
+take as any type object):
 
 ```text
 instance?(value, type)              => <boolean>, for a type object computed at run time

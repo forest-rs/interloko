@@ -1,0 +1,17 @@
+// expect: diagnostics 2
+// expect: diagnostic code sem.union-member-type
+// expect: diagnostic contains a union cannot hold `class <shape>`
+// expect: diagnostic contains a union cannot hold `singleton(1.5)`
+
+// A union holds classes, limited integer types and singletons of `#t`,
+// `#f` or an `<integer>`, the values types can name exactly.
+
+define class <shape> (<object>) end;
+
+define function kind(x :: type-union(<shape>, class <shape>)) => <integer>
+  1
+end;
+
+define function half(x :: singleton(1.5)) => <integer>
+  1
+end;

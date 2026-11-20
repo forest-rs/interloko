@@ -105,7 +105,7 @@ impl InterlokoHost {
                 }),
             ),
             (true, _) => return Err(RuntimeError::CannotBoxValue),
-            (false, values) => (values, site.expected),
+            (false, values) => (values, site.expected.clone()),
         };
         let value = match values {
             [value] => self.box_top_value(value.clone())?,

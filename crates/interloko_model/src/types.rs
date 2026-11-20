@@ -751,8 +751,8 @@ impl Type {
     }
 
     /// Returns a value that displays this type with source names, such as
-    /// `<circle>`, `exactly <shape>`, `<i32>`, `singleton(7)`, or
-    /// `type-union(<string>, <boolean>)`.
+    /// `<circle>`, `exactly <shape>`, `<i32>`, `singleton(7)`,
+    /// `false-or(<circle>)` or `type-union(<string>, <boolean>)`.
     #[must_use]
     pub fn display<'a, N: TypeNames + ClassHierarchy + ?Sized>(
         &'a self,
@@ -781,6 +781,12 @@ impl<N: TypeNames + ClassHierarchy + ?Sized> fmt::Display for TypeDisplay<'_, N>
             .collect::<Vec<_>>();
         match shown.as_slice() {
             [atom] => self.atom(out, atom, both_booleans),
+            // One type or `#f`, as Dylan writes it.
+            [atom, Atom::Boolean(false)] | [Atom::Boolean(false), atom] if !both_booleans => {
+                out.write_str("false-or(")?;
+                self.atom(out, atom, both_booleans)?;
+                out.write_str(")")
+            }
             _ => {
                 out.write_str("type-union(")?;
                 for (index, atom) in shown.iter().enumerate() {

@@ -1,22 +1,24 @@
 //! Type objects in the runtime heap.
 //!
-//! A [`TypeObject`] is a class object, a `<limited-integer>` or a
-//! `<subclass-type>`: a `<type-error>` holds the type its failed check
-//! expected as one, and `instance?` tests values against one. This module
-//! makes them, reads them back, and tests values against them.
+//! A [`TypeObject`] is a class object, a `<limited-integer>`, a
+//! `<subclass-type>`, a `<singleton>` or a `<union>`: a `<type-error>` holds
+//! the type its failed check expected as one, and `instance?` tests values
+//! against one. This module makes them, reads them back, and tests values
+//! against them.
 
 use alloc::string::{String, ToString};
 
 use execution_tape::host::{HostError, ValueRef};
 use execution_tape::value::Value;
 use interloko_model::BuiltinValueClass;
-use interloko_model::type_object::TypeObject;
+use interloko_model::type_object::{SingletonValue, TypeObject};
 
 use crate::{InterlokoHost, RuntimeError, RuntimeObject, RuntimeObjectStorage};
 
 impl InterlokoHost {
     /// Makes the type object `ty`: a class object for a class, otherwise a
-    /// `<limited-integer>` or `<subclass-type>` instance.
+    /// `<limited-integer>`, `<subclass-type>`, `<singleton>` or `<union>`
+    /// instance.
     pub fn make_type_object(&mut self, ty: &TypeObject) -> Result<Value, RuntimeError> {
         let missing =
             |kind: BuiltinValueClass| RuntimeError::MissingBuiltinClass { name: kind.name() };
@@ -35,6 +37,14 @@ impl InterlokoHost {
             TypeObject::Subclass(bound) => (
                 BuiltinValueClass::SubclassType,
                 RuntimeObjectStorage::SubclassType { bound },
+            ),
+            TypeObject::Singleton(_) => (
+                BuiltinValueClass::SingletonType,
+                RuntimeObjectStorage::CompoundType(ty.clone()),
+            ),
+            TypeObject::Union(_) => (
+                BuiltinValueClass::UnionType,
+                RuntimeObjectStorage::CompoundType(ty.clone()),
             ),
         };
         let class = self.builtin_class(kind).map_err(|_| missing(kind))?;
@@ -59,8 +69,9 @@ impl InterlokoHost {
     }
 
     /// Whether `value`, boxed or not, is an instance of `ty`: of the class
-    /// or a subclass, an `<integer>` in the range, or a class object naming
-    /// the bound or a subclass of it.
+    /// or a subclass, an `<integer>` in the range, a class object naming
+    /// the bound or a subclass of it, the singleton's value, or an instance
+    /// of a union's member.
     #[must_use]
     pub fn value_is_type_instance(&self, value: ValueRef<'_>, ty: &TypeObject) -> bool {
         match *ty {
@@ -75,6 +86,29 @@ impl InterlokoHost {
                         if self.layout.is_same_or_subclass(class, bound)
                 )
             }),
+            TypeObject::Singleton(SingletonValue::Integer(expected)) => {
+                self.integer_value(value) == Some(expected)
+            }
+            TypeObject::Singleton(SingletonValue::Boolean(expected)) => {
+                self.boolean_value(value) == Some(expected)
+            }
+            TypeObject::Union(ref members) => members
+                .iter()
+                .any(|member| self.value_is_type_instance(value, member)),
+        }
+    }
+
+    /// The boolean `value` holds, boxed or not.
+    fn boolean_value(&self, value: ValueRef<'_>) -> Option<bool> {
+        match value {
+            ValueRef::Bool(value) => Some(value),
+            ValueRef::Obj(obj) if obj.host_type == crate::INTERLOKO_VALUE_TYPE => {
+                match self.boxed_value(obj).ok()? {
+                    Value::Bool(value) => Some(value),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -107,13 +141,14 @@ impl InterlokoHost {
 
 impl RuntimeObjectStorage {
     /// The type object this storage is, when it is one.
-    pub(crate) const fn type_object(&self) -> Option<TypeObject> {
+    pub(crate) fn type_object(&self) -> Option<TypeObject> {
         match *self {
             Self::ClassMeta { class } => Some(TypeObject::Class(class)),
             Self::LimitedIntegerType { range, named } => {
                 Some(TypeObject::LimitedInteger { range, named })
             }
             Self::SubclassType { bound } => Some(TypeObject::Subclass(bound)),
+            Self::CompoundType(ref ty) => Some(ty.clone()),
             _ => None,
         }
     }
@@ -141,7 +176,8 @@ mod tests {
         }
     }
 
-    /// `<object>`, `<shape>`, `<circle>`, `<integer>`, then the type classes.
+    /// `<object>`, `<shape>`, `<circle>`, `<integer>`, the type classes,
+    /// then `<boolean>`.
     fn host() -> InterlokoHost {
         let builtin = |kind: BuiltinValueClass, superclass| {
             class(
@@ -160,6 +196,9 @@ mod tests {
                 builtin(BuiltinValueClass::Class, Some(ClassId(4))),
                 builtin(BuiltinValueClass::LimitedIntegerType, Some(ClassId(4))),
                 builtin(BuiltinValueClass::SubclassType, Some(ClassId(4))),
+                builtin(BuiltinValueClass::SingletonType, Some(ClassId(4))),
+                builtin(BuiltinValueClass::UnionType, Some(ClassId(4))),
+                builtin(BuiltinValueClass::Boolean, Some(OBJECT_CLASS_ID)),
             ],
             generics: Vec::new(),
             methods: Vec::new(),
@@ -179,9 +218,20 @@ mod tests {
             (TypeObject::named(LimitedInteger::I32), "<i32>"),
             (byte, "limited(<integer>, min: 0, max: 255)"),
             (TypeObject::Subclass(ClassId(1)), "subclass(<shape>)"),
+            (
+                TypeObject::Singleton(SingletonValue::Boolean(false)),
+                "singleton(#f)",
+            ),
+            (
+                TypeObject::false_or(TypeObject::Class(ClassId(2))),
+                "false-or(<circle>)",
+            ),
         ] {
             let value = host.make_type_object(&ty).expect("type object");
-            assert_eq!(host.type_object(ValueRef::from_value(&value)), Some(ty));
+            assert_eq!(
+                host.type_object(ValueRef::from_value(&value)),
+                Some(ty.clone())
+            );
             assert_eq!(host.type_object_name(&ty), name);
             assert_eq!(host.describe_value(ValueRef::from_value(&value)), name);
         }
@@ -203,6 +253,7 @@ mod tests {
         let is = |host: &InterlokoHost, value: &Value, ty: TypeObject| {
             host.value_is_type_instance(ValueRef::from_value(value), &ty)
         };
+        let byte = || byte.clone();
         assert!(is(&host, &circle, TypeObject::Class(ClassId(1))));
         assert!(!is(&host, &circle, TypeObject::Subclass(ClassId(1))));
         assert!(is(
@@ -211,10 +262,20 @@ mod tests {
             TypeObject::Subclass(OBJECT_CLASS_ID)
         ));
         assert!(!is(&host, &shape_class, TypeObject::Subclass(ClassId(2))));
-        assert!(is(&host, &Value::I64(255), byte));
-        assert!(is(&host, &Value::U32(7), byte));
-        assert!(!is(&host, &boxed, byte));
+        assert!(is(&host, &Value::I64(255), byte()));
+        assert!(is(&host, &Value::U32(7), byte()));
+        assert!(!is(&host, &boxed, byte()));
         assert!(is(&host, &boxed, TypeObject::named(LimitedInteger::U32)));
-        assert!(!is(&host, &circle, byte));
+        assert!(!is(&host, &circle, byte()));
+        let maybe_circle = TypeObject::false_or(TypeObject::Class(ClassId(2)));
+        let boxed_false = host.box_top_value(Value::Bool(false)).expect("box");
+        assert!(is(&host, &circle, maybe_circle.clone()));
+        assert!(is(&host, &Value::Bool(false), maybe_circle.clone()));
+        assert!(is(&host, &boxed_false, maybe_circle.clone()));
+        assert!(!is(&host, &Value::Bool(true), maybe_circle.clone()));
+        assert!(!is(&host, &boxed, maybe_circle));
+        let three = TypeObject::Singleton(SingletonValue::Integer(3));
+        assert!(is(&host, &Value::I64(3), three.clone()));
+        assert!(!is(&host, &Value::I64(4), three));
     }
 }

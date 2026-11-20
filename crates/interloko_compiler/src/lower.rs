@@ -78,7 +78,7 @@ use crate::syntax::Span;
 use crate::typing;
 use interloko_model::condition::{CONSTANT_CYCLE_CODE, ConstantCycleErrorSlot, TypeErrorKind};
 use interloko_model::sealing::ClosedWorld;
-use interloko_model::type_object::TypeObject;
+use interloko_model::type_object::{SingletonValue, TypeObject};
 use interloko_model::types::IntRange;
 use interloko_runtime::RuntimeLayout;
 use interloko_runtime::code::{Contracts, DispatchCase, GenericDispatch};
@@ -3190,6 +3190,9 @@ impl<'module> Lowering<'module> {
     ) -> Result<Function, LowerError> {
         let mut body = BodyLowering::for_function(self.module, &self.ids, function)?
             .typed(self.facts, Some(function.definition));
+        // A function used as a value may be entered through it, by callers
+        // that check none of its union parameters.
+        body.check_union_entry(&function.entry_checks, function.span)?;
         body.home_params(&function.params, function.span)?;
         let rets = self.value_kinds(&function.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
@@ -4072,6 +4075,7 @@ impl<'module> Lowering<'module> {
         let mut body =
             BodyLowering::for_closure(self.module, &self.ids, closure)?.typed(self.facts, owner);
         body.check_closure_entry(closure)?;
+        body.check_union_entry(&closure.entry_checks, closure.span)?;
         body.home_params(&closure.params, closure.span)?;
         let rets = self.value_kinds(&closure.result_kinds)?;
         let ret = rets.first().copied().unwrap_or(ValueKind::Any);
@@ -4604,6 +4608,9 @@ fn collect_known_callable_uses_in_expr(expr: &sem::Expr, uses: &mut CallableUses
             value: condition, ..
         }
         | sem::Expr::Cast {
+            value: condition, ..
+        }
+        | sem::Expr::CheckUnion {
             value: condition, ..
         } => {
             collect_known_callable_uses_in_expr(condition, uses);
@@ -6141,6 +6148,47 @@ impl<'module> BodyLowering<'module> {
         }
         this.next_reg = register_at(closure.params.len() + 1);
         Ok(this)
+    }
+
+    /// Checks each union parameter `checks` names on entry, unless typing
+    /// proved its check: its register is a boxed `<object>`, which neither
+    /// the tape nor a callable thunk checks against the union.
+    fn check_union_entry(
+        &mut self,
+        checks: &[sem::EntryCheck],
+        span: Span,
+    ) -> Result<(), LowerError> {
+        for check in checks {
+            let sem::EntryTarget::Union(union) = check.target else {
+                continue;
+            };
+            if self.proved(check.site) {
+                self.record(check.site, CheckCodegen::Elided);
+                continue;
+            }
+            let Some(value) = self
+                .local_regs
+                .get(check.param.0 as usize)
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
+            let union = self
+                .module
+                .union_type_object(union)
+                .cloned()
+                .ok_or_else(|| invalid_semantic("an entry check names no union"))?;
+            let type_error = type_error_site(
+                TypeErrorKind::Entry,
+                union.clone(),
+                check_site_name(self.site_owner, Some(check.site), span),
+                span,
+            );
+            let checked = self.check_union(value, &union, type_error, span)?;
+            self.set_local(check.param, checked)?;
+        }
+        Ok(())
     }
 
     /// Checks a closure's parameters on entry, unless typing proved a check:
@@ -7732,6 +7780,19 @@ impl<'module> BodyLowering<'module> {
                 values.push(self.unwire(*result, kind, None, &site, span)?.reg);
                 continue;
             }
+            // A union result is a boxed `<object>`, checked against the
+            // union as a declaration of it checks a value.
+            if let sem::ValueKind::Union(union) = generic.result_kinds[index] {
+                let union = self
+                    .module
+                    .union_type_object(union)
+                    .cloned()
+                    .ok_or_else(|| invalid_semantic("a generic's result names no union"))?;
+                let type_error =
+                    type_error_site(TypeErrorKind::Entry, union.clone(), site.clone(), span);
+                values.push(self.check_union(*result, &union, type_error, span)?.reg);
+                continue;
+            }
             let target = match generic.result_ranges.get(index).copied().flatten() {
                 Some(range) if result.kind == ValueKind::I64 => {
                     Some(sem::EntryTarget::Range(range))
@@ -8089,7 +8150,7 @@ impl<'module> BodyLowering<'module> {
                 object,
                 class,
                 span,
-            } => self.lower_type_object(*object, *class, *span),
+            } => self.lower_type_object(object.clone(), *class, *span),
             sem::Expr::GenericFunctionObject { generic, span } => {
                 self.lower_generic_meta_object(*generic, *span)
             }
@@ -8320,6 +8381,27 @@ impl<'module> BodyLowering<'module> {
                     return Ok(self.decided_test_value(*site, outcome, *span));
                 }
                 Ok(self.lower_limited_membership(value, *range, *span))
+            }
+            sem::Expr::CheckUnion {
+                value,
+                union,
+                site,
+                span,
+            } => {
+                let value = self.lower_expr(value)?;
+                let value = self.box_any(value, *span)?;
+                if self.proved(*site) {
+                    self.record(*site, CheckCodegen::Elided);
+                    return Ok(value);
+                }
+                let union = self
+                    .module
+                    .union_type_object(*union)
+                    .cloned()
+                    .ok_or_else(|| invalid_semantic("a union check names no union"))?;
+                let type_error =
+                    self.type_error(TypeErrorKind::Cast, union.clone(), Some(*site), *span);
+                self.check_union(value, &union, type_error, *span)
             }
             sem::Expr::Cast {
                 value,
@@ -9406,15 +9488,18 @@ impl<'module> BodyLowering<'module> {
         value: Value,
         span: Span,
     ) -> Result<Value, LowerError> {
-        Ok(if slot_kind == sem::ValueKind::Any {
-            self.box_any(value, span)?
-        } else if slot_kind == sem::ValueKind::I64
-            && matches!(value.kind, ValueKind::I32 | ValueKind::U32)
-        {
-            self.widen_integer(value, span)
-        } else {
-            value
-        })
+        // A union slot holds a boxed `<object>`, as an `<object>` one does.
+        Ok(
+            if matches!(slot_kind, sem::ValueKind::Any | sem::ValueKind::Union(_)) {
+                self.box_any(value, span)?
+            } else if slot_kind == sem::ValueKind::I64
+                && matches!(value.kind, ValueKind::I32 | ValueKind::U32)
+            {
+                self.widen_integer(value, span)
+            } else {
+                value
+            },
+        )
     }
 
     fn lower_class_meta_object(
@@ -12034,7 +12119,7 @@ impl<'module> BodyLowering<'module> {
                     value,
                     class,
                     kind,
-                    error(TypeErrorKind::Entry, expected),
+                    error(TypeErrorKind::Entry, expected.clone()),
                     span,
                 );
                 let Some(range) = range.filter(|_| kind == ValueKind::I64) else {
@@ -13249,6 +13334,105 @@ impl<'module> BodyLowering<'module> {
         result
     }
 
+    /// Checks that the boxed `value` is an instance of `union`, a union or
+    /// singleton type: it tests each member in turn and, when none takes
+    /// the value, signals `type_error`, whose `use-value` replacement it
+    /// tests again. Returns the checked value.
+    fn check_union(
+        &mut self,
+        value: Value,
+        union: &TypeObject,
+        type_error: Box<TypeErrorSite>,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        let members = match union {
+            TypeObject::Union(members) => members.as_slice(),
+            member => core::slice::from_ref(member),
+        };
+        let checked = self.alloc(ValueKind::Any);
+        self.instructions.push(Instr::Move {
+            dst: checked.reg,
+            src: value.reg,
+            span,
+        });
+        let check = self.alloc_label();
+        let done = self.alloc_label();
+        self.instructions.push(Instr::Jump { label: check, span });
+        self.instructions.push(Instr::Label { label: check });
+        for member in members {
+            let test = self.union_member_test(checked, member, span)?;
+            let next = self.alloc_label();
+            self.instructions.push(Instr::Branch {
+                cond: test.reg,
+                then_label: done,
+                else_label: next,
+                span,
+            });
+            self.instructions.push(Instr::Label { label: next });
+        }
+        self.instructions.push(Instr::SignalTypeError {
+            dst: checked.reg,
+            values: vec![checked.reg],
+            type_error,
+            resume: check,
+            span,
+        });
+        self.instructions.push(Instr::Label { label: done });
+        Ok(checked)
+    }
+
+    /// Whether the boxed `value` is an instance of `member`, one member of
+    /// a union: a class, a limited integer type or a singleton.
+    fn union_member_test(
+        &mut self,
+        value: Value,
+        member: &TypeObject,
+        span: Span,
+    ) -> Result<Value, LowerError> {
+        Ok(match member {
+            TypeObject::Class(class) => {
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::InstanceOf {
+                    dst: result.reg,
+                    value: value.reg,
+                    input: value.kind,
+                    class: *class,
+                    span,
+                });
+                result
+            }
+            TypeObject::LimitedInteger { range, .. } => {
+                self.lower_limited_membership(value, *range, span)
+            }
+            TypeObject::Singleton(SingletonValue::Integer(integer)) => {
+                self.lower_limited_membership(value, IntRange::singleton(*integer), span)
+            }
+            TypeObject::Singleton(SingletonValue::Boolean(boolean)) => {
+                let constant = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::ConstBool {
+                    dst: constant.reg,
+                    value: *boolean,
+                    span,
+                });
+                let constant = self.box_any(constant, span)?;
+                let result = self.alloc(ValueKind::Bool);
+                self.instructions.push(Instr::Identical {
+                    dst: result.reg,
+                    lhs: value.reg,
+                    rhs: constant.reg,
+                    by_handle: false,
+                    span,
+                });
+                result
+            }
+            TypeObject::Subclass(_) | TypeObject::Union(_) => {
+                return Err(invalid_semantic(
+                    "a union's members are classes, limited types and singletons",
+                ));
+            }
+        })
+    }
+
     /// Branches on `failed`: when it holds, signals `type_error` for
     /// `values`, whose `use-value` restart supplies `result`; otherwise on
     /// to the code that follows.
@@ -13596,7 +13780,8 @@ const MAX_FOLDED_CONSTANT_SIZE: usize = 32;
 
 fn value_kind(kind: sem::ValueKind) -> Result<ValueKind, LowerError> {
     match kind {
-        sem::ValueKind::Any => Ok(ValueKind::Any),
+        // A union's values are boxed `<object>`s.
+        sem::ValueKind::Any | sem::ValueKind::Union(_) => Ok(ValueKind::Any),
         sem::ValueKind::I64 => Ok(ValueKind::I64),
         sem::ValueKind::F64 => Ok(ValueKind::F64),
         sem::ValueKind::I32 => Ok(ValueKind::I32),
@@ -13800,7 +13985,7 @@ fn dispatcher_param_kind(
         && !module.generic_param_boxes_scalars(generic.id, index);
     match generic.param_kinds.get(index).copied().flatten() {
         Some(sem::ValueKind::Any) if object_handle => ValueKind::Object(None),
-        Some(sem::ValueKind::Any) => ValueKind::Any,
+        Some(sem::ValueKind::Any | sem::ValueKind::Union(_)) => ValueKind::Any,
         Some(
             sem::ValueKind::Object(class)
             | sem::ValueKind::String(class)
@@ -14637,7 +14822,8 @@ fn entry_check(
     span: Span,
 ) -> Reg {
     match target {
-        sem::EntryTarget::Unbox(_) => value,
+        // A union parameter's body checks it on entry.
+        sem::EntryTarget::Unbox(_) | sem::EntryTarget::Union(_) => value,
         sem::EntryTarget::Range(range) => {
             let type_error =
                 type_error_site(TypeErrorKind::Range, range_expected(range), site, span);
