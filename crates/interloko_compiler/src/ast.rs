@@ -2281,20 +2281,18 @@ impl<'tree> Lowering<'tree> {
             index = annotation.as_ref().map_or(index + 1, |(_, next)| *next);
             // A method specializes each parameter on a class, or restates
             // its generic's limited type; a class object or callable type
-            // names no class to dispatch on.
+            // names no class to dispatch on. As in Dylan, a parameter that
+            // writes no type is specialized on `<object>`.
             let specializer = match annotation {
                 Some((annotation @ TypeExpr::Limited(_), _)) => Some(annotation),
                 Some((annotation, _)) => {
                     let class = self.class_annotation_name(&annotation, "method parameter", &name);
                     (!class.is_empty()).then_some(annotation)
                 }
-                None => {
-                    self.diagnostics.push(
-                        Diagnostic::error(token.span, DiagnosticCode::AstInvalidMethodSpecializer)
-                            .with_arg(DiagnosticArg::unsigned("actual_count", 0)),
-                    );
-                    None
-                }
+                None => Some(TypeExpr::Named {
+                    name: "<object>".into(),
+                    span: token.span,
+                }),
             };
             params.push(MethodParam {
                 id: AstNodeId::child(node.id, 2, &name),

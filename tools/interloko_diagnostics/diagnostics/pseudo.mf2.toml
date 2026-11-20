@@ -13,7 +13,6 @@
 "ast.unsupported-slot-option" = "[ps] slot option not supported: { $option }"
 "ast.slot-option-conflict" = "[ps] slot { $slot } takes `{ $option }` or `{ $other }`, not both"
 "ast.rest-results-unsupported" = "[ps] `#rest` results not supported; results are a fixed count"
-"ast.invalid-method-specializer" = "[ps] method parameters need specializers"
 "ast.annotation-not-class" = "[ps] { $position } { $name } needs a class, not { $type }"
 "ast.invalid-cast" = "[ps] as form is invalid"
 "ast.invalid-type-literal" = "[ps] limited form is invalid"

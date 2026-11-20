@@ -1,0 +1,27 @@
+// expect: run 47
+// expect: diagnostics 0
+
+// As in Dylan, a method parameter that writes no type is specialized on
+// `<object>`: `label`'s second parameter takes anything, and the fallback
+// method takes any receiver at all.
+
+define class <point> (<object>)
+  slot x :: <integer>, init-keyword: x:;
+end;
+
+define generic label(thing, extra);
+
+define method label(p :: <point>, extra)
+  p.x
+end;
+
+define method label(thing, extra)
+  if (instance?(extra, <integer>)) extra else 0 end
+end;
+
+define function main() => <integer>
+  let a = label(make(<point>, x: 40), "ignored");
+  let b = label("not a point", 7);
+  let c = label(#f, "no integer");
+  as(<integer>, a) + as(<integer>, b) + as(<integer>, c)
+end;

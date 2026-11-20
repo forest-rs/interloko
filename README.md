@@ -313,6 +313,9 @@ The current slices include:
   of one receiver of its class, and every other call of the name is the
   built-in's;
 - generic functions and multi-argument method dispatch over nominal classes;
+  as in Dylan, a method parameter that writes no type is specialized on
+  `<object>`, so `define method label(thing, extra)` is a fallback taking
+  any arguments;
 - Dylan's keyword parameters: `define function scale (x, #key by :: <integer>
   = 2, plus = 0)`, called as `scale(3)`, `scale(3, by: 10)` or `scale(3,
   plus: 1, by: 5)`, keywords after the positional arguments in any order.

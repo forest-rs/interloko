@@ -13,7 +13,6 @@
 "ast.unsupported-slot-option" = "unsupported slot option `{ $option }`"
 "ast.slot-option-conflict" = "slot `{ $slot }` cannot take both `{ $option }` and `{ $other }`"
 "ast.rest-results-unsupported" = "`#rest` results are not supported: a function returns a fixed number of values"
-"ast.invalid-method-specializer" = "method parameters must include explicit specializers"
 "ast.annotation-not-class" = "{ $position } `{ $name }` is declared { $type }, but it must name a class"
 "ast.invalid-cast" = "invalid as form"
 "ast.invalid-type-literal" = "`limited` takes a type and its `min:` and `max:` bounds, as in `limited(<integer>, min: 0, max: 255)`"

@@ -73,8 +73,6 @@ pub enum DiagnosticCode {
     /// A result annotation declares `#rest` results, which Loko does not
     /// support: a callee returns a fixed number of values.
     AstRestResultsUnsupported,
-    /// A method declaration has the wrong first-slice specializer shape.
-    AstInvalidMethodSpecializer,
     /// A method, generic or restart parameter, which must name a class, is
     /// annotated with a class object or callable type.
     AstAnnotationNotClass,
@@ -428,7 +426,6 @@ impl DiagnosticCode {
         Self::AstUnsupportedSlotOption,
         Self::AstSlotOptionConflict,
         Self::AstRestResultsUnsupported,
-        Self::AstInvalidMethodSpecializer,
         Self::AstAnnotationNotClass,
         Self::AstInvalidCast,
         Self::AstInvalidTypeLiteral,
@@ -594,7 +591,6 @@ impl DiagnosticCode {
             Self::AstUnsupportedSlotOption => "ast.unsupported-slot-option",
             Self::AstSlotOptionConflict => "ast.slot-option-conflict",
             Self::AstRestResultsUnsupported => "ast.rest-results-unsupported",
-            Self::AstInvalidMethodSpecializer => "ast.invalid-method-specializer",
             Self::AstAnnotationNotClass => "ast.annotation-not-class",
             Self::AstInvalidCast => "ast.invalid-cast",
             Self::AstInvalidTypeLiteral => "ast.invalid-type-literal",
@@ -763,7 +759,6 @@ impl DiagnosticCode {
             "ast.unsupported-slot-option" => Self::AstUnsupportedSlotOption,
             "ast.slot-option-conflict" => Self::AstSlotOptionConflict,
             "ast.rest-results-unsupported" => Self::AstRestResultsUnsupported,
-            "ast.invalid-method-specializer" => Self::AstInvalidMethodSpecializer,
             "ast.annotation-not-class" => Self::AstAnnotationNotClass,
             "ast.invalid-cast" => Self::AstInvalidCast,
             "ast.invalid-type-literal" => Self::AstInvalidTypeLiteral,
