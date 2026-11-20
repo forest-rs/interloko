@@ -2728,29 +2728,35 @@ impl<'tree> Lowering<'tree> {
         }
     }
 
+    /// Lowers a string literal, which as in Dylan may be several adjacent
+    /// pieces, `"ab" "cd"`, joined into one.
     fn lower_string(&mut self, node: &CstNode) -> Expr {
-        let Some((span, text)) = self.first_token_text(node, TokenKind::String) else {
+        let pieces = self.token_texts(node, TokenKind::String);
+        let (Some((first, _)), Some((last, _))) = (pieces.first(), pieces.last()) else {
             return Expr::Error {
                 id: self.ast_id(node),
                 span: node.span,
             };
         };
-        match decode_string_literal(text) {
-            Some(value) => Expr::String {
-                id: self.ast_id(node),
-                value,
-                span,
-            },
-            None => {
+        let span = first.cover(*last);
+        let mut value = String::new();
+        for (piece_span, text) in pieces {
+            let Some(piece) = decode_string_literal(text) else {
                 self.diagnostics.push(Diagnostic::error(
-                    span,
+                    piece_span,
                     DiagnosticCode::AstMalformedStringLiteral,
                 ));
-                Expr::Error {
+                return Expr::Error {
                     id: self.ast_id(node),
                     span,
-                }
-            }
+                };
+            };
+            value.push_str(&piece);
+        }
+        Expr::String {
+            id: self.ast_id(node),
+            value,
+            span,
         }
     }
 

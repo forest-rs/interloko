@@ -1,0 +1,8 @@
+// expect: diagnostic contains malformed string literal
+
+// Each piece of a joined literal is decoded on its own, so a bad escape in
+// any piece is reported at that piece.
+
+define function main() => <string>
+  "ok" "bad \q escape"
+end;

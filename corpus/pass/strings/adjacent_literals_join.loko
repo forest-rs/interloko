@@ -1,0 +1,14 @@
+// expect: run "(define (sq x)\n  (* x x))|tab\t"
+// expect: diagnostics 0
+
+// As in Dylan, adjacent string literals are one literal, so long text can
+// be written across lines, with comments between its pieces. Each piece
+// takes its own escapes.
+
+define constant $program = "(define (sq x)\n"
+                           // the body
+                           "  (* x x))";
+
+define function main() => <string>
+  concatenate(concatenate($program, "|" "tab"), "\t" "")
+end;

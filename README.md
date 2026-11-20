@@ -600,7 +600,9 @@ The current slices include:
   `as(<string>, s)` gives a symbol's name; a boxed value converts by its
   class at run time, as a number does. Unlike Dylan's, symbols keep their
   case: `#Foo` and `#foo` are different symbols;
-- strings: a `<string>` is immutable, validated UTF-8 whose header caches
+- strings: as in Dylan, adjacent string literals are one literal, so
+  `"ab" "cd"` is `"abcd"` and long text may be written across lines, with
+  comments between its pieces. A `<string>` is immutable, validated UTF-8 whose header caches
   its character count, so `size(s)` is O(1), and whether it is all ASCII.
   A string literal is a constant, as in Dylan: every evaluation of a
   literal with the same text during a run is the same string (`==`);
