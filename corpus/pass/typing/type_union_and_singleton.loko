@@ -1,0 +1,37 @@
+// expect: run 1123
+// expect: diagnostics 0
+
+// `type-union(t, ...)` holds the values of any member and `singleton(v)`
+// the one value `v`, a boolean or an `<integer>` for now. A union some
+// kind holds exactly is that kind: `false-or(<boolean>)` is a `<boolean>`,
+// and `type-union(<string>)` a `<string>`. A value that may not be one of
+// the union's is checked where it meets the declaration, and a failed
+// check signals a `<type-error>` naming the union.
+
+define function small(x :: type-union(singleton(1), singleton(2), <string>)) => <integer>
+  if (instance?(x, <string>)) 0 else as(<integer>, x) end
+end;
+
+define function flag(x :: false-or(<boolean>)) => <boolean>
+  x
+end;
+
+define function text(x :: type-union(<string>)) => <string>
+  x
+end;
+
+// What `small` makes of `x`, or 1000 when `x` is none of its union's.
+define function attempt(x) => <integer>
+  block ()
+    small(x)
+  exception (e :: <type-error>)
+    if (instance?(e.type-error-expected-type, <union>)) 1000 else 0 end
+  end
+end;
+
+define function main() => <integer>
+  let total = attempt(3) + small(1) + small(2) + small("s");
+  if (flag(#t)) total := total + 20 end;
+  if (size(text("ok")) = 2) total := total + 100 end;
+  total
+end;

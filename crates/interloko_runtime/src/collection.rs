@@ -89,6 +89,9 @@ pub(crate) enum TableKey {
     LimitedInteger(Option<i64>, Option<i64>),
     /// A `<subclass-type>`, by bound.
     Subclass(u32),
+    /// A `<singleton>` or `<union>`, by its members, in an order that does
+    /// not depend on how they were written.
+    CompoundType(String),
     /// A callable, by its code and, when it captures anything, its
     /// environment.
     Callable(FuncRef, Option<u32>),
@@ -704,6 +707,9 @@ impl InterlokoHost {
                         TableKey::LimitedInteger(range.min, range.max)
                     }
                     RuntimeObjectStorage::SubclassType { bound } => TableKey::Subclass(bound.0),
+                    RuntimeObjectStorage::CompoundType(ty) => {
+                        TableKey::CompoundType(compound_type_key(ty))
+                    }
                     _ => TableKey::Object(object.handle.0),
                 }
             }
@@ -719,6 +725,22 @@ impl InterlokoHost {
         {
             turn.write_log.push(store());
         }
+    }
+}
+
+/// The key a `<singleton>` or `<union>` type object indexes a table by:
+/// what [`interloko_model::type_object::TypeObject::same_type`] compares,
+/// so a union's members are sorted.
+fn compound_type_key(ty: &interloko_model::type_object::TypeObject) -> String {
+    use interloko_model::type_object::TypeObject;
+    match ty {
+        TypeObject::Union(members) => {
+            let mut keys = members.iter().map(compound_type_key).collect::<Vec<_>>();
+            keys.sort();
+            alloc::format!("union{keys:?}")
+        }
+        TypeObject::LimitedInteger { range, .. } => alloc::format!("{:?}", range),
+        ty => alloc::format!("{ty:?}"),
     }
 }
 

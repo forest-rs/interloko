@@ -37,8 +37,10 @@ enum CollectionKind {
 
 use interloko_model::contract::{CallableContract, Contract, ContractPosition, ValueContract};
 use interloko_model::sealing::Sealing;
-pub use interloko_model::type_object::TypeObject;
-use interloko_model::types::{Atom, ClassHierarchy, IntRange, Metaobject, Type, TypeNames};
+pub use interloko_model::type_object::{SingletonValue, TypeObject};
+use interloko_model::types::{
+    Atom, ClassHierarchy, IntRange, MAX_ATOMS, Metaobject, Relation, Type, TypeNames,
+};
 
 pub use interloko_model::condition::ConditionClass;
 pub use interloko_model::{
@@ -149,6 +151,13 @@ pub struct ClosureId(
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ConstantId(
     /// Zero-based constant index.
+    pub u32,
+);
+
+/// A union type a declaration names, an index into [`Module::unions`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct UnionId(
+    /// Zero-based index.
     pub u32,
 );
 
@@ -275,6 +284,13 @@ pub enum ValueKind {
     KnownCallable(KnownCallable),
     /// Invalid or unknown value.
     Error,
+    /// A declaration's union type, such as `false-or(<node>)` or
+    /// `type-union(<integer>, singleton(#f))`: [`Module::unions`] holds its
+    /// members. Its values are boxed `<object>`s, checked against the union
+    /// where they meet the declaration ([`Expr::CheckUnion`]), and an
+    /// expression reading the declaration has [`Self::Any`]; only a union
+    /// check has this kind.
+    Union(UnionId),
 }
 
 impl ValueKind {
@@ -1062,6 +1078,9 @@ pub struct Module {
     pub constants: Vec<Constant>,
     /// Host-backed functions made visible to this compilation.
     pub host_functions: Vec<ResolvedHostFunction>,
+    /// The union types declarations name, by [`UnionId`]: each a
+    /// [`TypeObject::Union`] or a [`TypeObject::Singleton`].
+    pub unions: Vec<TypeObject>,
     /// Semantic diagnostics.
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -1285,6 +1304,8 @@ impl Module {
                     | BuiltinValueClass::Type
                     | BuiltinValueClass::LimitedIntegerType
                     | BuiltinValueClass::SubclassType
+                    | BuiltinValueClass::SingletonType
+                    | BuiltinValueClass::UnionType
                     | BuiltinValueClass::StringBuilder
                     | BuiltinValueClass::StretchyVector
                     | BuiltinValueClass::Table
@@ -1331,7 +1352,7 @@ impl Module {
             ValueKind::Callable | ValueKind::KnownCallable(_) => {
                 self.builtin_value_class(BuiltinValueClass::Function)
             }
-            ValueKind::Any | ValueKind::Error => None,
+            ValueKind::Any | ValueKind::Union(_) | ValueKind::Error => None,
         }
     }
 
@@ -1353,37 +1374,13 @@ impl Module {
     /// - [`ValueKind::Error`] is [`Type::top`].
     #[must_use]
     pub fn kind_type(&self, kind: ValueKind) -> Type {
-        let builtin = |class: BuiltinValueClass| {
-            self.builtin_value_class(class)
-                .map_or_else(Type::top, |class| Type::of(Atom::Cone(class), self))
-        };
-        match kind {
-            ValueKind::Any | ValueKind::Error => Type::top(),
-            ValueKind::I64 => Type::of(Atom::Integer(IntRange::INTEGER), self),
-            ValueKind::I32 => Type::of(Atom::Integer(IntRange::I32), self),
-            ValueKind::U32 => Type::of(Atom::Integer(IntRange::U32), self),
-            ValueKind::F64 => builtin(BuiltinValueClass::DoubleFloat),
-            ValueKind::F32 => builtin(BuiltinValueClass::SingleFloat),
-            ValueKind::Bool => Type::union([Atom::Boolean(false), Atom::Boolean(true)], self),
-            ValueKind::Char => builtin(BuiltinValueClass::Character),
-            ValueKind::Position => builtin(BuiltinValueClass::StringPosition),
-            ValueKind::String(class)
-            | ValueKind::Symbol(class)
-            | ValueKind::Vector(class)
-            | ValueKind::Object(class) => Type::of(Atom::Cone(class), self),
-            ValueKind::ClassObject(_) => builtin(BuiltinValueClass::Class),
-            ValueKind::GenericFunctionObject(generic) => {
-                Type::of(Atom::Singleton(Metaobject::Generic(generic)), self)
-            }
-            ValueKind::MethodObject(method) => {
-                Type::of(Atom::Singleton(Metaobject::Method(method)), self)
-            }
-            ValueKind::SlotDescriptorObject { class, slot } => Type::of(
-                Atom::Singleton(Metaobject::SlotDescriptor { class, slot }),
-                self,
-            ),
-            ValueKind::Callable | ValueKind::KnownCallable(_) => Type::of(Atom::Callable, self),
-        }
+        kind_type_in(&self.classes, &self.unions, kind)
+    }
+
+    /// The type object of the union `id`, when this module has it.
+    #[must_use]
+    pub fn union_type_object(&self, id: UnionId) -> Option<&TypeObject> {
+        self.unions.get(id.0 as usize)
     }
 
     /// The locals of `definition`'s own frame, indexed by [`LocalId`], and
@@ -1698,6 +1695,16 @@ impl Module {
     /// joins whose arms do not join, report [`ValueKind::Error`].
     #[must_use]
     pub fn expr_kind(&self, expr: &Expr) -> ValueKind {
+        read_kind(expr, self.recorded_kind(expr))
+    }
+
+    /// The kind `expr` records, before [`Self::expr_kind`] reads a
+    /// declaration's union as the boxed `<object>` it holds: the union
+    /// itself for a read of a local, slot, constant or result declared one,
+    /// whose every value was checked against it. Soft typing bounds the
+    /// expression by it.
+    #[must_use]
+    pub fn recorded_kind(&self, expr: &Expr) -> ValueKind {
         match expr {
             Expr::ConstI64 { .. } | Expr::CheckRange { .. } => ValueKind::I64,
             Expr::ConstF64 { .. } => ValueKind::F64,
@@ -1756,6 +1763,7 @@ impl Module {
             Expr::Handle { restart, .. } => scalar_result_kind(&restart.result_kinds),
             Expr::Block { .. } => scalar_result_kind(&self.expr_kinds(expr)),
             Expr::Discard { .. } => ValueKind::Error,
+            Expr::CheckUnion { union, .. } => ValueKind::Union(*union),
             Expr::Cast { class, .. } if *class == OBJECT_CLASS_ID => ValueKind::Any,
             Expr::Cast { class, .. } => self
                 .builtin_value_kind(*class)
@@ -1784,6 +1792,11 @@ impl Module {
     /// [`ValueKind::Error`].
     #[must_use]
     pub fn expr_kinds(&self, expr: &Expr) -> Vec<ValueKind> {
+        read_kinds(expr, self.recorded_kinds(expr))
+    }
+
+    /// The kinds `expr` records, before [`read_kind`].
+    fn recorded_kinds(&self, expr: &Expr) -> Vec<ValueKind> {
         let join = |lhs: &[ValueKind], rhs: &[ValueKind]| {
             join_arm_kinds(&self.classes, lhs, rhs, |expected, actual| {
                 self.kind_holds(expected, actual)
@@ -1825,12 +1838,124 @@ impl Module {
     /// Returns whether values of category `actual` may flow where `expected`
     /// is required; the relation semantic checking used to build this module.
     fn kind_holds(&self, expected: ValueKind, actual: ValueKind) -> bool {
+        if let ValueKind::Union(union) = expected {
+            return union_holds(&self.classes, &self.unions, union, actual);
+        }
         kind_holds(
             expected,
             actual,
             |class, ancestor| self.is_same_or_subclass(class, ancestor),
             |kind| self.value_kind_class(kind),
         )
+    }
+}
+
+/// The kind of `expr`, which records `kind`: a declaration's union type,
+/// which a read of a local, slot, constant or result records, is a boxed
+/// `<object>` once read, and only a union check ([`Expr::CheckUnion`])
+/// has the union's kind.
+fn read_kind(expr: &Expr, kind: ValueKind) -> ValueKind {
+    match (expr, kind) {
+        (Expr::CheckUnion { .. }, kind) => kind,
+        (_, ValueKind::Union(_)) => ValueKind::Any,
+        (_, kind) => kind,
+    }
+}
+
+/// [`read_kind`] for each of the values `expr` produces.
+fn read_kinds(expr: &Expr, kinds: Vec<ValueKind>) -> Vec<ValueKind> {
+    kinds
+        .into_iter()
+        .map(|kind| read_kind(expr, kind))
+        .collect()
+}
+
+/// The values of kind `kind`, among `classes` and the union types
+/// `unions`; see [`Module::kind_type`].
+fn kind_type_in(classes: &[Class], unions: &[TypeObject], kind: ValueKind) -> Type {
+    let table = ClassTable(classes);
+    let builtin = |builtin: BuiltinValueClass| {
+        classes
+            .iter()
+            .find(|class| class.origin == ClassOrigin::BuiltinValue { kind: builtin })
+            .map_or_else(Type::top, |class| Type::of(Atom::Cone(class.id), &table))
+    };
+    match kind {
+        ValueKind::Any | ValueKind::Error => Type::top(),
+        ValueKind::I64 => Type::of(Atom::Integer(IntRange::INTEGER), &table),
+        ValueKind::I32 => Type::of(Atom::Integer(IntRange::I32), &table),
+        ValueKind::U32 => Type::of(Atom::Integer(IntRange::U32), &table),
+        ValueKind::F64 => builtin(BuiltinValueClass::DoubleFloat),
+        ValueKind::F32 => builtin(BuiltinValueClass::SingleFloat),
+        ValueKind::Bool => Type::union([Atom::Boolean(false), Atom::Boolean(true)], &table),
+        ValueKind::Char => builtin(BuiltinValueClass::Character),
+        ValueKind::Position => builtin(BuiltinValueClass::StringPosition),
+        ValueKind::String(class)
+        | ValueKind::Symbol(class)
+        | ValueKind::Vector(class)
+        | ValueKind::Object(class) => Type::of(Atom::Cone(class), &table),
+        ValueKind::ClassObject(_) => builtin(BuiltinValueClass::Class),
+        ValueKind::GenericFunctionObject(generic) => {
+            Type::of(Atom::Singleton(Metaobject::Generic(generic)), &table)
+        }
+        ValueKind::MethodObject(method) => {
+            Type::of(Atom::Singleton(Metaobject::Method(method)), &table)
+        }
+        ValueKind::SlotDescriptorObject { class, slot } => Type::of(
+            Atom::Singleton(Metaobject::SlotDescriptor { class, slot }),
+            &table,
+        ),
+        ValueKind::Callable | ValueKind::KnownCallable(_) => Type::of(Atom::Callable, &table),
+        ValueKind::Union(id) => unions
+            .get(id.0 as usize)
+            .map_or_else(Type::top, |union| type_object_type(union, &table)),
+    }
+}
+
+/// The values the type object `object` denotes. A union of classes,
+/// limited integer types and singletons, which is all a declaration may
+/// write, is exact: it has at most [`MAX_ATOMS`] members, so the lattice
+/// does not widen it. A subclass type has no atom of its own and denotes
+/// every class object.
+fn type_object_type(object: &TypeObject, hierarchy: &impl ClassHierarchy) -> Type {
+    match object {
+        TypeObject::Class(class) => Type::of(Atom::Cone(*class), hierarchy),
+        TypeObject::LimitedInteger { range, .. } => Type::of(Atom::Integer(*range), hierarchy),
+        TypeObject::Subclass(_) => hierarchy
+            .builtin_class(BuiltinValueClass::Class)
+            .map_or_else(Type::top, |class| Type::of(Atom::Cone(class), hierarchy)),
+        TypeObject::Singleton(SingletonValue::Boolean(value)) => {
+            Type::of(Atom::Boolean(*value), hierarchy)
+        }
+        TypeObject::Singleton(SingletonValue::Integer(value)) => {
+            Type::of(Atom::Integer(IntRange::singleton(*value)), hierarchy)
+        }
+        TypeObject::Union(members) => members.iter().fold(Type::bottom(), |joined, member| {
+            joined.join(&type_object_type(member, hierarchy), hierarchy)
+        }),
+    }
+}
+
+/// Whether every value of kind `actual` is a value of the union type
+/// `union`, so it needs no check where it meets a declaration of the union.
+/// A boxed `<object>` never is: typing, not its kind, may know more.
+fn union_holds(
+    classes: &[Class],
+    unions: &[TypeObject],
+    union: UnionId,
+    actual: ValueKind,
+) -> bool {
+    match actual {
+        ValueKind::Union(actual) => actual == union,
+        ValueKind::Error => true,
+        ValueKind::Any => false,
+        actual => {
+            let table = ClassTable(classes);
+            kind_type_in(classes, unions, actual).relate(
+                &kind_type_in(classes, unions, ValueKind::Union(union)),
+                &table,
+            ) == Relation::Always
+        }
     }
 }
 
@@ -1919,6 +2044,39 @@ impl ClassHierarchy for Module {
 
     fn is_same_or_subclass(&self, class: ClassId, ancestor: ClassId) -> bool {
         ClassTable(&self.classes).is_same_or_subclass(class, ancestor)
+    }
+}
+
+/// Names a class table's classes, for the types sem names while it still
+/// builds the module: a union type's members name classes only.
+impl TypeNames for ClassTable<'_> {
+    fn write_class(&self, out: &mut dyn core::fmt::Write, class: ClassId) -> core::fmt::Result {
+        match self.0.get(class.0 as usize) {
+            Some(class) => out.write_str(&class.name),
+            None => write!(out, "class#{}", class.0),
+        }
+    }
+
+    fn write_generic(
+        &self,
+        out: &mut dyn core::fmt::Write,
+        generic: GenericFunctionId,
+    ) -> core::fmt::Result {
+        write!(out, "generic#{}", generic.0)
+    }
+
+    fn write_method(&self, out: &mut dyn core::fmt::Write, method: MethodId) -> core::fmt::Result {
+        write!(out, "method#{}", method.0)
+    }
+
+    fn write_slot(
+        &self,
+        out: &mut dyn core::fmt::Write,
+        class: ClassId,
+        slot: SlotId,
+    ) -> core::fmt::Result {
+        self.write_class(out, class)?;
+        write!(out, ".s{}", slot.0)
     }
 }
 
@@ -2181,6 +2339,7 @@ impl<'a> SiteNumbering<'a> {
                 *site = self.take();
             }
             Expr::Cast { value, site, .. }
+            | Expr::CheckUnion { value, site, .. }
             | Expr::InstanceOf { value, site, .. }
             | Expr::InstanceOfLimited { value, site, .. }
             | Expr::Convert { value, site, .. }
@@ -2857,6 +3016,16 @@ impl ForPlan {
             span: binding.span,
         };
         match (&binding.type_annotation, self.checked) {
+            // A union is no type `as` converts to: the binding's
+            // declaration checks each element as a `let` would.
+            (
+                Some(
+                    ast::TypeExpr::Union { .. }
+                    | ast::TypeExpr::FalseOr { .. }
+                    | ast::TypeExpr::Singleton { .. },
+                ),
+                true,
+            ) => name,
             (Some(target), true) => ast::Expr::Cast {
                 id,
                 target: target.clone(),
@@ -3508,6 +3677,9 @@ pub enum EntryTarget {
     /// establishes it, except a character's, which only the unboxing does.
     /// An `<i32>` or `<u32>` is an `<integer>` in its range.
     Unbox(ValueKind),
+    /// One of a union's values: its register type is a boxed `<object>`,
+    /// so the body checks it on entry ([`Expr::CheckUnion`]).
+    Union(UnionId),
 }
 
 impl EntryTarget {
@@ -3533,6 +3705,7 @@ impl EntryTarget {
             | ValueKind::Bool
             | ValueKind::Char
             | ValueKind::Position => Some(Self::Unbox(kind)),
+            ValueKind::Union(union) => Some(Self::Union(union)),
             _ => None,
         }
     }
@@ -4706,6 +4879,23 @@ pub enum Expr {
         /// Source span.
         span: Span,
     },
+    /// Runtime check that a value meeting a declaration of a union type,
+    /// such as `false-or(<node>)`, is one of its values: the union's
+    /// counterpart of an inserted [`Self::Cast`]. A failure signals a
+    /// `<type-error>` (`type-error.cast`) expecting the union, whose
+    /// `use-value` replacement the check tests again. The value is a boxed
+    /// `<object>`, and this is the only expression of kind
+    /// [`ValueKind::Union`].
+    CheckUnion {
+        /// Checked value.
+        value: Box<Expr>,
+        /// The declaration's union.
+        union: UnionId,
+        /// Check site.
+        site: SiteId,
+        /// Source span.
+        span: Span,
+    },
     /// Runtime object construction of a class named by a class literal.
     MakeObject {
         /// Class object expression.
@@ -5052,6 +5242,7 @@ impl Expr {
             | Self::InstanceOf { value: inner, .. }
             | Self::InstanceOfLimited { value: inner, .. }
             | Self::Cast { value: inner, .. }
+            | Self::CheckUnion { value: inner, .. }
             | Self::AccessorCall {
                 receiver: inner, ..
             }
@@ -5199,6 +5390,7 @@ impl Expr {
             | Self::InstanceOf { span, .. }
             | Self::InstanceOfLimited { span, .. }
             | Self::Cast { span, .. }
+            | Self::CheckUnion { span, .. }
             | Self::MakeObject { span, .. }
             | Self::MakeRuntimeClass { span, .. }
             | Self::AccessorCall { span, .. }
@@ -5469,6 +5661,7 @@ pub fn visit_evaluated(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | E::InstanceOf { value: inner, .. }
         | E::InstanceOfLimited { value: inner, .. }
         | E::Cast { value: inner, .. }
+        | E::CheckUnion { value: inner, .. }
         | E::AccessorCall {
             receiver: inner, ..
         } => visit_evaluated(inner, visit),
@@ -5599,6 +5792,8 @@ const fn builtin_value_kind(kind: BuiltinValueClass, class: ClassId) -> Option<V
         | BuiltinValueClass::Type
         | BuiltinValueClass::LimitedIntegerType
         | BuiltinValueClass::SubclassType
+        | BuiltinValueClass::SingletonType
+        | BuiltinValueClass::UnionType
         | BuiltinValueClass::StringBuilder
         | BuiltinValueClass::StretchyVector
         | BuiltinValueClass::Table
@@ -5832,6 +6027,8 @@ enum CallableResultCheck {
     Convert(NumericKind),
     /// An object result is cast to the class.
     Cast(ClassId),
+    /// An object result is checked against the union.
+    Union(UnionId),
     /// An `<integer>` result is checked to be in the range.
     Range(IntRange),
     /// A value of kind `from` is cast, as a declaration narrows it, to the
@@ -5850,6 +6047,7 @@ impl CallableResultCheck {
             Self::Trusted(kind) => kind,
             Self::Convert(_) | Self::Range(_) => ValueKind::I64,
             Self::Cast(_) => ValueKind::Object(OBJECT_CLASS_ID),
+            Self::Union(_) => ValueKind::Any,
             Self::Narrow { from, .. } => from,
         }
     }
@@ -5871,6 +6069,12 @@ impl CallableResultCheck {
                 class,
                 site: SiteId::PENDING,
                 explicit: false,
+                span,
+            },
+            Self::Union(union) => Expr::CheckUnion {
+                value: Box::new(value),
+                union,
+                site: SiteId::PENDING,
                 span,
             },
             Self::Range(range) => Expr::CheckRange {
@@ -6244,6 +6448,10 @@ struct Lowering {
     /// Whether this pass assigned some untyped `let` local a value its kind
     /// does not hold, so another pass must widen it.
     untyped_widened: bool,
+    /// The union types declarations name, by [`UnionId`]; see
+    /// [`Module::unions`]. Resolving a type interns its union here, and
+    /// type resolution only reads the lowering otherwise.
+    unions: core::cell::RefCell<Vec<TypeObject>>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -6306,6 +6514,7 @@ impl Lowering {
             untyped_lets: BTreeSet::new(),
             untyped_seen: BTreeMap::new(),
             untyped_widened: false,
+            unions: core::cell::RefCell::new(Vec::new()),
             diagnostics: module.diagnostics.clone(),
         };
         lowering.collect_classes(module);
@@ -8688,6 +8897,7 @@ impl Lowering {
             closures: self.closures.clone(),
             constants: self.constants.clone(),
             host_functions: self.host_functions.clone(),
+            unions: self.unions.borrow().clone(),
             diagnostics: self.diagnostics.clone(),
         };
         check_collection_method_overrides(&mut lowered);
@@ -9676,6 +9886,7 @@ impl Lowering {
                             actual_kinds.get(index).copied().unwrap_or(ValueKind::Error);
                         if let Some(expected) = expected_kind
                             && !self.kinds_match(expected, actual_kind)
+                            && !self.union_may_hold(expected, actual_kind)
                             && self
                                 .implicit_cast_class(
                                     expected,
@@ -9782,7 +9993,17 @@ impl Lowering {
                                     })
                                     .flatten()
                             });
+                            let union =
+                                resolved.as_ref().and_then(|resolved| match resolved.kind {
+                                    ValueKind::Union(union)
+                                        if !self.kinds_match(resolved.kind, *kind) =>
+                                    {
+                                        Some(union)
+                                    }
+                                    _ => None,
+                                });
                             match (narrow, range) {
+                                _ if let Some(union) = union => CallableResultCheck::Union(union),
                                 (Some(class), range) => CallableResultCheck::Narrow {
                                     from: *kind,
                                     class,
@@ -9811,6 +10032,7 @@ impl Lowering {
                                 CallableResultCheck::Narrow { class, .. } => self
                                     .kind_for_builtin_class(*class)
                                     .unwrap_or(ValueKind::Object(*class)),
+                                CallableResultCheck::Union(union) => ValueKind::Union(*union),
                                 check => check.wire_kind(),
                             })
                             .collect::<Vec<_>>();
@@ -10038,6 +10260,22 @@ impl Lowering {
         expr: &ast::Expr,
         expected_results: Option<&[ValueKind]>,
     ) -> Expr {
+        // A declaration of a union expects a boxed `<object>`, which it
+        // checks against the union where the value meets it.
+        let boxed;
+        let expected_results = match expected_results {
+            Some(kinds) if kinds.iter().any(|kind| matches!(kind, ValueKind::Union(_))) => {
+                boxed = kinds
+                    .iter()
+                    .map(|kind| match kind {
+                        ValueKind::Union(_) => ValueKind::Any,
+                        kind => *kind,
+                    })
+                    .collect::<Vec<_>>();
+                Some(boxed.as_slice())
+            }
+            expected_results => expected_results,
+        };
         match expr {
             ast::Expr::Number { value, span, .. } => adapt_literal(
                 Expr::ConstI64 {
@@ -13545,6 +13783,20 @@ impl Lowering {
                 .push(Self::arity_mismatch(callee, arity, args.len(), span));
             return Expr::Error { span };
         }
+        // As at any declaration, a function with one overload takes a value
+        // of a type that may be its parameter's and checks it there: the
+        // `<object>` a `false-or(<character>)` reads as, say. A call with
+        // several overloads to choose among sends instead.
+        let mut args = args;
+        if let ([function], Some(classes)) = (functions, self.text_classes()) {
+            for (arg, param) in args.iter_mut().zip(function.params()) {
+                let expected = classes.result_kind(*param);
+                if !classes.arg_matches(*param, self.expr_kind(arg)) {
+                    let value = core::mem::replace(arg, Expr::Error { span: arg.span() });
+                    *arg = self.narrow(value, expected, None);
+                }
+            }
+        }
         let function = functions
             .iter()
             .find(|function| {
@@ -15133,6 +15385,7 @@ impl Lowering {
             {
                 CallableResultCheck::Cast(class)
             }
+            ValueKind::Union(union) => CallableResultCheck::Union(union),
             ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
@@ -16103,7 +16356,7 @@ impl Lowering {
         match self.expr_kinds(&test).as_slice() {
             [ValueKind::Bool] => test,
             kinds if result_kinds_contain_error(kinds) => test,
-            [ValueKind::Any] => Expr::If {
+            [ValueKind::Any | ValueKind::Union(_)] => Expr::If {
                 condition: Box::new(Expr::Identical {
                     lhs: Box::new(test),
                     rhs: Box::new(Expr::ConstBool { value: false, span }),
@@ -17379,6 +17632,20 @@ impl Lowering {
         if self.kinds_match(expected, actual) {
             return value;
         }
+        // A value that may be one of a union's is checked against it; one
+        // that never can be is left for the caller to report.
+        if let ValueKind::Union(union) = expected {
+            if !self.union_may_hold(expected, actual) {
+                return value;
+            }
+            let span = value.span();
+            return Expr::CheckUnion {
+                value: Box::new(value),
+                union,
+                site: SiteId::PENDING,
+                span,
+            };
+        }
         let Some(class) = self.implicit_cast_class(expected, actual, signature) else {
             return value;
         };
@@ -17390,6 +17657,19 @@ impl Lowering {
             explicit: false,
             span,
         }
+    }
+
+    /// Whether `expected` is a union some value of kind `actual` may be one
+    /// of, so a check where the value meets it may pass.
+    fn union_may_hold(&self, expected: ValueKind, actual: ValueKind) -> bool {
+        if !matches!(expected, ValueKind::Union(_)) {
+            return false;
+        }
+        let unions = self.unions.borrow();
+        kind_type_in(&self.classes, &unions, actual).relate(
+            &kind_type_in(&self.classes, &unions, expected),
+            &ClassTable(&self.classes),
+        ) != Relation::Never
     }
 
     /// Narrows each of `args` to the parameter kind it meets; see
@@ -17448,6 +17728,11 @@ impl Lowering {
             .zip(expected)
             .enumerate()
             .map(|(index, (actual, expected))| {
+                if let ValueKind::Union(union) = expected
+                    && !self.kinds_match(*expected, *actual)
+                {
+                    return CallableResultCheck::Union(*union);
+                }
                 match (!self.kinds_match(*expected, *actual))
                     .then(|| self.implicit_cast_class(*expected, *actual, sig(index)))
                     .flatten()
@@ -17473,6 +17758,7 @@ impl Lowering {
                 CallableResultCheck::Narrow { class, .. } => self
                     .kind_for_builtin_class(*class)
                     .unwrap_or(ValueKind::Object(*class)),
+                CallableResultCheck::Union(union) => ValueKind::Union(*union),
                 check => check.wire_kind(),
             })
             .collect::<Vec<_>>();
@@ -17544,10 +17830,12 @@ impl Lowering {
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
             | ValueKind::SlotDescriptorObject { .. }
-            | ValueKind::KnownCallable(_) => return None,
+            | ValueKind::KnownCallable(_)
+            | ValueKind::Union(_) => return None,
         };
+        // A union check's value is a boxed `<object>`.
         let source = match actual {
-            ValueKind::Any => OBJECT_CLASS_ID,
+            ValueKind::Any | ValueKind::Union(_) => OBJECT_CLASS_ID,
             ValueKind::Error => return None,
             actual => self.value_kind_class(actual)?,
         };
@@ -19037,6 +19325,11 @@ impl Lowering {
     }
 
     fn expr_kind(&self, expr: &Expr) -> ValueKind {
+        read_kind(expr, self.recorded_kind(expr))
+    }
+
+    /// The kind `expr` records, before [`read_kind`].
+    fn recorded_kind(&self, expr: &Expr) -> ValueKind {
         match expr {
             Expr::ConstI64 { .. } | Expr::CheckRange { .. } => ValueKind::I64,
             Expr::Binary { kind, .. } | Expr::Negate { kind, .. } => kind.value_kind(),
@@ -19092,6 +19385,7 @@ impl Lowering {
             Expr::ConstantRef { result_kind, .. } | Expr::SlotDefault { result_kind, .. } => {
                 *result_kind
             }
+            Expr::CheckUnion { union, .. } => ValueKind::Union(*union),
             Expr::Cast { class, .. } if *class == OBJECT_CLASS_ID => ValueKind::Any,
             Expr::Cast { class, .. } => self
                 .kind_for_builtin_class(*class)
@@ -19122,6 +19416,11 @@ impl Lowering {
     }
 
     fn expr_kinds(&self, expr: &Expr) -> Vec<ValueKind> {
+        read_kinds(expr, self.recorded_kinds(expr))
+    }
+
+    /// The kinds `expr` records, before [`read_kind`].
+    fn recorded_kinds(&self, expr: &Expr) -> Vec<ValueKind> {
         match expr {
             Expr::Values { result_kinds, .. } => result_kinds.clone(),
             Expr::CallableCall { result_kinds, .. } => result_kinds.clone(),
@@ -19326,7 +19625,7 @@ impl Lowering {
             ValueKind::Callable | ValueKind::KnownCallable(_) => {
                 self.builtin_value_class(BuiltinValueClass::Function)
             }
-            ValueKind::Any | ValueKind::Error => None,
+            ValueKind::Any | ValueKind::Union(_) | ValueKind::Error => None,
         }
     }
 
@@ -19409,6 +19708,181 @@ impl Lowering {
         self.resolve_type_expr(annotation, &mut ctx.diagnostics)
     }
 
+    /// Resolves `type-union(...)`, `false-or(...)` or `singleton(...)`.
+    ///
+    /// As in Dylan, a union's values are those of any member, and
+    /// `false-or(t)` is `type-union(t, singleton(#f))`. Its members are
+    /// flattened and each kept once; a union some kind holds exactly is that
+    /// kind (`false-or(<boolean>)` is a `<boolean>`, `type-union(<a>)` an
+    /// `<a>`), and any other is a [`ValueKind::Union`], whose values are
+    /// boxed `<object>`s checked against it where they meet a declaration.
+    fn resolve_union(
+        &self,
+        annotation: &ast::TypeExpr,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> ResolvedType {
+        let plain = |kind| ResolvedType {
+            kind,
+            callable_signature: None,
+            range: None,
+        };
+        let mut members = Vec::new();
+        if !self.union_members(annotation, &mut members, diagnostics) {
+            return plain(ValueKind::Error);
+        }
+        let union = TypeObject::union(members);
+        // The lattice holds a union exactly while its atoms fit: a class or
+        // a range is one, `<boolean>` two (`#f` and `#t`). A larger one
+        // would widen, and the declaration would no longer be its members.
+        let table = ClassTable(&self.classes);
+        let atoms = match &union {
+            TypeObject::Union(members) => members
+                .iter()
+                .map(|member| {
+                    type_object_type(member, &table)
+                        .atoms()
+                        .map_or(1, <[Atom]>::len)
+                })
+                .sum(),
+            _ => 1,
+        };
+        if atoms > MAX_ATOMS {
+            diagnostics.push(
+                Diagnostic::error(annotation.span(), DiagnosticCode::UnionTooLarge)
+                    .with_arg(DiagnosticArg::text("union", annotation.to_string()))
+                    .with_arg(DiagnosticArg::unsigned(
+                        "max",
+                        u64::try_from(MAX_ATOMS).unwrap_or(u64::MAX),
+                    )),
+            );
+            return plain(ValueKind::Error);
+        }
+        match &union {
+            TypeObject::Class(class) => {
+                return plain(match self.kind_for_builtin_class(*class) {
+                    _ if *class == OBJECT_CLASS_ID => ValueKind::Any,
+                    Some(kind) => kind,
+                    None => ValueKind::Object(*class),
+                });
+            }
+            TypeObject::LimitedInteger { range, named } => {
+                return match named {
+                    Some(limited) => plain(limited_integer_kind(*limited)),
+                    None => ResolvedType {
+                        kind: ValueKind::I64,
+                        callable_signature: None,
+                        range: Some(*range),
+                    },
+                };
+            }
+            TypeObject::Subclass(_) | TypeObject::Singleton(_) | TypeObject::Union(_) => {}
+        }
+        // The kinds a union might be exactly: a boolean, an integer, any
+        // object, or one of its member classes (holding its subclasses).
+        let class_kind = |class: ClassId| match self.kind_for_builtin_class(class) {
+            _ if class == OBJECT_CLASS_ID => ValueKind::Any,
+            Some(kind) => kind,
+            None => ValueKind::Object(class),
+        };
+        let members = match &union {
+            TypeObject::Union(members) => members.as_slice(),
+            member => core::slice::from_ref(member),
+        };
+        let candidates = [ValueKind::Bool, ValueKind::I64, ValueKind::Any]
+            .into_iter()
+            .chain(members.iter().filter_map(|member| match member {
+                TypeObject::Class(class) => Some(class_kind(*class)),
+                _ => None,
+            }))
+            .collect::<Vec<_>>();
+        let unions = self.unions.borrow();
+        let ty = type_object_type(&union, &ClassTable(&self.classes));
+        if let Some(kind) = candidates
+            .into_iter()
+            .find(|kind| kind_type_in(&self.classes, &unions, *kind) == ty)
+        {
+            return plain(kind);
+        }
+        drop(unions);
+        plain(ValueKind::Union(self.intern_union(union)))
+    }
+
+    /// Appends the members of `ty` to `out`, reporting one a union cannot
+    /// hold; returns whether every member resolved.
+    fn union_members(
+        &self,
+        ty: &ast::TypeExpr,
+        out: &mut Vec<TypeObject>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let reject = |diagnostics: &mut Vec<Diagnostic>| {
+            diagnostics.push(
+                Diagnostic::error(ty.span(), DiagnosticCode::UnionMemberType)
+                    .with_arg(DiagnosticArg::text("member", ty.to_string())),
+            );
+            false
+        };
+        match ty {
+            ast::TypeExpr::Union { members, .. } => {
+                // Every member is resolved, so each bad one is reported.
+                let mut ok = true;
+                for member in members {
+                    ok &= self.union_members(member, out, diagnostics);
+                }
+                ok
+            }
+            ast::TypeExpr::FalseOr { base, .. } => {
+                let ok = self.union_members(base, out, diagnostics);
+                out.push(TypeObject::Singleton(SingletonValue::Boolean(false)));
+                ok
+            }
+            ast::TypeExpr::Singleton { value, .. } => {
+                out.push(TypeObject::Singleton(match value {
+                    ast::SingletonLiteral::Boolean(value) => SingletonValue::Boolean(*value),
+                    ast::SingletonLiteral::Integer(value) => SingletonValue::Integer(*value),
+                    ast::SingletonLiteral::Unsupported(_) => return reject(diagnostics),
+                }));
+                true
+            }
+            ast::TypeExpr::ClassObject { .. } | ast::TypeExpr::Callable { .. } => {
+                reject(diagnostics)
+            }
+            ast::TypeExpr::Named { .. } | ast::TypeExpr::Limited(_) => {
+                let resolved = self.resolve_type_expr(ty, diagnostics);
+                let member = match resolved.kind {
+                    ValueKind::Error => return false,
+                    ValueKind::Any => TypeObject::Class(OBJECT_CLASS_ID),
+                    ValueKind::I32 => TypeObject::named(LimitedInteger::I32),
+                    ValueKind::U32 => TypeObject::named(LimitedInteger::U32),
+                    ValueKind::I64 if resolved.range.is_some() => {
+                        TypeObject::limited(resolved.range.unwrap_or(IntRange::INTEGER))
+                    }
+                    ValueKind::ClassObject(_) => return reject(diagnostics),
+                    kind => match self.value_kind_class(kind) {
+                        Some(class) => TypeObject::Class(class),
+                        None => return reject(diagnostics),
+                    },
+                };
+                out.push(member);
+                true
+            }
+        }
+    }
+
+    /// The id of the union type `union`, interned so each union a program
+    /// writes has one, whichever pass of lowering resolves it.
+    fn intern_union(&self, union: TypeObject) -> UnionId {
+        let mut unions = self.unions.borrow_mut();
+        let index = unions
+            .iter()
+            .position(|known| known.same_type(&union))
+            .unwrap_or_else(|| {
+                unions.push(union);
+                unions.len() - 1
+            });
+        UnionId(u32::try_from(index).unwrap_or(u32::MAX))
+    }
+
     /// Resolves a source type to the value kind sem gives it, the signature
     /// of a callable type, and the range of a limited integer type,
     /// reporting what does not resolve into `diagnostics`.
@@ -19457,7 +19931,33 @@ impl Lowering {
                         name: name.clone(),
                         kind,
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
+                // A call through a callable value checks its class results
+                // by casts and its arguments at the callee's entry; neither
+                // checks a union yet.
+                let written = signature
+                    .params
+                    .iter()
+                    .chain(&signature.results.values)
+                    .chain(signature.keywords.iter().map(|(_, ty)| ty));
+                let kinds = params
+                    .kinds
+                    .iter()
+                    .chain(&results.kinds)
+                    .chain(keywords.iter().map(|keyword| &keyword.kind));
+                let mut has_union = false;
+                for (written, kind) in written.zip(kinds) {
+                    if matches!(kind, ValueKind::Union(_)) {
+                        has_union = true;
+                        diagnostics.push(
+                            Diagnostic::error(written.span(), DiagnosticCode::UnionInCallableType)
+                                .with_arg(DiagnosticArg::text("union", written.to_string())),
+                        );
+                    }
+                }
+                if has_union {
+                    return plain(ValueKind::Error);
+                }
                 ResolvedType {
                     kind: ValueKind::Callable,
                     callable_signature: Some(CallableSignature {
@@ -19473,6 +19973,9 @@ impl Lowering {
                     range: None,
                 }
             }
+            ast::TypeExpr::Union { .. }
+            | ast::TypeExpr::FalseOr { .. }
+            | ast::TypeExpr::Singleton { .. } => self.resolve_union(annotation, diagnostics),
             ast::TypeExpr::Limited(limited) => match self.resolve_limited(limited, diagnostics) {
                 Some(range) => ResolvedType {
                     kind: ValueKind::I64,
@@ -19752,6 +20255,9 @@ impl Lowering {
     }
 
     fn kinds_match(&self, expected: ValueKind, actual: ValueKind) -> bool {
+        if let ValueKind::Union(union) = expected {
+            return union_holds(&self.classes, &self.unions.borrow(), union, actual);
+        }
         kind_holds(
             expected,
             actual,
@@ -19798,10 +20304,12 @@ impl Lowering {
             ValueKind::Callable | ValueKind::KnownCallable(_) => self
                 .value_kind_class(expected)
                 .is_some_and(|class| self.is_same_or_subclass(class, specializer)),
+            // A generic parameter never declares a union.
             ValueKind::ClassObject(_)
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
-            | ValueKind::SlotDescriptorObject { .. } => false,
+            | ValueKind::SlotDescriptorObject { .. }
+            | ValueKind::Union(_) => false,
         }
     }
 
@@ -19854,7 +20362,8 @@ impl Lowering {
             | ValueKind::GenericFunctionObject(_)
             | ValueKind::MethodObject(_)
             | ValueKind::SlotDescriptorObject { .. }
-            | ValueKind::KnownCallable(_) => expected == actual,
+            | ValueKind::KnownCallable(_)
+            | ValueKind::Union(_) => expected == actual,
         }
     }
 
@@ -19908,6 +20417,10 @@ impl Lowering {
                 |class| format!("class object {}", class.name),
             ),
             ValueKind::KnownCallable(callable) => self.callable_name(callable),
+            ValueKind::Union(union) => self.unions.borrow().get(union.0 as usize).map_or_else(
+                || format!("union#{}", union.0),
+                |union| union.display(&ClassTable(&self.classes)).to_string(),
+            ),
             ValueKind::Error => "<error>".into(),
         }
     }
@@ -20822,11 +21335,13 @@ mod tests {
             ValueKind::Callable,
             ValueKind::KnownCallable(KnownCallable::GenericFunction(generic)),
             ValueKind::Error,
+            ValueKind::Union(UnionId(0)),
         ];
         for kind in kinds {
             // Exhaustive, so a new kind must be added to the list above.
             let expected = match kind {
-                ValueKind::Any | ValueKind::Error => Type::top(),
+                // A union this module does not have says nothing.
+                ValueKind::Any | ValueKind::Error | ValueKind::Union(_) => Type::top(),
                 ValueKind::I64 => of(Atom::Integer(IntRange::INTEGER)),
                 ValueKind::I32 => of(Atom::Integer(IntRange::I32)),
                 ValueKind::U32 => of(Atom::Integer(IntRange::U32)),
@@ -21376,8 +21891,9 @@ mod tests {
         ));
         // With nothing narrower expected, an untyped call keeps one
         // `<object>`.
-        let untyped =
-            lower_source("define function run(f :: <callable>)\n  let r = apply(f, #[4]);\n  r\nend;");
+        let untyped = lower_source(
+            "define function run(f :: <callable>)\n  let r = apply(f, #[4]);\n  r\nend;",
+        );
         assert_eq!(untyped.diagnostics, Vec::new());
         assert_eq!(untyped.functions[0].result_kinds, [ValueKind::Any]);
     }
@@ -22704,6 +23220,70 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn union_types_resolve_to_their_kinds() {
+        let module = lower_source(
+            "define class <a> (<object>) end;\n\
+             define class <b> (<a>) end;\n\
+             define function f(o, \
+               x :: false-or(<a>), \
+               b :: false-or(<boolean>), \
+               one :: type-union(<a>), \
+               n :: type-union(<i32>, <integer>), \
+               sub :: type-union(<b>, <a>), \
+               s :: singleton(#t)) => <integer>\n  \
+             let checked :: false-or(<a>) = o;\n  \
+             let made :: false-or(<a>) = make(<a>);\n  \
+             0\nend;",
+        );
+        assert_eq!(module.diagnostics, Vec::new());
+        let a = module
+            .classes
+            .iter()
+            .find(|class| class.name == "<a>")
+            .map(|class| class.id)
+            .expect("class <a>");
+        let function = &module.functions[0];
+        let kind = |name: &str| {
+            function
+                .locals
+                .iter()
+                .find(|local| local.name == name)
+                .map(|local| local.kind)
+        };
+        // A union some kind holds exactly is that kind; the others are
+        // unions of the module, each interned once.
+        assert_eq!(kind("x"), Some(ValueKind::Union(UnionId(0))));
+        assert_eq!(kind("checked"), Some(ValueKind::Union(UnionId(0))));
+        assert_eq!(kind("b"), Some(ValueKind::Bool));
+        assert_eq!(kind("one"), Some(ValueKind::Object(a)));
+        assert_eq!(kind("n"), Some(ValueKind::I64));
+        assert_eq!(kind("sub"), Some(ValueKind::Object(a)));
+        assert_eq!(kind("s"), Some(ValueKind::Union(UnionId(1))));
+        assert_eq!(
+            module.unions,
+            [
+                TypeObject::false_or(TypeObject::Class(a)),
+                TypeObject::Singleton(SingletonValue::Boolean(true))
+            ]
+        );
+        // An `<object>` meeting the declaration is checked; an `<a>` is one
+        // of its values already.
+        let values = function
+            .body
+            .lets()
+            .map(|binding| &binding.value)
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            values[0],
+            Expr::CheckUnion {
+                union: UnionId(0),
+                ..
+            }
+        ));
+        assert!(matches!(values[1], Expr::MakeObject { .. }));
     }
 
     #[test]

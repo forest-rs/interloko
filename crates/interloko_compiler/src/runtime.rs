@@ -86,7 +86,7 @@ pub fn runtime_layout_from_sem(module: &sem::Module) -> RtRuntimeLayout {
 #[must_use]
 pub const fn runtime_value_kind(kind: sem::ValueKind) -> Option<RuntimeValueKind> {
     match kind {
-        sem::ValueKind::Any => Some(RuntimeValueKind::Any),
+        sem::ValueKind::Any | sem::ValueKind::Union(_) => Some(RuntimeValueKind::Any),
         sem::ValueKind::I64 => Some(RuntimeValueKind::I64),
         sem::ValueKind::F64 => Some(RuntimeValueKind::F64),
         sem::ValueKind::I32 => Some(RuntimeValueKind::I32),

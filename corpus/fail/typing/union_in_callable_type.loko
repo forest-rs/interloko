@@ -1,0 +1,12 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.union-in-callable-type
+// expect: diagnostic contains a callable type cannot take or return the union `false-or(<shape>)` yet
+
+// A call through a callable value checks its class results by casts and
+// its arguments at the callee's entry; neither checks a union yet.
+
+define class <shape> (<object>) end;
+
+define function apply-to(f :: callable(false-or(<shape>)) => <integer>) => <integer>
+  f(#f)
+end;

@@ -1,0 +1,21 @@
+// expect: diagnostics 1
+// expect: diagnostic code sem.union-too-large
+// expect: diagnostic contains holds more than types can name exactly: at most 8 classes, ranges and singletons, where <boolean> counts as two
+
+// The type lattice holds a union of at most eight classes, ranges and
+// singletons exactly; `<boolean>` is two of them, `#t` and `#f`. A larger
+// union would widen to something its members are not, so it is refused
+// rather than enforced loosely.
+
+define class <a1> (<object>) end;
+define class <a2> (<object>) end;
+define class <a3> (<object>) end;
+define class <a4> (<object>) end;
+define class <a5> (<object>) end;
+define class <a6> (<object>) end;
+define class <a7> (<object>) end;
+
+define function keep(x :: type-union(<boolean>, <a1>, <a2>, <a3>, <a4>, <a5>, <a6>, <a7>))
+ => <integer>
+  0
+end;

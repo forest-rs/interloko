@@ -497,7 +497,10 @@ The current slices include:
   `ascii-lowercase?`; `as-uppercase` and `as-lowercase` map one scalar to
   one, leaving a character whose mapping is longer (`ß`) unchanged.
   `digit-value` of anything but an ASCII digit signals `type-error.range`
-  with `use-value`. User definitions may shadow these names;
+  with `use-value`. A text or character function with one overload takes
+  an `<object>`, such as a `false-or(<character>)` read, checking it as a
+  declaration would (`type-error.cast`), so `c & whitespace?(c)` needs no
+  `as`. User definitions may shadow these names;
 - callables as objects: functions, closures and generic functions used as
   values are instances of the concrete `<function>` class, and every
   callable type, `<callable>` or `callable(...) => ...` with a signature,
@@ -632,6 +635,24 @@ The current slices include:
   changes it and so takes an explicit `as`. A method's limited parameter
   restates or widens its generic's range: unlike Dylan's DRM, methods do
   not dispatch on ranges, so a send's range check is the only one;
+- Dylan's union types, in any declaration but a method's or generic's
+  parameter and a callable type: `type-union(<a>, <b>)` holds the values
+  of any member, `singleton(v)` the one value `v` (`#t`, `#f` or an
+  `<integer>` for now), and `false-or(<a>)` is `type-union(<a>,
+  singleton(#f))`, the type of an optional value: `constant slot parent ::
+  false-or(<node>)`, `let frame :: false-or(<node>) = env`, `=>
+  false-or(<character>)`. A union holds classes, limited integer types and
+  singletons, at most eight, `<boolean>` counting as two. One some kind
+  holds exactly is that kind
+  (`false-or(<boolean>)` is a `<boolean>`); any other's values are boxed
+  `<object>`s, checked where they meet the declaration as a cast would
+  check them (`type-error.cast`, with `use-value`, expecting the union as a
+  `<union>` or `<singleton>` type object), and a function used as a value
+  or a closure checks a union parameter on entry. Soft typing reads a
+  union declaration as the union, so a test narrows it: where `if (frame)`
+  is true `frame` is a `<node>`, and strict code reading it proves what it
+  relies on. Writing a union as a value (`instance?(x, false-or(<a>))`) is
+  not supported yet;
 - symbols and keywords; a symbol's name is any word after `#`, reserved
   words included, so a lexer may mark its last token `#end`, and Dylan's
   `#"…"` names a symbol with any text (`#"two words"`). `as(<symbol>, s)`
@@ -806,8 +827,9 @@ The current slices include:
   not return unless a handler supplies them (`error`, which takes any
   number of arguments, is a form, not a value, for now). In the kernel: a runtime check that fails (a cast, a callable value's argument or result,
   a range, an overflow) signals a `<type-error>` naming the value, the
-  expected type (a type object: a class, a `<limited-integer>` or a
-  `<subclass-type>`, which `instance?` tests values against), the check's
+  expected type (a type object: a class, a `<limited-integer>`, a
+  `<subclass-type>`, a `<singleton>` or a `<union>`, which `instance?`
+  tests values against), the check's
   typing decision and a stable `type-error.*` code, and its `use-value`
   restart continues with a replacement of the expected type (an object a
   failed cast checks again); a send that finds no method signals a

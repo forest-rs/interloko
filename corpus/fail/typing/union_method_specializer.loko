@@ -1,0 +1,15 @@
+// expect: diagnostics 2
+// expect: diagnostic code ast.annotation-not-class
+// expect: diagnostic contains method parameter `s` is declared false-or(<shape>), but it must name a class
+// expect: diagnostic contains generic parameter `s` is declared false-or(<shape>), but it must name a class
+
+// Methods dispatch on classes, so neither a method nor its generic may
+// specialize a parameter on a union.
+
+define class <shape> (<object>) end;
+
+define generic area(s :: false-or(<shape>));
+
+define method area(s :: false-or(<shape>))
+  0
+end;

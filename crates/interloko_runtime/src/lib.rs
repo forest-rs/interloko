@@ -1851,6 +1851,9 @@ enum RuntimeObjectStorage {
     SubclassType {
         bound: ClassId,
     },
+    /// A `<singleton>` or `<union>` type object: one that holds values or
+    /// other types rather than naming a class or a range.
+    CompoundType(interloko_model::type_object::TypeObject),
     /// A kernel marker: the one object of its kind, which no other value is
     /// `==`: a direct `<object>` instance, or `#()`, the `<empty-list>`.
     Marker(Marker),
@@ -2130,6 +2133,7 @@ impl InterlokoHost {
             | RuntimeObjectStorage::SlotDescriptor { .. }
             | RuntimeObjectStorage::LimitedIntegerType { .. }
             | RuntimeObjectStorage::SubclassType { .. }
+            | RuntimeObjectStorage::CompoundType(_)
             | RuntimeObjectStorage::Marker(_) => Err(RuntimeError::InvalidSlot {
                 class: object_class,
                 slot,

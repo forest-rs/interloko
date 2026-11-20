@@ -92,6 +92,7 @@ pub(crate) fn object_bytes(object: &RuntimeObject) -> usize {
         | RuntimeObjectStorage::SlotDescriptor { .. }
         | RuntimeObjectStorage::LimitedIntegerType { .. }
         | RuntimeObjectStorage::SubclassType { .. }
+        | RuntimeObjectStorage::CompoundType(_)
         | RuntimeObjectStorage::Marker(_)
         | RuntimeObjectStorage::HostBacked { .. } => 0,
     };

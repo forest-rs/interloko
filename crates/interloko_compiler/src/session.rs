@@ -5957,7 +5957,8 @@ fn collect_dispatch_sites_in_expr(
         }
         sem::Expr::InstanceOf { value, .. }
         | sem::Expr::InstanceOfLimited { value, .. }
-        | sem::Expr::Cast { value, .. } => {
+        | sem::Expr::Cast { value, .. }
+        | sem::Expr::CheckUnion { value, .. } => {
             collect_dispatch_sites_in_expr(artifacts, owner, value, sites);
         }
         sem::Expr::MakeObject { class, fields, .. } => {
@@ -7158,13 +7159,27 @@ fn run_turn_body<'a>(
                     index,
                     kind: argument.kind(),
                 })?,
-            // An `<object>` parameter takes any of them, boxed.
+            // An `<object>` parameter takes any of them, boxed, and a
+            // union parameter any of its values: the body assumes the union,
+            // so the host's entry checks it as a Loko caller would.
             (argument, sem::ValueKind::Any) => host.box_top(argument).map_err(|_| {
                 FunctionCallError::ArgumentMaterializationFailed {
                     index,
                     kind: argument.kind(),
                 }
             })?,
+            (argument, sem::ValueKind::Union(union))
+                if module
+                    .union_type_object(union)
+                    .is_some_and(|union| function_value_in(module, argument, union)) =>
+            {
+                host.box_top(argument).map_err(|_| {
+                    FunctionCallError::ArgumentMaterializationFailed {
+                        index,
+                        kind: argument.kind(),
+                    }
+                })?
+            }
             _ => {
                 return Err(FunctionCallError::ArgumentTypeMismatch {
                     name: function_name.to_string(),
@@ -7289,15 +7304,14 @@ fn run_turn_body<'a>(
                 }
             })?)
         }
-        // An `<object>` result holding a number, boolean, character or
-        // string is reported as that value.
-        ([sem::ValueKind::Any], [value]) => {
-            host.top_value(value)
-                .ok_or_else(|| FunctionCallError::UnsupportedResult {
-                    name: function_name.to_string(),
-                    declared: sem_kind_list_label(module, &function.result_kinds),
-                })?
-        }
+        // An `<object>` or union result holding a number, boolean,
+        // character or string is reported as that value.
+        ([sem::ValueKind::Any | sem::ValueKind::Union(_)], [value]) => host
+            .top_value(value)
+            .ok_or_else(|| FunctionCallError::UnsupportedResult {
+                name: function_name.to_string(),
+                declared: sem_kind_list_label(module, &function.result_kinds),
+            })?,
         _ => {
             return Err(FunctionCallError::UnsupportedResult {
                 name: function_name.to_string(),
@@ -13948,9 +13962,53 @@ fn value_class_fingerprint(module: &sem::Module, label: &str, class: sem::ClassI
     )
 }
 
+/// Whether the host's `argument` is one of the values of the type object
+/// `ty`, a member of a union a parameter declares.
+fn function_value_in(module: &sem::Module, argument: &FunctionValue, ty: &sem::TypeObject) -> bool {
+    let builtin = |kind| module.builtin_value_class(kind);
+    let class = match argument {
+        FunctionValue::Integer(_) | FunctionValue::I32(_) | FunctionValue::U32(_) => {
+            builtin(sem::BuiltinValueClass::Integer)
+        }
+        FunctionValue::Float(_) => builtin(sem::BuiltinValueClass::DoubleFloat),
+        FunctionValue::SingleFloat(_) => builtin(sem::BuiltinValueClass::SingleFloat),
+        FunctionValue::Boolean(_) => builtin(sem::BuiltinValueClass::Boolean),
+        FunctionValue::Character(_) => builtin(sem::BuiltinValueClass::Character),
+        FunctionValue::String(_) => builtin(sem::BuiltinValueClass::String),
+    };
+    let integer = match argument {
+        FunctionValue::Integer(value) => Some(*value),
+        FunctionValue::I32(value) => Some(i64::from(*value)),
+        FunctionValue::U32(value) => Some(i64::from(*value)),
+        _ => None,
+    };
+    match ty {
+        sem::TypeObject::Class(expected) => {
+            class.is_some_and(|class| module.is_same_or_subclass(class, *expected))
+        }
+        sem::TypeObject::LimitedInteger { range, .. } => {
+            integer.is_some_and(|value| range.contains(value))
+        }
+        sem::TypeObject::Singleton(sem::SingletonValue::Integer(expected)) => {
+            integer == Some(*expected)
+        }
+        sem::TypeObject::Singleton(sem::SingletonValue::Boolean(expected)) => {
+            matches!(argument, FunctionValue::Boolean(value) if value == expected)
+        }
+        sem::TypeObject::Union(members) => members
+            .iter()
+            .any(|member| function_value_in(module, argument, member)),
+        sem::TypeObject::Subclass(_) => false,
+    }
+}
+
 fn sem_kind_label(module: &sem::Module, kind: sem::ValueKind) -> String {
     match kind {
         sem::ValueKind::Any => "object-top".into(),
+        sem::ValueKind::Union(union) => module.union_type_object(union).map_or_else(
+            || "object-top".into(),
+            |union| union.display(module).to_string(),
+        ),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::F64 => "float".into(),
         sem::ValueKind::I32 => "i32".into(),
@@ -14051,7 +14109,7 @@ const fn numeric_kind_label(kind: sem::NumericKind) -> &'static str {
 
 fn sem_kind_label_for_expr(kind: sem::ValueKind) -> String {
     match kind {
-        sem::ValueKind::Any => "object-top".into(),
+        sem::ValueKind::Any | sem::ValueKind::Union(_) => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::F64 => "float".into(),
         sem::ValueKind::I32 => "i32".into(),
@@ -14097,7 +14155,7 @@ fn sem_kind_list_label_for_expr(kinds: &[sem::ValueKind]) -> String {
 
 fn sem_kind_fingerprint(module: &sem::Module, kind: sem::ValueKind) -> String {
     match kind {
-        sem::ValueKind::Any => "object-top".into(),
+        sem::ValueKind::Any | sem::ValueKind::Union(_) => "object-top".into(),
         sem::ValueKind::I64 => "integer".into(),
         sem::ValueKind::F64 => "float".into(),
         sem::ValueKind::I32 => "i32".into(),
@@ -14208,7 +14266,7 @@ fn sem_kind_list_fingerprint(module: &sem::Module, kinds: &[sem::ValueKind]) -> 
 
 fn sem_runtime_repr(kind: sem::ValueKind) -> &'static str {
     match kind {
-        sem::ValueKind::Any => "boxed-any",
+        sem::ValueKind::Any | sem::ValueKind::Union(_) => "boxed-any",
         sem::ValueKind::I64 => "i64",
         sem::ValueKind::F64 => "f64",
         sem::ValueKind::I32 => "i32",
@@ -14688,6 +14746,12 @@ fn dump_sem_expr(out: &mut String, expr: &sem::Expr, indent: usize) {
             value, class, site, ..
         } => {
             let _ = writeln!(out, "as c{} site={site}", class.0);
+            dump_sem_expr(out, value, indent + 2);
+        }
+        sem::Expr::CheckUnion {
+            value, union, site, ..
+        } => {
+            let _ = writeln!(out, "check union#{} site={site}", union.0);
             dump_sem_expr(out, value, indent + 2);
         }
         sem::Expr::MakeObject {
@@ -15903,6 +15967,34 @@ fn fingerprint_sem_block(module: &sem::Module, block: &sem::Block) -> String {
     out
 }
 
+/// A union type's members as a fingerprint: classes by definition, so the
+/// fingerprint survives edits that renumber classes, in sorted order.
+fn union_fingerprint(module: &sem::Module, union: sem::UnionId) -> String {
+    fn member(module: &sem::Module, ty: &sem::TypeObject) -> String {
+        match ty {
+            sem::TypeObject::Class(class) => format!(
+                "class:{}",
+                module
+                    .classes
+                    .get(class.0 as usize)
+                    .map_or(0, |class| class.definition.raw())
+            ),
+            sem::TypeObject::Union(members) => {
+                let mut members = members
+                    .iter()
+                    .map(|ty| member(module, ty))
+                    .collect::<Vec<_>>();
+                members.sort();
+                members.join(",")
+            }
+            ty => format!("{ty:?}"),
+        }
+    }
+    module
+        .union_type_object(union)
+        .map_or_else(String::new, |ty| member(module, ty))
+}
+
 fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String) {
     match expr {
         sem::Expr::ConstI64 { value, .. } => {
@@ -16167,6 +16259,11 @@ fn fingerprint_sem_expr(module: &sem::Module, expr: &sem::Expr, out: &mut String
                 .get(class.0 as usize)
                 .map_or(0, |class| class.definition.raw());
             let _ = write!(out, "as({definition}:");
+            fingerprint_sem_expr(module, value, out);
+            out.push(')');
+        }
+        sem::Expr::CheckUnion { value, union, .. } => {
+            let _ = write!(out, "check-union({}:", union_fingerprint(module, *union));
             fingerprint_sem_expr(module, value, out);
             out.push(')');
         }
@@ -23910,6 +24007,57 @@ end;
     }
 
     #[test]
+    fn a_failed_union_check_tests_its_replacement_again() {
+        // `depth` takes an `<integer>` or a `<character>`: the call through
+        // an untyped `<function>` reaches its entry check, and the implicit
+        // check in `run` the direct call's argument. A replacement that is
+        // still not one of the union's values signals again; a character
+        // passes.
+        let artifacts = CompilerSession::compile_source(
+            "union.loko",
+            "define function depth(n :: type-union(<integer>, <character>)) => <integer>\n  \
+             if (instance?(n, <character>)) 10 else as(<integer>, n) end\nend;\n\
+             define function through(f :: <function>, x) => <integer>\n  \
+             as(<integer>, f(x))\nend;\n\
+             define function run(o) => <integer>\n  \
+             depth(o) + through(depth, o)\nend;\n\
+             define function main() => <integer>\n  run(\"text\")\nend;",
+            RuntimeMode::CompileOnly,
+        );
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        for policy in lower::CodegenPolicy::ALL {
+            let artifacts = artifacts.with_codegen_policy(*policy);
+            let mut reports = Vec::new();
+            let mut chooser = Scripted(|condition: &UnhandledCondition<'_>| {
+                let report = condition.type_error().expect("a type error");
+                let replacement = if reports.len() % 2 == 0 {
+                    register_of_class(condition, "<string>")
+                } else {
+                    InterlokoHost::box_top_character('x')
+                };
+                reports.push(report);
+                Choice::UseValue(vec![replacement])
+            });
+            let value = call_with_chooser(&artifacts, &mut chooser).expect("use-value resumes");
+            assert_eq!(value, FunctionValue::Integer(20), "{policy:?}");
+            let codes = reports
+                .iter()
+                .map(|report| (report.code.as_str(), report.expected.as_str()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                codes,
+                [
+                    ("type-error.cast", "type-union(<integer>, <character>)"),
+                    ("type-error.cast", "type-union(<integer>, <character>)"),
+                    ("type-error.entry", "type-union(<integer>, <character>)"),
+                    ("type-error.entry", "type-union(<integer>, <character>)"),
+                ],
+                "{policy:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_failed_cast_signals_a_type_error_and_checks_its_replacement() {
         let artifacts =
             CompilerSession::compile_source("cast.loko", SHAPE_CAST, RuntimeMode::CompileOnly);
@@ -25583,6 +25731,41 @@ end;
                 .value,
             FunctionValue::Integer(255)
         );
+    }
+
+    #[test]
+    fn host_calls_check_union_parameters_and_report_union_results() {
+        let source = "define function pick(x :: type-union(<string>, singleton(#f), singleton(3))) \
+             => false-or(<integer>)\n  if (x) 1 else #f end\nend;";
+        let artifacts =
+            CompilerSession::compile_source("union.loko", source, RuntimeMode::CompileOnly);
+        assert_eq!(artifacts.diagnostics, Vec::new());
+        let call = |argument| artifacts.call_function("pick", &[argument], None);
+        // The body assumes the union, so the host's entry checks it.
+        for refused in [FunctionValue::Integer(4), FunctionValue::Boolean(true)] {
+            let error = call(refused.clone()).expect_err("not one of the union's values");
+            assert!(
+                matches!(
+                    &error,
+                    FunctionCallError::ArgumentTypeMismatch { index: 0, expected, .. }
+                        if expected == "type-union(<string>, singleton(#f), singleton(3))"
+                ),
+                "{refused:?}: {error:?}"
+            );
+        }
+        for (argument, result) in [
+            (FunctionValue::Integer(3), FunctionValue::Integer(1)),
+            (FunctionValue::String("s".into()), FunctionValue::Integer(1)),
+            (FunctionValue::Boolean(false), FunctionValue::Boolean(false)),
+        ] {
+            assert_eq!(
+                call(argument.clone())
+                    .expect("one of the union's values")
+                    .value,
+                result,
+                "{argument:?}"
+            );
+        }
     }
 
     #[test]
