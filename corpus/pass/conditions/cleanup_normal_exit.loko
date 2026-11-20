@@ -2,7 +2,7 @@
 // expect: diagnostics 0
 // expect: dump ast contains block-expr
 // expect: dump sem contains block-expr cleanup=true
-// expect: dump lowered contains region.enter [all -> 
+// expect: dump lowered contains region.enter [stack-overflow -> 
 // expect: dump lowered contains rethrow
 
 // The cleanup runs after the body completes normally, and the block's

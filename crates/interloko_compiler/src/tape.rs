@@ -734,6 +734,7 @@ struct AbiTables {
 struct SharedTags {
     restart: TagId,
     retry: TagId,
+    stack_overflow: TagId,
 }
 
 impl SharedTags {
@@ -750,7 +751,14 @@ impl SharedTags {
                 &runtime::control::retry_payload().map(Into::into),
             )
             .map_err(build_error)?;
-        Ok(Self { restart, retry })
+        let stack_overflow = builder
+            .import_tag(runtime::control::STACK_OVERFLOW_TAG, &[])
+            .map_err(build_error)?;
+        Ok(Self {
+            restart,
+            retry,
+            stack_overflow,
+        })
     }
 }
 
@@ -1228,6 +1236,7 @@ impl AbiTables {
         match tag {
             lower::ControlTag::Restart => Ok(self.tags.restart),
             lower::ControlTag::Retry => Ok(self.tags.retry),
+            lower::ControlTag::StackOverflow => Ok(self.tags.stack_overflow),
             lower::ControlTag::Exit(signature) => self.control()?.exit_tag(signature),
         }
     }

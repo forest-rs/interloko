@@ -21336,7 +21336,11 @@ mod tests {
         let argument_count = class(&module, "<argument-count-error>");
         assert_eq!(argument_count.superclass, Some(error));
         assert_eq!(argument_count.id.0, simple.id.0 + 1);
-        assert_eq!(argument_count.id.0 as usize, module.classes.len() - 1);
+        let stack_overflow = class(&module, "<stack-overflow-error>");
+        assert_eq!(stack_overflow.superclass, Some(error));
+        assert_eq!(stack_overflow.id.0, argument_count.id.0 + 1);
+        assert_eq!(stack_overflow.id.0 as usize, module.classes.len() - 1);
+        assert!(stack_overflow.effective_slots.is_empty());
         assert_eq!(
             argument_count
                 .effective_slots

@@ -764,8 +764,8 @@ The current slices include:
   `<type-error>`, `<no-applicable-method>`, `<select-error>`,
   `<not-found-error>`, `<immutable-collection-error>`,
   `<collection-modified-error>`, `<constant-cycle-error>`,
-  `<unknown-keyword-error>`, `<simple-error>` and `<argument-count-error>`
-  defined by
+  `<unknown-keyword-error>`, `<simple-error>`, `<argument-count-error>` and
+  `<stack-overflow-error>` defined by
   the kernel. Dylan's `error(condition)` signals a condition as `signal`
   does, and `error(format-string, argument, …)` signals a `<simple-error>`
   (an `<object>` first argument is told apart at run time)
@@ -972,7 +972,16 @@ contract, aggregate and byte work budgets get as many units as the fuel.
 `CompilerSession::set_run_limits` gives the artifacts a session compiles
 their limits (a compile's run of `main` included), and
 `SessionArtifacts::set_run_limits` and `SessionRuntime::set_run_limits`
-change them for later calls; running out traps.
+change them for later calls. Running out of fuel traps. A call past the
+call depth signals `<stack-overflow-error>` instead, which a program can
+handle: `execution_tape` throws a tag at the call
+(`Limits::call_depth_exception`), and the innermost region around it (every
+function and closure body has one, as do `block` and `handle`) catches it
+and signals with that frame's handlers, exits and cleanups still in place;
+handlers and guards get 4,096 frames of headroom
+(`driver::STACK_OVERFLOW_HEADROOM`) above the stack that ran out. Once the
+stack is back under the depth, the next overflow signals again; a handler
+that needs more than the headroom traps.
 
 Compiler error and trace wrappers containing `TrapInfo` implement `Clone` and
 `Debug`, and no longer derive `Eq`/`PartialEq`: traps may carry an owned typed

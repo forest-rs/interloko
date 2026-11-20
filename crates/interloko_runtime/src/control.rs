@@ -83,6 +83,12 @@ pub const RETRY_TAG: &str = "interloko.retry";
 /// signals a `<type-error>` ([`CONDITION_TYPE_ERROR`]); a passing check
 /// costs what it did.
 pub const CHECK_FAILED_TAG: &str = "interloko.check_failed";
+/// VM tag, with no payload, that a call past the run's call depth throws
+/// instead of trapping ([`execution_tape::vm::Limits::call_depth_exception`]).
+/// Every region of Loko code catches it and signals a
+/// `<stack-overflow-error>`, with [`crate::driver::STACK_OVERFLOW_HEADROOM`]
+/// frames to handle it in.
+pub const STACK_OVERFLOW_TAG: &str = "interloko.stack_overflow";
 
 /// Whether `symbol` is a control request serviced by [`crate::driver`]
 /// rather than by a [`execution_tape::host::Host`].

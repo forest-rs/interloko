@@ -2,7 +2,7 @@
 // expect: run 9
 // expect: diagnostics 0
 // expect: dump lowered contains guarded-send g0 
-// expect: dump lowered contains region.enter [retry -> bb0]
+// expect: dump lowered contains region.enter [retry -> bb0, stack-overflow -> bb
 // expect: dump tape contains import "interloko.retry"
 // expect: dump tape contains call.link.guard
 // expect: dump tape contains ("interloko.code.fill")

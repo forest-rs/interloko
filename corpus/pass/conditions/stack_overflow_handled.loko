@@ -1,0 +1,34 @@
+// expect: run 1111
+// expect: diagnostics 0
+// call-depth: 2000
+
+// A call past the run's call depth (2,000 frames here, set by the header)
+// signals `<stack-overflow-error>`, an `<error>` a handler can catch,
+// instead of ending the run. Its handler
+// runs with frames to spare: here it calls `down`, which recurses a
+// thousand deep. Once the stack has unwound, the next overflow signals
+// again.
+
+define function forever(n :: <integer>) => <integer>
+  1 + forever(n + 1)
+end;
+
+define function down(n :: <integer>) => <integer>
+  if (n = 0) 0 else 1 + down(n - 1) end
+end;
+
+define function main() => <integer>
+  let first
+    = block ()
+        forever(0)
+      exception (e :: <stack-overflow-error>)
+        down(1000)
+      end;
+  let again
+    = block ()
+        forever(0)
+      exception (e :: <error>)
+        111
+      end;
+  first + again
+end;

@@ -1,0 +1,20 @@
+// expect: run 1
+// expect: diagnostics 0
+// call-depth: 2001
+
+// A handler's guard runs on top of the stack that ran out, in the
+// headroom kept for it, whichever frame made the refused call: here a
+// send's dispatcher, which has no handlers of its own, or the method
+// under it, depending on the depth's parity (see the 2000 twin).
+
+define generic g(n) => <integer>;
+define method g(n :: <integer>) => <integer> 1 + g(n + 1) end;
+define method g(n :: <string>) => <integer> 0 end;
+
+define function down(n :: <integer>) => <integer>
+  if (n = 0) 0 else 1 + down(n - 1) end
+end;
+
+define function main() => <integer>
+  handle g(0) with restart e :: <stack-overflow-error> when down(100) = 100 => 1 end
+end;

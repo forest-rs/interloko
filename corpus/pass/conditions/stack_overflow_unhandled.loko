@@ -1,0 +1,15 @@
+// expect: runtime code runtime.unhandled-condition
+// expect: run reports <stack-overflow-error>
+// expect: diagnostics 0
+// call-depth: 2000
+
+// With no handler, running out of stack ends the run as an unhandled
+// `<stack-overflow-error>`.
+
+define function forever(n :: <integer>) => <integer>
+  1 + forever(n + 1)
+end;
+
+define function main() => <integer>
+  forever(0)
+end;
