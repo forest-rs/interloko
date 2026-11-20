@@ -7670,6 +7670,106 @@ impl Lowering {
                     strict: false,
                 });
             }
+            if operator == promotion::NumericOperator::Compare(CompareOp::Eq) {
+                self.collect_equality_methods(generic);
+            }
+        }
+    }
+
+    /// Adds `=`'s methods beyond numbers, as Dylan's `=` has them: on any
+    /// two objects it is `==`, two strings compare their text and two
+    /// characters their scalar values. So `a = b` answers a boolean for
+    /// any objects and never signals.
+    fn collect_equality_methods(&mut self, generic: GenericFunctionId) {
+        let operator = promotion::NumericOperator::Compare(CompareOp::Eq);
+        let kinds = [
+            (OBJECT_CLASS_ID, ValueKind::Any, "object"),
+            (
+                self.builtin_value_class(BuiltinValueClass::String)
+                    .unwrap_or(OBJECT_CLASS_ID),
+                ValueKind::String(
+                    self.builtin_value_class(BuiltinValueClass::String)
+                        .unwrap_or(OBJECT_CLASS_ID),
+                ),
+                "string",
+            ),
+            (
+                self.builtin_value_class(BuiltinValueClass::Character)
+                    .unwrap_or(OBJECT_CLASS_ID),
+                ValueKind::Char,
+                "character",
+            ),
+        ];
+        for (class, kind, label) in kinds {
+            let id = MethodId(u32::try_from(self.methods.len()).unwrap_or(u32::MAX));
+            let definition = DefinitionId::new(
+                self.source_file,
+                DefinitionKind::Method,
+                operator.name(),
+                &format!("equality:{label},{label}"),
+            );
+            let span = Span::default();
+            let mut ctx = FunctionContext::new();
+            let params = ["x", "y"]
+                .iter()
+                .map(|name| {
+                    ctx.add_local(
+                        self.local_definition(definition, name),
+                        (*name).into(),
+                        kind,
+                        None,
+                        span,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let read = |local: LocalId| {
+                Box::new(Expr::Local {
+                    local,
+                    result_kind: kind,
+                    callable_signature: None,
+                    span,
+                })
+            };
+            let result = match kind {
+                ValueKind::Any => Expr::Identical {
+                    lhs: read(params[0]),
+                    rhs: read(params[1]),
+                    span,
+                },
+                ValueKind::Char => Expr::IntrinsicCall {
+                    intrinsic: Intrinsic::CharCompare(CompareOp::Eq),
+                    args: vec![*read(params[0]), *read(params[1])],
+                    result_kind: ValueKind::Bool,
+                    span,
+                },
+                _ => Expr::ValueEqual {
+                    lhs: read(params[0]),
+                    rhs: read(params[1]),
+                    kind,
+                    span,
+                },
+            };
+            self.methods.push(Method {
+                id,
+                definition,
+                generic,
+                specializer: class,
+                specializers: vec![Some(class), Some(class)],
+                param: params[0],
+                params,
+                locals: ctx.locals,
+                body: Block {
+                    statements: Vec::new(),
+                    result,
+                    span,
+                },
+                result_ranges: vec![None],
+                result_kinds: vec![ValueKind::Bool],
+                return_annotation: Some(vec![ValueKind::Bool]),
+                span,
+                origin: MethodOrigin::Numeric { operator },
+                strict: false,
+            });
         }
     }
 
@@ -15012,6 +15112,16 @@ impl Lowering {
                 span,
             };
         }
+        // `=` is defined on any two objects, as in Dylan: an `<object>`
+        // operand sends to its generic, whose default method is `==`.
+        if lhs_kind == ValueKind::Any || rhs_kind == ValueKind::Any {
+            return self.numeric_dispatch(
+                promotion::NumericOperator::Compare(op.into()),
+                vec![lhs, rhs],
+                span,
+            );
+        }
+
         ctx.diagnostics.push(
             Diagnostic::error(span, DiagnosticCode::ComparisonOperandTypeMismatch)
                 .with_arg(DiagnosticArg::text("lhs", self.kind_name(lhs_kind)))

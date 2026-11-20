@@ -1,0 +1,29 @@
+// expect: run 1023
+// expect: diagnostics 0
+
+// As in Dylan, `=` is defined on any two objects: numbers compare by
+// value, strings by their text, characters by scalar value, and anything
+// else by identity, `==`. So an untyped `=` answers a boolean and never
+// signals.
+
+define class <point> (<object>) end;
+
+define function same?(a, b) => <boolean> a = b end;
+
+define function main() => <integer>
+  let p = make(<point>);
+  let text :: <string> = "loko";
+  let boxed :: <object> = concatenate("lo", "ko");
+  let checks = 0;
+  if (same?(#y, #y)) checks := checks + 1 end;
+  if (same?("ab", concatenate("a", "b"))) checks := checks + 2 end;
+  if (~same?(#y, "y")) checks := checks + 4 end;
+  if (same?(p, p) & ~same?(p, make(<point>))) checks := checks + 8 end;
+  if (same?('a', 'a') & ~same?('a', 'b')) checks := checks + 16 end;
+  if (same?(1, 1.0) & ~same?(1, "1")) checks := checks + 32 end;
+  if (text = boxed & boxed = text) checks := checks + 64 end;
+  if (same?(#t, #t) & ~same?(#t, #f)) checks := checks + 128 end;
+  if (~same?(p, 1)) checks := checks + 256 end;
+  if (same?(3, 3)) checks := checks + 512 end;
+  checks
+end;
